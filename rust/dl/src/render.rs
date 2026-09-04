@@ -2723,6 +2723,13 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             "Could not create a file to pass the GitHub token to devpod ({reason}), so this \
              workspace opens without a GitHub login."
         ),
+        LaunchNotice::ClaudeProfileBound { name, source } => format!(
+            "Claude profile {}: {} is the container's Claude configuration, so `claude` \
+             there runs as that account and refreshes its own login. Changing profile is \
+             a `recreate`, since a mount lands only when the container is created.",
+            python_repr(name),
+            source.display()
+        ),
         LaunchNotice::ClaudeProfileNotForwarded { name } => format!(
             "Ignoring --claude-profile {}: this workspace's Claude configuration is not the \
              host's to forward into, so `claude` runs as whichever account that configuration \
