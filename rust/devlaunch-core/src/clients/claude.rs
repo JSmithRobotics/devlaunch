@@ -91,7 +91,10 @@ const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
 const CONFIG_RELPATH: &str = ".claude";
 
 /// The credential file's name inside whichever directory the above resolves to.
-const CREDENTIALS_FILENAME: &str = ".credentials.json";
+/// Shared with [`crate::flows::provision`], which needs the same name to decide whether a
+/// mount covers the credential. One definition rather than two: a second spelling of this
+/// is a second copy of a fact, and the two would decide different things.
+pub(crate) const CREDENTIALS_FILENAME: &str = ".credentials.json";
 
 /// The key the OAuth credential sits under, and the field wanted from it.
 const OAUTH_KEY: &str = "claudeAiOauth";

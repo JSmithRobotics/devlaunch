@@ -70,6 +70,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
+use crate::clients::claude::CREDENTIALS_FILENAME;
 use crate::clients::devpod::{self, Call, NotRun};
 use crate::notices::Notices;
 use crate::runner::interrupt;
@@ -1014,9 +1015,32 @@ pub(crate) fn probe_script() -> String {
 /// nothing mounted. But the other direction matters just as much and a descendants
 /// scan is blind to it: a devcontainer that binds the host's whole `$HOME` onto the
 /// container's home puts nothing under `~/.claude` and owns every byte in it. So
-/// the scan matches a mount point that *is* the directory, one **under** it, and
-/// one **above** it. Field 4 of a `mountinfo` line is the mount's root within its
-/// source filesystem, which is the same subpath `findmnt` prints in brackets.
+/// the scan matches a mount point that *is* the directory, one **above** it, and
+/// the credential file itself. Field 4 of a `mountinfo` line is the mount's root
+/// within its source filesystem, which is the same subpath `findmnt` prints in
+/// brackets.
+///
+/// # Why the credential and not every descendant
+///
+/// This matched *every* descendant, and that read one mount too many. What the
+/// verdict decides is whether to forward a login, and the reason not to is a
+/// credential the container already has that can refresh itself — so the question
+/// is who owns `.credentials.json`, not who owns anything in the directory. A
+/// read-only bind of `~/.claude/skills` owns instructions and no login at all.
+///
+/// Under the old rule those were the same answer, and the cost was concrete: a
+/// devcontainer could share the developer's `agents/`, `commands/`, `hooks/`,
+/// `skills/` and `wf-skills/` — which is what this repo's own feature exists to do
+/// — or it could use `--claude-profile`, and never both, because any one of those
+/// five mounts read as somebody else owning the login. Sharing instructions is not
+/// evidence of owning a credential.
+///
+/// The historical shape the descendants scan was added for still convicts, because
+/// it mounted the credential *by name*: `p == d "/" c` is that mount exactly. What
+/// stops convicting is the `settings.json` beside it, which is the right call for
+/// this verdict — a mounted `settings.json` is a configuration question and this
+/// value answers a credential one. Nothing weakens in the direction that costs a
+/// login: the directory mount and every ancestor of it convict as before.
 ///
 /// `/` is not among the ancestors an `index` test can match — `$5 "/"` is `//`,
 /// which no absolute path has as a prefix — and that is the right answer rather
@@ -1056,12 +1080,13 @@ fn claude_config_lines() -> Vec<String> {
         // the awk's and a pipeline's is the last command's: `tr` succeeds cheerfully
         // in an image where `awk` was never installed, which is exactly the case
         // `cfg_scan` exists to notice.
-        "  if cfg_mounts=$(awk -v d=\"$cfg_dir\" -v ORS=' ' '".to_owned(),
+        format!("  if cfg_mounts=$(awk -v d=\"$cfg_dir\" -v c={CREDENTIALS_FILENAME} -v ORS=' ' '"),
         "        { p = $5".to_owned(),
         "          gsub(/\\\\040/, \" \", p)".to_owned(),
         "          gsub(/\\\\011/, \"\\t\", p)".to_owned(),
-        "          if (p == d || index(p, d \"/\") == 1 || index(d \"/\", p \"/\") == 1)"
-            .to_owned(),
+        // At the directory, above it, or the credential file itself. Not every
+        // descendant: see the rule above.
+        "          if (p == d || index(d \"/\", p \"/\") == 1 || p == d \"/\" c)".to_owned(),
         "            print $4".to_owned(),
         "        }' /proc/self/mountinfo 2>/dev/null); then".to_owned(),
         format!("    cfg_scan={CLAUDE_SCAN_OK}"),
@@ -1304,7 +1329,7 @@ impl ClaudeConfig {
     }
 }
 
-/// Whether any mount touching the config directory came from outside the container.
+/// Whether a mount that owns the config directory's credential came from outside.
 ///
 /// The one definition, asked on the host of what the container reported, exactly as
 /// [`is_official_claude`] is. The container prints paths; this says what they mean.
@@ -2794,11 +2819,11 @@ echo "devlaunch-probe claudedir $cfg_dir"
 cfg_scan=no
 cfg_mounts=
 if [ -n "$cfg_dir" ] && [ -r /proc/self/mountinfo ]; then
-  if cfg_mounts=$(awk -v d="$cfg_dir" -v ORS=' ' '
+  if cfg_mounts=$(awk -v d="$cfg_dir" -v c=.credentials.json -v ORS=' ' '
         { p = $5
           gsub(/\\040/, " ", p)
           gsub(/\\011/, "\t", p)
-          if (p == d || index(p, d "/") == 1 || index(d "/", p "/") == 1)
+          if (p == d || index(d "/", p "/") == 1 || p == d "/" c)
             print $4
         }' /proc/self/mountinfo 2>/dev/null); then
     cfg_scan=ok
@@ -4402,25 +4427,45 @@ fi
     }
 
     #[test]
-    fn a_feature_that_mounts_only_paths_underneath_is_still_foreign() {
+    fn a_credential_mounted_by_name_is_still_foreign() {
         // The shape a check on the directory alone cannot see, and the one that costs
         // real host state: before it switched to mounting the directory, this repo's
         // own feature bound nine individual paths under `~/.claude` -- among them
         // `settings.json` read-only and `.credentials.json` read-write. `findmnt
         // --target` on the directory answers for the container's own filesystem and
-        // reports nothing, so the probe scans descendants instead.
+        // reports nothing, so the probe matches the credential file by name.
+        //
+        // Only the credential's root reaches the host now: the probe no longer prints a
+        // `settings.json` mount, so this fixture is what the scan would emit for that
+        // historical container rather than every mount it had.
         let report = claude_report(
             "/home/vscode",
-            &[
-                "/home/hostuser/.claude/settings.json",
-                "/home/hostuser/.claude/.credentials.json",
-                "/home/hostuser/.claude/agents",
-            ],
+            &["/home/hostuser/.claude/.credentials.json"],
         );
         assert_eq!(
             ClaudeConfig::parse(&report, ELSEWHERE),
             Some(ClaudeConfig::Foreign),
             "a credential mounted from the host must never be written over"
+        );
+    }
+
+    #[test]
+    fn shared_instruction_directories_are_not_evidence_of_a_login() {
+        // The five read-only mounts this repo's feature uses to share the developer's
+        // agents, commands, hooks and skills. Every one of them is a host path under
+        // the config directory, and under the old every-descendant rule any single one
+        // read as somebody else owning the login -- which made sharing instructions and
+        // `--claude-profile` mutually exclusive for no reason that survives stating.
+        //
+        // The probe is what excludes them, so the roots below are what it would print
+        // for such a container: nothing. This asserts the verdict that empty scan earns,
+        // and `the_probe_scan_agrees_with_its_rust_twin` is what holds the probe to
+        // printing nothing for them.
+        let report = claude_report("/home/vscode", &[]);
+        assert_eq!(
+            ClaudeConfig::parse(&report, ELSEWHERE),
+            Some(ClaudeConfig::Ours),
+            "instructions are not a credential"
         );
     }
 
@@ -4606,9 +4651,12 @@ fi
                 let mut fields = line.split(' ').skip(3);
                 let root = fields.next()?;
                 let point = unescape_mount(fields.next()?);
+                // The probe's rule, second implementation: at the directory, above
+                // it, or the credential file itself.
+                let credential = format!("{cfg_dir}/{CREDENTIALS_FILENAME}");
                 let matches = point == cfg_dir
-                    || point.starts_with(&with_slash)
-                    || with_slash.starts_with(&format!("{point}/"));
+                    || with_slash.starts_with(&format!("{point}/"))
+                    || point == credential;
                 matches.then(|| root.to_owned())
             })
             .collect()
@@ -4961,25 +5009,49 @@ fi
     /// A container's mount table: the host's home bound onto the container's, one
     /// file bound underneath the config directory, and a tmpfs beside it.
     const FIXTURE_MOUNTS: &[(&str, &str)] = &[
+        // An ancestor: the host's whole home onto the container's.
         ("/host/hostuser", "/home/vscode"),
+        // The credential, mounted by name. The historical shape, and the one the
+        // verdict exists for.
+        (
+            "/host/hostuser/.claude/.credentials.json",
+            "/home/vscode/.claude/.credentials.json",
+        ),
+        // A descendant that is not the credential: shared instructions.
+        (
+            "/host/hostuser/.claude/skills",
+            "/home/vscode/.claude/skills",
+        ),
+        // Another, and the one that used to convict alongside the credential.
         (
             "/host/hostuser/.claude/settings.json",
             "/home/vscode/.claude/settings.json",
         ),
+        // A sibling directory, no business of ours.
         ("/host/cache", "/home/vscode/.cache"),
     ];
 
     #[test]
-    fn the_scan_sees_a_mount_above_the_config_directory_as_well_as_under_it() {
-        // The shape a descendants-only scan is blind to, and the reason `findmnt` was
-        // rejected in the first place cuts both ways: a devcontainer that binds the
-        // host's whole `$HOME` onto the container's home puts nothing under
-        // `~/.claude` and owns every byte in it. `/` is not among the ancestors and
-        // must not be, since the container's own root filesystem cannot be evidence
-        // against itself, and the `.cache` mount is a sibling and no business of ours.
+    fn the_scan_sees_an_ancestor_and_the_credential_and_nothing_else() {
+        // Three things at once, and each is a rule.
+        //
+        // The ancestor: the shape a descendants-only scan is blind to, and the reason
+        // `findmnt` was rejected cuts both ways -- a devcontainer that binds the host's
+        // whole `$HOME` onto the container's home puts nothing under `~/.claude` and
+        // owns every byte in it. `/` is not among the ancestors and must not be, since
+        // the container's own root filesystem cannot be evidence against itself.
+        //
+        // The credential, mounted by name: still convicted, which is the whole point of
+        // scanning downwards at all.
+        //
+        // And `skills` and `settings.json`, which are not. They own instructions and
+        // configuration, not a login, and convicting them is what made sharing the
+        // developer's skills and using `--claude-profile` mutually exclusive.
+        //
+        // `.cache` is a sibling and matches in no direction.
         assert_eq!(
             scan_against(FIXTURE_MOUNTS, "/home/vscode/.claude"),
-            vec!["/host/hostuser", "/host/hostuser/.claude/settings.json"]
+            vec!["/host/hostuser", "/host/hostuser/.claude/.credentials.json"]
         );
     }
 
