@@ -348,6 +348,21 @@ const DEFAULT_PROFILE: &str = "default";
 /// of the feature. Two accounts on one machine is what profiles are for, so a typo
 /// that silently forwarded the other one would be worse than a launch that stops: the
 /// launch you can see, and the wrong account you find out about later, somewhere else.
+/// Where a named profile's configuration directory is, if the name is one.
+///
+/// One definition, because two consumers need the same answer for different reasons:
+/// [`from_profile`] reads the credential inside it, and
+/// [`crate::flows::launch::ClaudeProfileMount`] binds the directory itself into a
+/// container. A second spelling of this join is a second copy of a fact, and the two
+/// could name different directories.
+///
+/// `None` for a name [`ProfileName::parse`] rejects, or where no root resolved at all.
+#[must_use]
+pub(crate) fn profile_dir(profiles_root: Option<&Path>, named: &str) -> Option<PathBuf> {
+    let name = ProfileName::parse(named)?;
+    Some(profiles_root?.join(name.as_str()))
+}
+
 fn from_profile(named: &str, profiles_root: Option<&Path>) -> TokenLookup {
     let Some(name) = ProfileName::parse(named) else {
         return TokenLookup::Missing(NoToken::ProfileNotAName(named.to_owned()));
