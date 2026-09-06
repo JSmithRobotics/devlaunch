@@ -83,8 +83,8 @@ use crate::flows::lifecycle::{
 use crate::flows::listing::CommandContext;
 use crate::flows::provision::verdict_cache::VerdictCache;
 use crate::flows::provision::{
-    self, ClaudeConfig, ClaudeMountFacts, DevpodMissing, HostLayout, PassOccasion, ProvisionEvent,
-    Provisioning, Switches, ZellijSwitch,
+    self, CLAUDE_CONFIG_TARGET, ClaudeConfig, ClaudeMountFacts, DevpodMissing, HostLayout,
+    PassOccasion, ProvisionEvent, Provisioning, Switches, ZellijSwitch,
 };
 use crate::flows::records::{self, Records, RecordsNotice, StartupError};
 use crate::flows::repo_manager::CacheNotice;
@@ -820,25 +820,14 @@ fn write_options_cache(cache_path: &Path, options: &BTreeMap<String, String>) {
 // the shared pixi package cache
 // ===========================================================================
 
-/// Where a named Claude profile is bound inside a container, and the value
-/// `CLAUDE_CONFIG_DIR` takes there.
-///
-/// Outside every home directory for [`PIXI_CACHE_TARGET`]'s reason, and the same
-/// `/var/tmp` for the same two properties: nothing above the leaf is invented, and
-/// the path still works with nothing mounted on it, since devpod re-applies
-/// `--workspace-env` on every `up` while a mount only lands at creation.
-///
-/// A constant and not the container's `~/.claude`, because `dl` cannot know the
-/// container's `$HOME` before the container exists — and because the point is to be
-/// somewhere a devcontainer has not already mounted something. Two binds at one
-/// target is not a last-one-wins: docker refuses the create outright with
-/// `Duplicate mount point`, so overriding a devcontainer's own `~/.claude` mount is
-/// not available and stepping past it is what this does instead. Measured:
-/// `--workspace-env` beats a `devcontainer.json` `containerEnv` and a Feature's,
-/// so the redirect holds against a devcontainer that sets the variable itself.
-pub(crate) const CLAUDE_CONFIG_TARGET: &str = "/var/tmp/devlaunch-claude";
-
 /// Whether this launch binds a Claude profile in as the container's configuration.
+///
+/// [`crate::flows::provision::CLAUDE_CONFIG_TARGET`] is where it lands and the
+/// value `CLAUDE_CONFIG_DIR` takes there -- one definition, since a second
+/// spelling of that path is exactly the mistake this repo's "second copy of a
+/// fact" rule exists to catch. It moved to `provision` because
+/// [`ClaudeConfig::parse`] needs to compare against it directly, to decide
+/// [`ClaudeConfig::Bound`].
 ///
 /// # Why a mount and not the forwarded token
 ///
@@ -2381,13 +2370,24 @@ impl<'a> SessionContext<'a> {
         // credentials *file* beats `CLAUDE_CODE_OAUTH_TOKEN` -- measured), and the
         // forwarded token covers every launch that did not create a container.
         let seen = self.claude_seen.get();
-        if seen.config() != Some(ClaudeConfig::Ours) {
-            if let Some(name) = self.host.claude.profile.as_deref()
-                && let Some(notice) = claude_profile_mount_notice(name, seen.mount())
-            {
-                notices.say(notice);
+        let config = seen.config();
+        match config {
+            Some(ClaudeConfig::Ours) => {}
+            // `dl` bound a named profile in itself, and forwarding never applies
+            // here regardless of how it turned out -- the mount is what carries the
+            // credential, not this call. It still falls to the same table below
+            // rather than an early return: a bind that landed but is not actually
+            // writable earns the same word an unwritable `Foreign` one would, and
+            // `claude_profile_mount_notice` is what already knows Bound needs only
+            // writability asked, since [`ClaudeConfig::parse`] settled the rest.
+            Some(ClaudeConfig::Bound) | Some(ClaudeConfig::Foreign) | None => {
+                if let Some(name) = self.host.claude.profile.as_deref()
+                    && let Some(notice) = claude_profile_mount_notice(name, config, seen.mount())
+                {
+                    notices.say(notice);
+                }
+                return Ok(None);
             }
-            return Ok(None);
         }
         match claude::resolve_token(
             self.host.home.as_deref(),
@@ -2418,31 +2418,49 @@ impl<'a> SessionContext<'a> {
     }
 }
 
-/// Which notice a named profile earns when the container's Claude config is not
-/// the host's to forward into ([`ClaudeConfig::Ours`]) -- `None` for a mount
-/// the probe saw genuinely working, which is what suppresses
-/// [`LaunchNotice::ClaudeProfileNotForwarded`] on a container that *was*
-/// created with a profile bound.
+/// Which notice a named profile earns when [`ClaudeConfig::Ours`] does not
+/// apply -- [`forwarded_claude`] calls this for `Bound`, `Foreign` and `None`
+/// alike, since none of the three forward a token and any of the three can
+/// still owe a word about why.
 ///
-/// | target mounted | dir == target | writable | verdict |
-/// |---|---|---|---|
-/// | yes | yes | yes | none -- the mount is working |
-/// | yes | yes | no | [`LaunchNotice::ClaudeProfileMountUidMismatch`] when both uids are known, [`LaunchNotice::ClaudeProfileNotForwarded`] otherwise |
-/// | yes | no | * | [`LaunchNotice::ClaudeProfileMountRedirected`] |
-/// | no, or unknown anywhere in the row above | | | [`LaunchNotice::ClaudeProfileNotForwarded`] |
+/// `Bound` short-circuits most of what this used to reconstruct: comparing
+/// `mount.dir()` against [`CLAUDE_CONFIG_TARGET`] here duplicated the very
+/// comparison [`ClaudeConfig::parse`] already made to decide `Bound` in the
+/// first place. So where `config` is `Bound`, the target is already known
+/// mounted and the effective directory already known to equal it -- all that
+/// is left to ask is writability, which `parse` deliberately left out of the
+/// decision (see [`ClaudeConfig::Bound`]'s own doc): a bound-but-unwritable
+/// config is still `Bound`, and the uid mismatch below still fires for it.
 ///
-/// Conditioned entirely on what the probe saw, never on whether *this* launch
-/// asked for a bind -- see `forwarded_claude`'s own note on why `ClaudeProfileMount::ensure`
-/// cannot answer this. A missing fact never claims success and never names a
-/// cause it cannot back up: every combination not named above falls to the
-/// existing, unqualified notice rather than guessing.
-fn claude_profile_mount_notice(name: &str, mount: &ClaudeMountFacts) -> Option<LaunchNotice> {
-    let dir_is_target = mount.dir().map(|dir| dir == CLAUDE_CONFIG_TARGET);
-    Some(
-        match (mount.target_mounted(), dir_is_target, mount.writable()) {
-            (Some(true), Some(true), Some(true)) => return None,
-            (Some(true), Some(true), Some(false)) => match (mount.container_uid(), mount.dir_uid())
-            {
+/// | config | writable | verdict |
+/// |---|---|---|
+/// | `Bound` | yes | none -- the mount is working |
+/// | `Bound` | no | [`LaunchNotice::ClaudeProfileMountUidMismatch`] when both uids are known, [`LaunchNotice::ClaudeProfileNotForwarded`] otherwise |
+/// | `Bound` | unknown | [`LaunchNotice::ClaudeProfileNotForwarded`] |
+///
+/// Not `Bound` (`Foreign` or `None`), the comparison against the target is
+/// still the only way to notice a redirected bind, since that shape -- the
+/// bind landed but something re-pointed `CLAUDE_CONFIG_DIR` away from it --
+/// is precisely a container `parse` did *not* call `Bound`:
+///
+/// | target mounted | dir == target | verdict |
+/// |---|---|---|
+/// | yes | no | [`LaunchNotice::ClaudeProfileMountRedirected`] |
+/// | anything else | | [`LaunchNotice::ClaudeProfileNotForwarded`] |
+///
+/// A missing fact never claims success and never names a cause it cannot back
+/// up: every combination not named above falls to the existing, unqualified
+/// notice rather than guessing. See `forwarded_claude`'s own note on why
+/// `ClaudeProfileMount::ensure` cannot answer this in `config`'s place.
+fn claude_profile_mount_notice(
+    name: &str,
+    config: Option<ClaudeConfig>,
+    mount: &ClaudeMountFacts,
+) -> Option<LaunchNotice> {
+    if config == Some(ClaudeConfig::Bound) {
+        return match mount.writable() {
+            Some(true) => None,
+            _ => Some(match (mount.container_uid(), mount.dir_uid()) {
                 (Some(container_uid), Some(dir_uid)) => {
                     LaunchNotice::ClaudeProfileMountUidMismatch {
                         name: name.to_owned(),
@@ -2457,17 +2475,20 @@ fn claude_profile_mount_notice(name: &str, mount: &ClaudeMountFacts) -> Option<L
                 _ => LaunchNotice::ClaudeProfileNotForwarded {
                     name: name.to_owned(),
                 },
-            },
-            (Some(true), Some(false), _) => LaunchNotice::ClaudeProfileMountRedirected {
-                name: name.to_owned(),
-                target: PathBuf::from(CLAUDE_CONFIG_TARGET),
-                effective: mount.dir().unwrap_or_default().to_owned(),
-            },
-            _ => LaunchNotice::ClaudeProfileNotForwarded {
-                name: name.to_owned(),
-            },
+            }),
+        };
+    }
+    let dir_is_target = mount.dir().map(|dir| dir == CLAUDE_CONFIG_TARGET);
+    Some(match (mount.target_mounted(), dir_is_target) {
+        (Some(true), Some(false)) => LaunchNotice::ClaudeProfileMountRedirected {
+            name: name.to_owned(),
+            target: PathBuf::from(CLAUDE_CONFIG_TARGET),
+            effective: mount.dir().unwrap_or_default().to_owned(),
         },
-    )
+        _ => LaunchNotice::ClaudeProfileNotForwarded {
+            name: name.to_owned(),
+        },
+    })
 }
 
 /// SSH into a workspace, optionally running a command.
@@ -7664,8 +7685,10 @@ mod tests {
     #[test]
     fn a_mount_the_probe_confirms_is_working_gets_no_notice_at_all() {
         // Row 1: mounted, the effective directory is the target, and it is
-        // writable. The mount is doing its job, so `ClaudeProfileNotForwarded`
-        // would read as a failure when everything worked.
+        // writable -- which is exactly what `ClaudeConfig::parse` now calls
+        // `Bound`, decided ahead of this table rather than reconstructed by it.
+        // The mount is doing its job, so `ClaudeProfileNotForwarded` would read
+        // as a failure when everything worked.
         let scene = a_scene_naming_a_profile();
         let mount = ClaudeMountFacts::synthetic(
             Some(CLAUDE_CONFIG_TARGET),
@@ -7675,15 +7698,16 @@ mod tests {
             Some(1000),
         );
         let (opened, notices) =
-            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Foreign), mount);
+            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Bound), mount);
         assert!(opened.is_ok(), "{opened:?}");
         assert!(claude_profile_notices(&notices).is_empty(), "{notices:?}");
     }
 
     #[test]
     fn a_mount_the_containers_uid_cannot_write_names_both_uids_and_the_devcontainer() {
-        // Row 2: mounted and pointed at correctly, but not writable -- and the
-        // probe can name why, because it saw both uids.
+        // Row 2: mounted and pointed at correctly -- so `ClaudeConfig::parse` calls
+        // it `Bound` regardless of writability, per its own decision -- but not
+        // writable, and the probe can name why because it saw both uids.
         let scene = a_scene_naming_a_profile();
         let mount = ClaudeMountFacts::synthetic(
             Some(CLAUDE_CONFIG_TARGET),
@@ -7693,7 +7717,7 @@ mod tests {
             Some(1001),
         );
         let (opened, notices) =
-            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Foreign), mount);
+            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Bound), mount);
         assert!(opened.is_ok(), "{opened:?}");
         assert_eq!(
             claude_profile_notices(&notices),
@@ -7766,7 +7790,7 @@ mod tests {
             None,
         );
         let (opened, notices) =
-            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Foreign), mount);
+            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Bound), mount);
         assert!(opened.is_ok(), "{opened:?}");
         assert_eq!(
             claude_profile_notices(&notices),

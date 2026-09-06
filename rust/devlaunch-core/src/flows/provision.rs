@@ -72,7 +72,6 @@ use sha2::{Digest as _, Sha256};
 
 use crate::clients::claude::CREDENTIALS_FILENAME;
 use crate::clients::devpod::{self, Call, NotRun};
-use crate::flows::launch::CLAUDE_CONFIG_TARGET;
 use crate::notices::Notices;
 use crate::runner::interrupt;
 use crate::runner::{Exit, OsFailure, Runner};
@@ -161,15 +160,41 @@ pub(crate) const CLAUDE_VERSIONS_RELPATH: &str = ".local/share/claude/versions";
 /// `CLAUDE_CONFIG_DIR` does not say otherwise.
 pub(crate) const CLAUDE_CONFIG_RELPATH: &str = ".claude";
 
+/// Where a named Claude profile is bound inside a container, and the value
+/// `CLAUDE_CONFIG_DIR` takes there. The one definition:
+/// [`crate::flows::launch::ClaudeProfileMount`] binds it, this module's probe
+/// asks whether it is mounted, and [`ClaudeConfig::parse`] compares the
+/// effective config directory against it to decide [`ClaudeConfig::Bound`].
+///
+/// Outside every home directory for the pixi cache's reason (see
+/// `PIXI_CACHE_TARGET` in `launch.rs`), and the same `/var/tmp` for the same two
+/// properties: nothing above the leaf is invented, and the path still works
+/// with nothing mounted on it, since devpod re-applies `--workspace-env` on
+/// every `up` while a mount only lands at creation.
+///
+/// A constant and not the container's `~/.claude`, because `dl` cannot know the
+/// container's `$HOME` before the container exists — and because the point is to be
+/// somewhere a devcontainer has not already mounted something. Two binds at one
+/// target is not a last-one-wins: docker refuses the create outright with
+/// `Duplicate mount point`, so overriding a devcontainer's own `~/.claude` mount is
+/// not available and stepping past it is what this does instead. Measured:
+/// `--workspace-env` beats a `devcontainer.json` `containerEnv` and a Feature's,
+/// so the redirect holds against a devcontainer that sets the variable itself.
+pub(crate) const CLAUDE_CONFIG_TARGET: &str = "/var/tmp/devlaunch-claude";
+
 /// The report keys the Claude config facts travel under.
 const CLAUDE_HOME_KEY: &str = "claudehome";
 const CLAUDE_DIR_KEY: &str = "claudedir";
 const CLAUDE_MOUNTS_KEY: &str = "claudemounts";
 const CLAUDE_SCAN_KEY: &str = "claudescan";
-/// Whether [`crate::flows::launch::CLAUDE_CONFIG_TARGET`] is itself a mount
-/// point -- evidence a `--claude-profile` bind's `--mount` landed, independent of
-/// what `CLAUDE_CONFIG_DIR` resolves to. See [`ClaudeMountFacts`].
+/// Whether [`CLAUDE_CONFIG_TARGET`] is itself a mount point -- evidence a
+/// `--claude-profile` bind's `--mount` landed, independent of what
+/// `CLAUDE_CONFIG_DIR` resolves to. See [`ClaudeMountFacts`].
 const CLAUDE_TARGET_MOUNTED_KEY: &str = "claudetargetmounted";
+/// The mount root (source-namespace path) of [`CLAUDE_CONFIG_TARGET`] -- the
+/// host's profile directory, for a `--claude-profile` bind. See
+/// [`ClaudeMountFacts::target_source`].
+const CLAUDE_TARGET_SOURCE_KEY: &str = "claudetargetsource";
 /// Whether the effective config directory ([`CLAUDE_DIR_KEY`]) is writable --
 /// evidence a refreshed credential can persist there. See [`ClaudeMountFacts`].
 const CLAUDE_WRITABLE_KEY: &str = "claudewritable";
@@ -1141,6 +1166,22 @@ fn claude_config_lines() -> Vec<String> {
         "  fi".to_owned(),
         "fi".to_owned(),
         format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_MOUNTED_KEY} $cfg_target_mounted\""),
+        // The mount ROOT of `CLAUDE_CONFIG_TARGET` -- field 4 of the same
+        // `mountinfo` line, which for a bind is the path in the *source*
+        // namespace, i.e. the host's profile directory (see
+        // [`ClaudeMountFacts::target_source`]). Escaped exactly as the scan
+        // above leaves roots, because a profile directory is a path the operator
+        // chose and may hold a space or a tab; `unescape_mount` undoes it on the
+        // host. Empty when the target is not mounted or the scan could not run,
+        // never a fabricated path.
+        "cfg_target_source=".to_owned(),
+        "if [ -r /proc/self/mountinfo ]; then".to_owned(),
+        format!(
+            "  cfg_target_source=$(awk -v t={target} '{{ if ($5 == t) {{ print $4; exit }} }}' /proc/self/mountinfo 2>/dev/null || true)",
+            target = CLAUDE_CONFIG_TARGET,
+        ),
+        "fi".to_owned(),
+        format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_SOURCE_KEY} $cfg_target_source\""),
         // Whether the effective config directory can be written to -- evidence a
         // refreshed credential can persist there. `unknown` rather than `no` when
         // there is no directory to ask about, for `CLAUDE_SCAN_OK`'s reason: an
@@ -1237,8 +1278,8 @@ impl ProbeResult {
 /// The raw facts a `--claude-profile` mount's verification needs from a probe,
 /// independent of who [`ClaudeConfig::parse`] decides owns the directory: the
 /// directory the probe actually saw in effect, whether
-/// [`crate::flows::launch::CLAUDE_CONFIG_TARGET`] is itself a mount point, and
-/// whether that directory is writable.
+/// [`CLAUDE_CONFIG_TARGET`] is itself a mount point, the mount's source when it
+/// is, and whether that directory is writable.
 ///
 /// Each fact is `None` when the probe could not say -- an absent report, a
 /// garbled key, an image with no `awk` -- and `None` must never read as a
@@ -1248,6 +1289,7 @@ impl ProbeResult {
 pub struct ClaudeMountFacts {
     dir: Option<String>,
     target_mounted: Option<bool>,
+    target_source: Option<String>,
     writable: Option<bool>,
     container_uid: Option<u32>,
     dir_uid: Option<u32>,
@@ -1266,6 +1308,13 @@ impl ClaudeMountFacts {
                 .filter(|dir| !dir.is_empty())
                 .cloned(),
             target_mounted: parse_tri(found.get(CLAUDE_TARGET_MOUNTED_KEY)),
+            // Kernel-escaped like every root [`CLAUDE_MOUNTS_KEY`] carries, so it is
+            // undone the same way; empty is what an unmounted target or a scan that
+            // could not run prints, and neither names a path.
+            target_source: found
+                .get(CLAUDE_TARGET_SOURCE_KEY)
+                .filter(|source| !source.is_empty())
+                .map(|source| unescape_mount(source)),
             writable: parse_tri(found.get(CLAUDE_WRITABLE_KEY)),
             // `and_then(...parse().ok())` reads an empty or garbled value as
             // `None` for free: `str::parse::<u32>` refuses both.
@@ -1283,10 +1332,19 @@ impl ClaudeMountFacts {
         self.dir.as_deref()
     }
 
-    /// Whether the probe found [`crate::flows::launch::CLAUDE_CONFIG_TARGET`]
+    /// Whether the probe found [`CLAUDE_CONFIG_TARGET`]
     /// itself mounted. `None` when the probe could not say.
     pub fn target_mounted(&self) -> Option<bool> {
         self.target_mounted
+    }
+
+    /// The mount root of [`CLAUDE_CONFIG_TARGET`] -- for a bind, the path in the
+    /// *source* namespace, i.e. the host's profile directory. This is what lets a
+    /// caller name which profile a container is running as without
+    /// [`ClaudeConfig::Bound`] carrying a payload. `None` when the target is not
+    /// mounted, or the probe could not say.
+    pub fn target_source(&self) -> Option<&str> {
+        self.target_source.as_deref()
     }
 
     /// Whether [`Self::dir`] was writable. `None` when the probe could not say.
@@ -1322,6 +1380,7 @@ impl ClaudeMountFacts {
         Self {
             dir: dir.map(str::to_owned),
             target_mounted,
+            target_source: None,
             writable,
             container_uid,
             dir_uid,
@@ -1473,19 +1532,39 @@ pub(crate) fn is_official_claude(versions_dir: &str, claude_binary: &str) -> boo
 
 /// Who owns the Claude config directory in a container.
 ///
-/// Two arms and no third, because the question has two answers and the absence of
-/// an answer is `Option::None` at the call site rather than a state something could
-/// match on and forget. `Foreign` is not a failure: it is a repo's devcontainer
-/// having arranged Claude's identity itself, which is an arrangement devlaunch has
-/// nothing better to offer than.
+/// Three arms, because `Foreign` used to cover two situations that want opposite
+/// handling and the difference was being reconstructed at one call site instead
+/// of stated here. A repo's devcontainer mounting its own `~/.claude` is
+/// genuinely somebody else's, and forwarding nothing into it is right. `dl`
+/// itself binding a named profile at [`CLAUDE_CONFIG_TARGET`] is a mount too, and
+/// the mount scan cannot tell the two apart by shape alone -- but this crate
+/// knows the one path it binds things at, and a config directory that resolved
+/// to exactly that path is never a repo's own arrangement. `Bound` names that
+/// case so a caller no longer has to reconstruct it by comparing a probe's
+/// `claudedir` against [`CLAUDE_CONFIG_TARGET`] and `claudetargetmounted` itself.
+///
+/// The absence of an answer is still `Option::None` at the call site rather than
+/// a state something could match on and forget.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClaudeConfig {
     /// Nothing outside the container is mounted there, so what devlaunch puts in
     /// the environment is the only login the container has.
     Ours,
     /// Something is mounted at or under it from outside, and whatever mounted it
-    /// owns what is in there.
+    /// owns what is in there. Not `dl`'s own profile bind -- see `Bound`.
     Foreign,
+    /// `dl` bound a named profile in at [`CLAUDE_CONFIG_TARGET`] and the
+    /// container's effective config directory is that target. Ours in every
+    /// sense: forward nothing, because the mounted directory already carries the
+    /// same credential file the host has and refreshes it the same way. See
+    /// [`crate::flows::launch::ClaudeProfileMount`].
+    ///
+    /// Carries no payload -- this type is `Copy` and held behind a `Cell`-like
+    /// path in several places, so a `String` naming the profile would ripple far
+    /// past the value it adds. The profile's identity travels in
+    /// [`ClaudeMountFacts::target_source`] instead, which a caller can read
+    /// alongside this variant without the enum having to carry it.
+    Bound,
 }
 
 impl ClaudeConfig {
@@ -1501,6 +1580,12 @@ impl ClaudeConfig {
     /// differ in exactly the case that costs something — forwarding the host's
     /// short-lived token over a mounted credential that can refresh itself, which
     /// is worse than forwarding nothing. See [`crate::clients::claude`].
+    ///
+    /// `Bound` is decided first and takes every condition it names literally: the
+    /// scan must have run (the same gate `Foreign`/`Ours` needs below), the probe
+    /// must have found [`CLAUDE_CONFIG_TARGET`] itself mounted, and the effective
+    /// config directory must equal it exactly. Any one of those missing or false
+    /// falls through to the existing [`cfg_dir_is_foreign`] rule, unchanged.
     pub(crate) fn parse(report: &str, host_home: Option<&str>) -> Option<Self> {
         let found = marked_lines(report);
         // A scan that did not happen is not evidence of ownership. Without this the
@@ -1511,6 +1596,11 @@ impl ClaudeConfig {
         }
         let home = found.get(CLAUDE_HOME_KEY)?;
         let mounts = found.get(CLAUDE_MOUNTS_KEY)?;
+        let dir = found.get(CLAUDE_DIR_KEY).map(String::as_str).unwrap_or("");
+        let target_mounted = parse_tri(found.get(CLAUDE_TARGET_MOUNTED_KEY));
+        if target_mounted == Some(true) && dir == CLAUDE_CONFIG_TARGET {
+            return Some(Self::Bound);
+        }
         Some(if cfg_dir_is_foreign(home, host_home, mounts) {
             Self::Foreign
         } else {
@@ -3033,6 +3123,11 @@ if [ -r /proc/self/mountinfo ]; then
   fi
 fi
 echo "devlaunch-probe claudetargetmounted $cfg_target_mounted"
+cfg_target_source=
+if [ -r /proc/self/mountinfo ]; then
+  cfg_target_source=$(awk -v t=/var/tmp/devlaunch-claude '{ if ($5 == t) { print $4; exit } }' /proc/self/mountinfo 2>/dev/null || true)
+fi
+echo "devlaunch-probe claudetargetsource $cfg_target_source"
 if [ -n "$cfg_dir" ]; then
   if [ -w "$cfg_dir" ]; then cfg_writable=yes; else cfg_writable=no; fi
 else
@@ -4833,6 +4928,63 @@ fi
             ),
             Some(ClaudeConfig::Ours),
             "a scan that ran and found nothing is an answer"
+        );
+    }
+
+    #[test]
+    fn a_target_bound_and_mounted_reads_as_bound() {
+        // The case this variant exists for: `dl` itself bound a named profile at
+        // `CLAUDE_CONFIG_TARGET`, the bind landed, and `CLAUDE_CONFIG_DIR` points
+        // at exactly that. Ours in every sense, and named as such rather than
+        // left for a caller to reconstruct.
+        let report = format!(
+            "devlaunch-probe claudehome /home/vscode\n\
+             devlaunch-probe claudedir {CLAUDE_CONFIG_TARGET}\n\
+             devlaunch-probe claudescan ok\n\
+             devlaunch-probe claudemounts \n\
+             devlaunch-probe claudetargetmounted yes"
+        );
+        assert_eq!(
+            ClaudeConfig::parse(&report, ELSEWHERE),
+            Some(ClaudeConfig::Bound)
+        );
+    }
+
+    #[test]
+    fn a_target_that_is_not_a_mount_point_is_not_bound() {
+        // The effective directory happens to equal the target -- unlikely outside a
+        // launch that asked for a profile, but not proof of anything by itself --
+        // and nothing is actually mounted there. Falls through to the ordinary
+        // rule, which reads an empty mount list as the container's own.
+        let report = format!(
+            "devlaunch-probe claudehome /home/vscode\n\
+             devlaunch-probe claudedir {CLAUDE_CONFIG_TARGET}\n\
+             devlaunch-probe claudescan ok\n\
+             devlaunch-probe claudemounts \n\
+             devlaunch-probe claudetargetmounted no"
+        );
+        assert_eq!(
+            ClaudeConfig::parse(&report, ELSEWHERE),
+            Some(ClaudeConfig::Ours),
+            "the target with nothing mounted at it is still this container's own"
+        );
+    }
+
+    #[test]
+    fn a_config_directory_repointed_away_from_the_target_is_not_bound() {
+        // The bind landed -- `CLAUDE_CONFIG_TARGET` is genuinely mounted -- but
+        // something re-pointed `CLAUDE_CONFIG_DIR` elsewhere, which is the
+        // `ClaudeProfileMountRedirected` shape `launch.rs` names. Not `Bound`:
+        // the container is not actually configured from the bind.
+        let report = "devlaunch-probe claudehome /home/vscode\n\
+             devlaunch-probe claudedir /home/vscode/.claude\n\
+             devlaunch-probe claudescan ok\n\
+             devlaunch-probe claudemounts \n\
+             devlaunch-probe claudetargetmounted yes";
+        assert_eq!(
+            ClaudeConfig::parse(report, ELSEWHERE),
+            Some(ClaudeConfig::Ours),
+            "mounted at the target, but not what CLAUDE_CONFIG_DIR resolved to"
         );
     }
 
