@@ -46,6 +46,18 @@ pub devlaunch_core::api::LaunchNotice::CheckoutBehind::ahead: u32
 pub devlaunch_core::api::LaunchNotice::CheckoutBehind::behind: u32
 pub devlaunch_core::api::LaunchNotice::CheckoutBehind::branch: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::CheckoutBehind::workspace_id: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::name: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::source: std::path::PathBuf
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountRedirected
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountRedirected::effective: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountRedirected::name: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountRedirected::target: std::path::PathBuf
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUidMismatch
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUidMismatch::container_uid: u32
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUidMismatch::dir_uid: u32
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUidMismatch::name: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUidMismatch::target: std::path::PathBuf
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileNotForwarded
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileNotForwarded::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::CreateNeverFinished
@@ -397,6 +409,7 @@ pub struct devlaunch_core::api::ToolProvisioning<'e>
 impl<'e> devlaunch_core::flows::launch::ToolProvisioning<'e>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'e>::from_env(&std::path::Path, &'e mut dyn devlaunch_core::notices::Notices<devlaunch_core::flows::provision::ProvisionEvent>) -> Self
 impl devlaunch_core::flows::launch::Provision for devlaunch_core::flows::launch::ToolProvisioning<'_>
+pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::last_claude_mount(&self) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::provision_tools(&self, &dyn devlaunch_runner::Runner, &str, devlaunch_core::flows::provision::PassOccasion, core::option::Option<&str>) -> core::result::Result<core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>, devlaunch_core::flows::provision::DevpodMissing>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
 pub struct devlaunch_core::api::WorkspaceCloneManager<'r>
@@ -418,9 +431,11 @@ pub trait devlaunch_core::api::Notices<T>
 pub fn devlaunch_core::api::Notices::say(&mut self, T)
 impl<T> devlaunch_core::notices::Notices<T> for alloc::vec::Vec<T>
 pub trait devlaunch_core::api::Provision
+pub fn devlaunch_core::api::Provision::last_claude_mount(&self) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::api::Provision::provision_tools(&self, &dyn devlaunch_runner::Runner, &str, devlaunch_core::flows::provision::PassOccasion, core::option::Option<&str>) -> core::result::Result<core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>, devlaunch_core::flows::provision::DevpodMissing>
 pub fn devlaunch_core::api::Provision::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
 impl devlaunch_core::flows::launch::Provision for devlaunch_core::flows::launch::ToolProvisioning<'_>
+pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::last_claude_mount(&self) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::provision_tools(&self, &dyn devlaunch_runner::Runner, &str, devlaunch_core::flows::provision::PassOccasion, core::option::Option<&str>) -> core::result::Result<core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>, devlaunch_core::flows::provision::DevpodMissing>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
 pub fn devlaunch_core::api::enriched_listing(&mut devlaunch_core::flows::listing::CommandContext<'_>, &devlaunch_core::flows::listing::DlView<'_>, devlaunch_core::flows::listing::Sizes) -> core::result::Result<alloc::vec::Vec<devlaunch_core::flows::listing::ListedWorkspace>, devlaunch_core::clients::devpod::ListingUnreadable>
@@ -538,6 +553,18 @@ pub devlaunch_core::flows::launch::LaunchNotice::CheckoutBehind::ahead: u32
 pub devlaunch_core::flows::launch::LaunchNotice::CheckoutBehind::behind: u32
 pub devlaunch_core::flows::launch::LaunchNotice::CheckoutBehind::branch: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::CheckoutBehind::workspace_id: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::name: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::source: std::path::PathBuf
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountRedirected
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountRedirected::effective: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountRedirected::name: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountRedirected::target: std::path::PathBuf
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUidMismatch
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUidMismatch::container_uid: u32
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUidMismatch::dir_uid: u32
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUidMismatch::name: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUidMismatch::target: std::path::PathBuf
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileNotForwarded
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileNotForwarded::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::CreateNeverFinished
@@ -641,6 +668,7 @@ pub struct devlaunch_core::flows::launch::ToolProvisioning<'e>
 impl<'e> devlaunch_core::flows::launch::ToolProvisioning<'e>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'e>::from_env(&std::path::Path, &'e mut dyn devlaunch_core::notices::Notices<devlaunch_core::flows::provision::ProvisionEvent>) -> Self
 impl devlaunch_core::flows::launch::Provision for devlaunch_core::flows::launch::ToolProvisioning<'_>
+pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::last_claude_mount(&self) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::provision_tools(&self, &dyn devlaunch_runner::Runner, &str, devlaunch_core::flows::provision::PassOccasion, core::option::Option<&str>) -> core::result::Result<core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>, devlaunch_core::flows::provision::DevpodMissing>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
 pub trait devlaunch_core::flows::launch::ColdMachinery<'r>
@@ -650,9 +678,11 @@ impl<'r> devlaunch_core::flows::launch::ColdMachinery<'r> for devlaunch_core::fl
 pub fn devlaunch_core::flows::launch::ColdPath<'r, '_>::open(&mut self) -> core::result::Result<devlaunch_core::flows::launch::Cold<'_, 'r>, devlaunch_core::flows::launch::ColdRefused>
 pub fn devlaunch_core::flows::launch::ColdPath<'r, '_>::recorded(&mut self) -> core::option::Option<&devlaunch_core::domain::metadata::MetadataStorage>
 pub trait devlaunch_core::flows::launch::Provision
+pub fn devlaunch_core::flows::launch::Provision::last_claude_mount(&self) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::Provision::provision_tools(&self, &dyn devlaunch_runner::Runner, &str, devlaunch_core::flows::provision::PassOccasion, core::option::Option<&str>) -> core::result::Result<core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>, devlaunch_core::flows::provision::DevpodMissing>
 pub fn devlaunch_core::flows::launch::Provision::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
 impl devlaunch_core::flows::launch::Provision for devlaunch_core::flows::launch::ToolProvisioning<'_>
+pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::last_claude_mount(&self) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::provision_tools(&self, &dyn devlaunch_runner::Runner, &str, devlaunch_core::flows::provision::PassOccasion, core::option::Option<&str>) -> core::result::Result<core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>, devlaunch_core::flows::provision::DevpodMissing>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
 pub enum devlaunch_core::flows::lifecycle::DeleteStalled

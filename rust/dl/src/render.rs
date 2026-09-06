@@ -2736,6 +2736,37 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
              holds. A workspace that predates the check picks it up after one `up`.",
             python_repr(name)
         ),
+        // warning: the bind landed, but this container's uid cannot write into it, so
+        // a refreshed token has nowhere to go. Named for the cause rather than the
+        // symptom -- see LaunchNotice::ClaudeProfileMountUidMismatch's own doc.
+        LaunchNotice::ClaudeProfileMountUidMismatch {
+            name,
+            target,
+            container_uid,
+            dir_uid,
+        } => format!(
+            "Claude profile {}: {} is bound in, but this container's uid ({container_uid}) does \
+             not own it (uid {dir_uid}) and cannot write to it, so a refreshed Claude login \
+             cannot be saved. This repo's devcontainer.json is the likely cause -- \
+             \"updateRemoteUserUID\": false, or containerUser/remoteUser pinned to a fixed user \
+             -- rather than anything on the host.",
+            python_repr(name),
+            target.display()
+        ),
+        // warning: the bind landed, but something inside the container re-pointed
+        // CLAUDE_CONFIG_DIR after devlaunch set it.
+        LaunchNotice::ClaudeProfileMountRedirected {
+            name,
+            target,
+            effective,
+        } => format!(
+            "Claude profile {}: {} is bound in, but this workspace's Claude configuration is {} \
+             instead. Something inside the container re-exported CLAUDE_CONFIG_DIR after \
+             devlaunch set it, so the bind is a directory nothing opens.",
+            python_repr(name),
+            target.display(),
+            effective
+        ),
 
         // --- the session (warning at 3845, info at 3864/3891, debug at 3875)
         LaunchNotice::NoTerminalAlias {
