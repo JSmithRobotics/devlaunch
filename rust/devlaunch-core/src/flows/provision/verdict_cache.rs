@@ -172,6 +172,7 @@ impl VerdictCache {
             claude: match claude {
                 Some(ClaudeConfig::Ours) => MemoWord::Ours,
                 Some(ClaudeConfig::Foreign) => MemoWord::Foreign,
+                Some(ClaudeConfig::Bound) => MemoWord::Bound,
                 None => MemoWord::Unknown,
             },
             result_mtime,
@@ -207,6 +208,7 @@ impl VerdictCache {
         match self.read_memo(workspace_id)? {
             MemoWord::Ours => Some(ClaudeConfig::Ours),
             MemoWord::Foreign => Some(ClaudeConfig::Foreign),
+            MemoWord::Bound => Some(ClaudeConfig::Bound),
             MemoWord::Unknown => None,
         }
     }
@@ -293,6 +295,10 @@ enum MemoWord {
     Ours,
     #[serde(rename = "foreign")]
     Foreign,
+    /// A named profile bound in as the container's own configuration -- see
+    /// [`ClaudeConfig::Bound`].
+    #[serde(rename = "bound")]
+    Bound,
     #[serde(rename = "unknown")]
     Unknown,
 }
@@ -490,6 +496,7 @@ mod tests {
         for (seen, expected) in [
             (Some(ClaudeConfig::Ours), Some(ClaudeConfig::Ours)),
             (Some(ClaudeConfig::Foreign), Some(ClaudeConfig::Foreign)),
+            (Some(ClaudeConfig::Bound), Some(ClaudeConfig::Bound)),
             (None, None),
         ] {
             let (_cache, _home, verdicts) = anchored();
