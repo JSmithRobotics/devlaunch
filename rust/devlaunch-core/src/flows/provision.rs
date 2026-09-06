@@ -72,6 +72,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::clients::claude::CREDENTIALS_FILENAME;
 use crate::clients::devpod::{self, Call, NotRun};
+use crate::flows::launch::CLAUDE_CONFIG_TARGET;
 use crate::notices::Notices;
 use crate::runner::interrupt;
 use crate::runner::{Exit, OsFailure, Runner};
@@ -165,6 +166,34 @@ const CLAUDE_HOME_KEY: &str = "claudehome";
 const CLAUDE_DIR_KEY: &str = "claudedir";
 const CLAUDE_MOUNTS_KEY: &str = "claudemounts";
 const CLAUDE_SCAN_KEY: &str = "claudescan";
+/// Whether [`crate::flows::launch::CLAUDE_CONFIG_TARGET`] is itself a mount
+/// point -- evidence a `--claude-profile` bind's `--mount` landed, independent of
+/// what `CLAUDE_CONFIG_DIR` resolves to. See [`ClaudeMountFacts`].
+const CLAUDE_TARGET_MOUNTED_KEY: &str = "claudetargetmounted";
+/// Whether the effective config directory ([`CLAUDE_DIR_KEY`]) is writable --
+/// evidence a refreshed credential can persist there. See [`ClaudeMountFacts`].
+const CLAUDE_WRITABLE_KEY: &str = "claudewritable";
+/// The container's own uid (`id -u`) -- half of the explanation when
+/// [`CLAUDE_WRITABLE_KEY`] answers `no`. Docker has no uid translation for a
+/// bind mount (measured: docker 29.6.1 rejects `idmap` and `idmap=true` alike on
+/// `--mount`); what ordinarily makes a host bind writable is the devcontainer
+/// spec's `updateRemoteUserUID`, default `true` on Linux, rewriting the
+/// container's user to the host's uid at creation. A repo that turns that off,
+/// or pins `containerUser`/`remoteUser` to a fixed user, is what leaves this
+/// uid and [`CLAUDE_DIR_UID_KEY`] apart. See [`ClaudeMountFacts`].
+const CLAUDE_UID_KEY: &str = "claudeuid";
+/// The uid owning the effective config directory (`stat -c %u`) -- the other
+/// half of [`CLAUDE_UID_KEY`]'s explanation. Empty, like [`CLAUDE_DIR_KEY`],
+/// when there is no directory to `stat` at all.
+const CLAUDE_DIR_UID_KEY: &str = "claudediruid";
+
+/// The three literal values a tri-state probe fact travels as: known-true,
+/// known-false, and "the probe could not say" -- never printed as anything else,
+/// so a missing or garbled key and this literal are the only two spellings of
+/// "unknown" [`parse_tri`] has to read.
+const TRI_YES: &str = "yes";
+const TRI_NO: &str = "no";
+const TRI_UNKNOWN: &str = "unknown";
 
 /// Whether the mount scan ran at all, which is the one thing an empty mount list
 /// cannot say for itself.
@@ -1094,6 +1123,48 @@ fn claude_config_lines() -> Vec<String> {
         "fi".to_owned(),
         format!("echo \"{PROBE_MARK} {CLAUDE_SCAN_KEY} $cfg_scan\""),
         format!("echo \"{PROBE_MARK} {CLAUDE_MOUNTS_KEY} $cfg_mounts\""),
+        // Whether `CLAUDE_CONFIG_TARGET` is itself a mount point -- evidence a
+        // `--claude-profile` bind's `--mount` landed, independent of what
+        // `CLAUDE_CONFIG_DIR` resolves to (see [`ClaudeMountFacts`]). No unescaping
+        // here, unlike the scan above: the target is a literal devlaunch itself
+        // chose, holding no space or tab, so a real mount at that exact path can
+        // never reach `mountinfo` escaped either.
+        format!("cfg_target_mounted={TRI_UNKNOWN}"),
+        "if [ -r /proc/self/mountinfo ]; then".to_owned(),
+        format!(
+            "  if cfg_tm=$(awk -v t={target} '{{ if ($5 == t) f=1 }} END {{ print (f ? \"{yes}\" : \"{no}\") }}' /proc/self/mountinfo 2>/dev/null); then",
+            target = CLAUDE_CONFIG_TARGET,
+            yes = TRI_YES,
+            no = TRI_NO,
+        ),
+        "    cfg_target_mounted=$cfg_tm".to_owned(),
+        "  fi".to_owned(),
+        "fi".to_owned(),
+        format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_MOUNTED_KEY} $cfg_target_mounted\""),
+        // Whether the effective config directory can be written to -- evidence a
+        // refreshed credential can persist there. `unknown` rather than `no` when
+        // there is no directory to ask about, for `CLAUDE_SCAN_OK`'s reason: an
+        // absent answer must not read as a false negative.
+        "if [ -n \"$cfg_dir\" ]; then".to_owned(),
+        format!(
+            "  if [ -w \"$cfg_dir\" ]; then cfg_writable={TRI_YES}; else cfg_writable={TRI_NO}; fi"
+        ),
+        "else".to_owned(),
+        format!("  cfg_writable={TRI_UNKNOWN}"),
+        "fi".to_owned(),
+        format!("echo \"{PROBE_MARK} {CLAUDE_WRITABLE_KEY} $cfg_writable\""),
+        // The uid pair `claudewritable=no` needs an explanation: this container's
+        // own uid, and the uid that owns the directory it could not write to.
+        // Empty, like `claudehome` and `claudedir`, is what an unresolvable
+        // answer prints -- never a fabricated uid.
+        "cfg_uid=$(id -u 2>/dev/null || true)".to_owned(),
+        format!("echo \"{PROBE_MARK} {CLAUDE_UID_KEY} $cfg_uid\""),
+        "if [ -n \"$cfg_dir\" ]; then".to_owned(),
+        "  cfg_dir_uid=$(stat -c %u \"$cfg_dir\" 2>/dev/null || true)".to_owned(),
+        "else".to_owned(),
+        "  cfg_dir_uid=".to_owned(),
+        "fi".to_owned(),
+        format!("echo \"{PROBE_MARK} {CLAUDE_DIR_UID_KEY} $cfg_dir_uid\""),
     ]
 }
 
@@ -1163,18 +1234,128 @@ impl ProbeResult {
     }
 }
 
+/// The raw facts a `--claude-profile` mount's verification needs from a probe,
+/// independent of who [`ClaudeConfig::parse`] decides owns the directory: the
+/// directory the probe actually saw in effect, whether
+/// [`crate::flows::launch::CLAUDE_CONFIG_TARGET`] is itself a mount point, and
+/// whether that directory is writable.
+///
+/// Each fact is `None` when the probe could not say -- an absent report, a
+/// garbled key, an image with no `awk` -- and `None` must never read as a
+/// negative: see [`CLAUDE_SCAN_OK`] for the reason a scan that did not run is
+/// not evidence of anything.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClaudeMountFacts {
+    dir: Option<String>,
+    target_mounted: Option<bool>,
+    writable: Option<bool>,
+    container_uid: Option<u32>,
+    dir_uid: Option<u32>,
+}
+
+impl ClaudeMountFacts {
+    /// Read the facts out of a probe's report. Total, like [`ClaudeConfig::parse`]:
+    /// nothing here fails, an unreadable report just answers "unknown".
+    fn parse(report: &str) -> Self {
+        let found = marked_lines(report);
+        Self {
+            // Empty is what an unresolvable `$HOME` or a relative `CLAUDE_CONFIG_DIR`
+            // prints, and neither names a directory.
+            dir: found
+                .get(CLAUDE_DIR_KEY)
+                .filter(|dir| !dir.is_empty())
+                .cloned(),
+            target_mounted: parse_tri(found.get(CLAUDE_TARGET_MOUNTED_KEY)),
+            writable: parse_tri(found.get(CLAUDE_WRITABLE_KEY)),
+            // `and_then(...parse().ok())` reads an empty or garbled value as
+            // `None` for free: `str::parse::<u32>` refuses both.
+            container_uid: found.get(CLAUDE_UID_KEY).and_then(|uid| uid.parse().ok()),
+            dir_uid: found
+                .get(CLAUDE_DIR_UID_KEY)
+                .and_then(|uid| uid.parse().ok()),
+        }
+    }
+
+    /// The effective Claude config directory the probe saw -- the same value
+    /// [`ClaudeConfig::parse`] compares mounts against. `None` when the probe
+    /// could not resolve one.
+    pub fn dir(&self) -> Option<&str> {
+        self.dir.as_deref()
+    }
+
+    /// Whether the probe found [`crate::flows::launch::CLAUDE_CONFIG_TARGET`]
+    /// itself mounted. `None` when the probe could not say.
+    pub fn target_mounted(&self) -> Option<bool> {
+        self.target_mounted
+    }
+
+    /// Whether [`Self::dir`] was writable. `None` when the probe could not say.
+    pub fn writable(&self) -> Option<bool> {
+        self.writable
+    }
+
+    /// The container's own uid (`id -u`), half of the explanation for
+    /// [`Self::writable`] reading `Some(false)` -- see [`CLAUDE_UID_KEY`].
+    pub fn container_uid(&self) -> Option<u32> {
+        self.container_uid
+    }
+
+    /// The uid owning [`Self::dir`] (`stat -c %u`), the other half. `None` when
+    /// there was no directory to `stat`, or the probe could not say.
+    pub fn dir_uid(&self) -> Option<u32> {
+        self.dir_uid
+    }
+}
+
+#[cfg(test)]
+impl ClaudeMountFacts {
+    /// Build one directly, for a test that wants to name a row of the mount
+    /// verification table (`crate::flows::launch::claude_profile_mount_notice`)
+    /// without composing a probe report to parse.
+    pub(crate) fn synthetic(
+        dir: Option<&str>,
+        target_mounted: Option<bool>,
+        writable: Option<bool>,
+        container_uid: Option<u32>,
+        dir_uid: Option<u32>,
+    ) -> Self {
+        Self {
+            dir: dir.map(str::to_owned),
+            target_mounted,
+            writable,
+            container_uid,
+            dir_uid,
+        }
+    }
+}
+
+/// One of the tri-state literals a probe fact travels as, read from a report's
+/// value. Anything but an exact match to [`TRI_YES`] or [`TRI_NO`] -- absent,
+/// [`TRI_UNKNOWN`], or garbled -- is `None`: unknown is its own answer and never
+/// a false negative.
+fn parse_tri(value: Option<&String>) -> Option<bool> {
+    match value.map(String::as_str) {
+        Some(TRI_YES) => Some(true),
+        Some(TRI_NO) => Some(false),
+        _ => None,
+    }
+}
+
 /// Everything one pass learned, which is more than one question's worth.
 ///
 /// A struct rather than a wider `ProbeResult`, because the tools question and the
 /// Claude config question are independent: a container can be fully provisioned
 /// with a config directory somebody else owns, or carry no tools at all in one that
 /// is its own. Folding them into one enum would need an arm per combination.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PassReport {
     /// What the container still needs, which is what the flow branches on.
     pub(crate) tools: ProbeResult,
     /// Who owns its Claude config directory, or `None` when the report did not say.
     pub(crate) claude: Option<ClaudeConfig>,
+    /// The raw mount facts a `--claude-profile` bind's verification asks for,
+    /// carried alongside `claude` rather than thrown away.
+    pub(crate) claude_mount: ClaudeMountFacts,
 }
 
 impl PassReport {
@@ -1183,6 +1364,7 @@ impl PassReport {
         Pass {
             provisioning,
             claude: self.claude,
+            claude_mount: self.claude_mount,
         }
     }
 }
@@ -1202,6 +1384,7 @@ impl PassReport {
 pub struct Pass {
     pub provisioning: Provisioning,
     claude: Option<ClaudeConfig>,
+    claude_mount: ClaudeMountFacts,
 }
 
 impl Pass {
@@ -1210,12 +1393,19 @@ impl Pass {
         Self {
             provisioning,
             claude: None,
+            claude_mount: ClaudeMountFacts::default(),
         }
     }
 
     /// Who owns the container's Claude config directory, as far as this pass knows.
     pub fn claude(&self) -> Option<ClaudeConfig> {
         self.claude
+    }
+
+    /// The raw facts a `--claude-profile` mount's verification needs -- see
+    /// [`ClaudeMountFacts`].
+    pub fn claude_mount(&self) -> &ClaudeMountFacts {
+        &self.claude_mount
     }
 }
 
@@ -2385,6 +2575,9 @@ fn provision(
         return Ok(Pass {
             provisioning: Provisioning::CachedProvisioned,
             claude: verdicts.remembered_claude(workspace),
+            // No probe ran, so no mount facts either -- only a live pass observes
+            // those.
+            claude_mount: ClaudeMountFacts::default(),
         });
     }
 
@@ -2543,11 +2736,13 @@ fn setup_pass(
         return Ok(PassReport {
             tools: ProbeResult::Absent,
             claude: None,
+            claude_mount: ClaudeMountFacts::default(),
         });
     }
     Ok(PassReport {
         tools: ProbeResult::parse(report),
         claude: ClaudeConfig::parse(report, host_home),
+        claude_mount: ClaudeMountFacts::parse(report),
     })
 }
 
@@ -2830,7 +3025,28 @@ if [ -n "$cfg_dir" ] && [ -r /proc/self/mountinfo ]; then
   fi
 fi
 echo "devlaunch-probe claudescan $cfg_scan"
-echo "devlaunch-probe claudemounts $cfg_mounts""#;
+echo "devlaunch-probe claudemounts $cfg_mounts"
+cfg_target_mounted=unknown
+if [ -r /proc/self/mountinfo ]; then
+  if cfg_tm=$(awk -v t=/var/tmp/devlaunch-claude '{ if ($5 == t) f=1 } END { print (f ? "yes" : "no") }' /proc/self/mountinfo 2>/dev/null); then
+    cfg_target_mounted=$cfg_tm
+  fi
+fi
+echo "devlaunch-probe claudetargetmounted $cfg_target_mounted"
+if [ -n "$cfg_dir" ]; then
+  if [ -w "$cfg_dir" ]; then cfg_writable=yes; else cfg_writable=no; fi
+else
+  cfg_writable=unknown
+fi
+echo "devlaunch-probe claudewritable $cfg_writable"
+cfg_uid=$(id -u 2>/dev/null || true)
+echo "devlaunch-probe claudeuid $cfg_uid"
+if [ -n "$cfg_dir" ]; then
+  cfg_dir_uid=$(stat -c %u "$cfg_dir" 2>/dev/null || true)
+else
+  cfg_dir_uid=
+fi
+echo "devlaunch-probe claudediruid $cfg_dir_uid""#;
 
     const PYTHON_TRANSFER_SCRIPT: &str = r#"set -eu
 exec >&2
@@ -4384,7 +4600,10 @@ fi
             .replace("command -v claude", "")
             .replace(CLAUDE_VERSIONS_RELPATH, "")
             .replace(CLAUDE_CONFIG_RELPATH, "")
-            .replace("devlaunch-probe claude", "");
+            .replace("devlaunch-probe claude", "")
+            // Not an invocation: `CLAUDE_CONFIG_TARGET` is a fixed path devlaunch
+            // itself made up, checked against `mountinfo` rather than run.
+            .replace(CLAUDE_CONFIG_TARGET, "");
         assert!(!scrubbed.contains("claude"), "{scrubbed}");
         assert!(!script.contains("--version"));
     }
@@ -4537,6 +4756,58 @@ fi
             None,
             "the home without the mounts is half an answer, which is not one"
         );
+    }
+
+    #[test]
+    fn the_mount_facts_read_yes_no_and_the_dir_off_a_report() {
+        let report = concat!(
+            "devlaunch-probe claudedir /var/tmp/devlaunch-claude\n",
+            "devlaunch-probe claudetargetmounted yes\n",
+            "devlaunch-probe claudewritable no\n",
+            "devlaunch-probe claudeuid 1000\n",
+            "devlaunch-probe claudediruid 1001\n",
+        );
+        let facts = ClaudeMountFacts::parse(report);
+        assert_eq!(facts.dir(), Some("/var/tmp/devlaunch-claude"));
+        assert_eq!(facts.target_mounted(), Some(true));
+        assert_eq!(facts.writable(), Some(false));
+        assert_eq!(facts.container_uid(), Some(1000));
+        assert_eq!(facts.dir_uid(), Some(1001));
+    }
+
+    #[test]
+    fn the_mount_facts_are_unknown_rather_than_a_false_negative_when_absent() {
+        // Empty and missing both mean "the probe could not say" -- never "no", the
+        // trap `CLAUDE_SCAN_OK` already exists to avoid for the ownership question.
+        let empty = concat!(
+            "devlaunch-probe claudedir \n",
+            "devlaunch-probe claudetargetmounted unknown\n",
+            "devlaunch-probe claudewritable unknown\n",
+            "devlaunch-probe claudeuid \n",
+            "devlaunch-probe claudediruid \n",
+        );
+        let facts = ClaudeMountFacts::parse(empty);
+        assert_eq!(facts.dir(), None);
+        assert_eq!(facts.target_mounted(), None);
+        assert_eq!(facts.writable(), None);
+        assert_eq!(facts.container_uid(), None);
+        assert_eq!(facts.dir_uid(), None);
+
+        // Missing keys entirely, as an unparsable or truncated report gives.
+        let facts = ClaudeMountFacts::parse("");
+        assert_eq!(facts.dir(), None);
+        assert_eq!(facts.target_mounted(), None);
+        assert_eq!(facts.writable(), None);
+        assert_eq!(facts.container_uid(), None);
+        assert_eq!(facts.dir_uid(), None);
+
+        // Garbled: neither "yes" nor "no" nor "unknown" reads as known either.
+        let facts = ClaudeMountFacts::parse("devlaunch-probe claudetargetmounted maybe");
+        assert_eq!(facts.target_mounted(), None);
+
+        // Garbled uids, which `str::parse::<u32>` refuses same as an empty one.
+        let facts = ClaudeMountFacts::parse("devlaunch-probe claudeuid not-a-number");
+        assert_eq!(facts.container_uid(), None);
     }
 
     #[test]
