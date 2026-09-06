@@ -856,6 +856,14 @@ impl ClaudeProfileMount {
         let Some(named) = host.claude.profile.as_deref() else {
             return Self::NotAsked;
         };
+        // `default` names the login this host uses anyway, and `resolve_token` answers
+        // it *without* consulting a directory -- so there is nothing here to bind, and
+        // `<root>/default/` is a directory the listing refuses to offer for the same
+        // reason. Not `NotAName`: the name is a real one and a launch naming it is
+        // ordinary, it simply asks for the forwarded ambient login rather than a mount.
+        if named == crate::flows::claude_profiles::DEFAULT_PROFILE {
+            return Self::NotAsked;
+        }
         let Some(source) =
             crate::clients::claude::profile_dir(host.claude_profiles_root.as_deref(), named)
         else {
@@ -6880,6 +6888,46 @@ mod tests {
         assert_eq!(mount, ClaudeProfileMount::NotAsked);
         assert_eq!(mount.up_args(), Vec::<String>::new());
         assert!(!mount.is_bound());
+    }
+
+    /// `--claude-profile default` binds nothing, and the directory it would have
+    /// joined is one no other component will touch.
+    ///
+    /// Three components have to agree about what a profile is. `resolve_token` answers
+    /// `default` without consulting a directory (`clients::claude::DEFAULT_PROFILE`),
+    /// and `claude_profiles::summarise` refuses to offer a directory of that name via
+    /// `profile_name_is_offerable`. A mount that bound `<root>/default/` regardless
+    /// would be the only one of the three that disagreed -- and it would win, because a
+    /// credentials file beats the forwarded token.
+    #[test]
+    fn the_default_profile_names_the_ambient_login_and_binds_nothing() {
+        let root = tempfile::tempdir().expect("a scratch profiles root");
+        let directory = root.path().join("default");
+        std::fs::create_dir_all(&directory).expect("the directory");
+        std::fs::write(
+            directory.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"not-a-real-token-in-a-default-directory"}}"#,
+        )
+        .expect("a credential");
+
+        let scene = Scene::new();
+        let host = Host {
+            claude: crate::clients::claude::HostEnv {
+                profile: Some("default".to_owned()),
+                ..Default::default()
+            },
+            claude_profiles_root: Some(root.path().to_path_buf()),
+            ..scene.host.clone()
+        };
+
+        let mount = ClaudeProfileMount::ensure(&host);
+
+        assert_eq!(
+            mount,
+            ClaudeProfileMount::NotAsked,
+            "a credential sitting in <root>/default/ is still not a profile to bind"
+        );
+        assert_eq!(mount.up_args(), Vec::<String>::new());
     }
 
     #[test]

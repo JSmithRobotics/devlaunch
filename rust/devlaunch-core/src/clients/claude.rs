@@ -356,9 +356,21 @@ const DEFAULT_PROFILE: &str = "default";
 /// container. A second spelling of this join is a second copy of a fact, and the two
 /// could name different directories.
 ///
-/// `None` for a name [`ProfileName::parse`] rejects, or where no root resolved at all.
+/// `None` for a name [`ProfileName::parse`] rejects, for [`DEFAULT_PROFILE`], or where
+/// no root resolved at all.
+///
+/// `default` is excluded by [`profile_name_is_offerable`] rather than by a second
+/// spelling of the exclusion, and it is not a detail: [`from_profile`] is never
+/// reached for that name because [`resolve_token`] answers it without consulting a
+/// directory, and [`crate::flows::claude_profiles::summarise`] refuses to offer a
+/// directory of that name for exactly that reason. A mount that bound
+/// `<root>/default/` anyway would be the one component of three that disagreed --
+/// binding a directory the resolver ignores and the listing will not show.
 #[must_use]
 pub(crate) fn profile_dir(profiles_root: Option<&Path>, named: &str) -> Option<PathBuf> {
+    if !profile_name_is_offerable(named) {
+        return None;
+    }
     let name = ProfileName::parse(named)?;
     Some(profiles_root?.join(name.as_str()))
 }
