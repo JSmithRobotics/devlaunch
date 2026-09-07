@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`aid --codex` and `aid --gemini` now start in full auto, which only
+  `aid --claude` ever did.** The other two ran their CLIs bare, so codex stopped at
+  its first approval prompt and gemini at its first tool call: an
+  `aid owner/repo fix the bug` opened a workspace, printed a question and waited for
+  somebody who had already walked away. The reason for claude's
+  `--dangerously-skip-permissions` was never claude-specific. It is that the agent
+  is already inside a disposable container holding only this repo, so the per-tool
+  prompts buy nothing and stall the run, and that is true of every agent `aid`
+  starts.
+
+  One rule, three spellings, because each CLI has its own:
+
+  | Agent | What `aid` runs |
+  | --- | --- |
+  | `claude` | `claude --dangerously-skip-permissions`, with `IS_SANDBOX=1` beside it |
+  | `codex` | `codex --dangerously-bypass-approvals-and-sandbox` |
+  | `gemini` | `gemini --yolo` |
+
+  **codex gets the bypass and not its `--full-auto`**, which is the trap in this
+  change. `--full-auto` reads like the answer: it approves every action. It also
+  keeps codex's own sandbox, which is workspace-write with the network off, so `gh`,
+  `cargo fetch` and `pip install` would fail inside a container that has a network
+  and a checkout the agent is meant to be able to push from. The container is
+  already the sandbox; nesting a second one inside it subtracts exactly the
+  capabilities `dl` went to the trouble of provisioning.
+
+  Held as a rule rather than as three assertions. `every_agent_starts_in_full_auto`
+  reads the agent table and fails on a row that has no flag, so an agent added later
+  without one breaks a test instead of stopping somebody's unattended run. The
+  full-auto table now in `docs/cli.md` is a second hand-maintained copy of that
+  fact, so `the_full_auto_section_names_the_flags_each_agent_is_actually_started_with`
+  diffs the page against the command devpod receives.
+
+  Unchanged: a command you typed yourself. `dl <ws> -- codex` runs codex, exactly as
+  written, with nothing added.
+
 ## [0.32.0] - 2026-09-04
 
 ### Added

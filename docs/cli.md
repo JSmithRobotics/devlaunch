@@ -461,6 +461,49 @@ strings `render.rs` and `lib.rs` own, so
 `the_force_placement_section_quotes_the_refusals_it_says_it_does` reads this
 section back and diffs them against what the binary prints.
 
+## Full auto: every agent, every launch
+
+`aid` exists to hand a repo to an agent and walk away, so every agent it starts is
+started in that agent's full auto mode. There is no flag to type and no flag to
+type differently per agent:
+
+| Agent | What `aid` runs |
+| --- | --- |
+| `claude` | `claude --dangerously-skip-permissions`, with `IS_SANDBOX=1` beside it |
+| `codex` | `codex --dangerously-bypass-approvals-and-sandbox` |
+| `gemini` | `gemini --yolo` |
+
+One rule, three spellings, and the table in `rust/aid/src/rewrite.rs` is where they
+live. `every_agent_starts_in_full_auto` holds the rule against that table rather
+than against one row of it, so an agent added without its flag fails a test instead
+of stopping someone's unattended run to ask about its first edit.
+
+Two of those rows have a reason worth reading.
+
+**codex gets the bypass, not `--full-auto`.** codex offers both and only one of them
+is this. `--full-auto` approves every action but keeps codex's own sandbox, which is
+workspace write with the network off. That would break `gh`, `cargo fetch` and
+`pip install` inside a container that has a network and a checkout the agent is
+meant to be able to push from. The container is already the sandbox, so a second one
+nested inside it subtracts exactly the capabilities `dl` went to the trouble of
+provisioning.
+
+**`IS_SANDBOX=1` is what makes claude's flag usable.** claude refuses
+`--dangerously-skip-permissions` outright under `uid 0`, exiting 1 with "cannot be
+used with root/sudo privileges", and devcontainers that run as root are ordinary.
+The variable is claude's own way of being told the refusal is answering for a
+machine that is not there. It is scoped to the agent process and is not exported
+into your shell.
+
+What this buys and what it costs is the same sentence: the agent will not stop to
+ask, so an `aid owner/repo fix the bug` can run to the end unattended, and it can
+also rewrite the checkout it is in without asking. It cannot reach your host. Review
+an `aid` workspace before pushing rather than treating it as something that will
+stop the agent for you.
+
+None of this reaches a command you typed yourself. `dl <ws> -- claude` runs claude,
+exactly as written, with no flags added and no variables set.
+
 ## Remote Control: every `aid` session, on your phone too
 
 Every `aid` launch of claude starts with Claude Code's Remote Control on. There is no

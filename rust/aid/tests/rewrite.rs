@@ -432,13 +432,16 @@ fn the_detached_cache_refresh_reaches_dl_through_aids_own_name() {
 #[test]
 fn each_agent_is_started_the_way_its_own_cli_takes_a_prompt() {
     // gemini's initial prompt is a flag that is a syntax error without one, so the
-    // flag only appears beside a prompt; codex takes neither a flag nor a variable.
+    // flag only appears beside a prompt; codex takes no prompt flag and no
+    // variable. Each line also carries the agent's full-auto flag, which is the
+    // spelling of one rule in three CLIs and is held as a rule by
+    // `every_agent_starts_in_full_auto` (rust/aid/src/rewrite.rs).
     let world = World::with(&["--warm"]);
     world.aid(&["--gemini", MAIN, "explain", "this"]).exited(0);
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc 'gemini --prompt-interactive '\"'\"'explain this'\"'\"''"
+            "devpod ssh {MAIN} --command bash -lc 'gemini --yolo --prompt-interactive '\"'\"'explain this'\"'\"''"
         )
     );
 
@@ -446,14 +449,16 @@ fn each_agent_is_started_the_way_its_own_cli_takes_a_prompt() {
     bare.aid(&["--gemini", MAIN]).exited(0);
     assert_eq!(
         bare.devpod_calls().last().expect("a session"),
-        &format!("devpod ssh {MAIN} --command bash -lc gemini")
+        &format!("devpod ssh {MAIN} --command bash -lc 'gemini --yolo'")
     );
 
     let codex = World::with(&["--warm"]);
     codex.aid(&["--codex", MAIN, "hi"]).exited(0);
     assert_eq!(
         codex.devpod_calls().last().expect("a session"),
-        &format!("devpod ssh {MAIN} --command bash -lc 'codex hi'")
+        &format!(
+            "devpod ssh {MAIN} --command bash -lc 'codex --dangerously-bypass-approvals-and-sandbox hi'"
+        )
     );
 }
 
@@ -559,4 +564,84 @@ fn a_remote_agent_that_failed_ends_with_the_agents_status() {
     // here.
     let world = World::with(&["--warm", "--remote-exit"]);
     world.aid(&[MAIN, "boom"]).exited(130);
+}
+
+/// The full-auto table `docs/cli.md` prints, held to the lines `aid` actually runs.
+///
+/// The "Full auto: every agent, every launch" section writes each agent's flag into
+/// a table. That is a hand-maintained copy of a fact owned by `rewrite.rs`'s agent
+/// table, and this repository allows a second copy only with a test beside it that
+/// diffs it against the first. `every_agent_starts_in_full_auto` in
+/// `rust/aid/src/rewrite.rs` is not that test: it pins the *behaviour*, and would
+/// still pass with a flag changed and the page left naming the old one.
+///
+/// Diffed against the command as devpod receives it, rather than against the source
+/// table, so the page is checked against what a launch does and not against another
+/// copy of the same list. Every row is required to name an agent this build knows,
+/// which is what stops the guard passing on a table that has quietly lost a row.
+#[test]
+fn the_full_auto_section_names_the_flags_each_agent_is_actually_started_with() {
+    let doc = std::fs::read_to_string(repo_root().join("docs/cli.md")).expect("docs/cli.md");
+    let rows = full_auto_rows(&doc);
+    assert_eq!(
+        rows.len(),
+        3,
+        "docs/cli.md's full-auto table has {} rows, not one per agent: {rows:?}",
+        rows.len()
+    );
+
+    for (agent, flag) in rows {
+        let world = World::with(&["--warm"]);
+        world.aid(&[&format!("--{agent}"), MAIN]).exited(0);
+        let command = world
+            .devpod_calls()
+            .last()
+            .unwrap_or_else(|| panic!("`aid --{agent}` opened no session"))
+            .clone();
+
+        assert!(
+            command.contains(&flag),
+            "docs/cli.md says `{agent}` runs with {flag:?}; the launch is {command:?}"
+        );
+    }
+}
+
+/// The `(agent, flag)` pairs the full-auto table states.
+///
+/// Matched on the heading rather than on a phrase under it, so the prose around the
+/// table stays free to be rewritten while this test keeps pointing at one span. A
+/// missing heading says so rather than yielding an empty section that every
+/// assertion passes over.
+///
+/// The agent is the first cell's single backticked word; the flag is the first
+/// `--word` in the second cell, which is the whole of what the copy has to get
+/// right. The rest of the cell is prose and is deliberately not read.
+fn full_auto_rows(document: &str) -> Vec<(String, String)> {
+    const HEADING: &str = "## Full auto: every agent, every launch";
+    let start = document
+        .find(HEADING)
+        .unwrap_or_else(|| panic!("docs/cli.md no longer has a '{HEADING}' section"));
+    let rest = &document[start + HEADING.len()..];
+    let section = match rest.find("\n## ") {
+        Some(end) => &rest[..end],
+        None => rest,
+    };
+
+    section
+        .lines()
+        .filter_map(|line| {
+            let mut cells = line.trim().strip_prefix('|')?.split('|');
+            let agent = cells.next()?.trim().trim_matches('`').to_owned();
+            if !["claude", "codex", "gemini"].contains(&agent.as_str()) {
+                return None;
+            }
+            let flag = cells
+                .next()?
+                .split_whitespace()
+                .map(|word| word.trim_end_matches(|c: char| !c.is_ascii_alphanumeric()))
+                .find(|word| word.starts_with("--"))?
+                .to_owned();
+            Some((agent, flag))
+        })
+        .collect()
 }
