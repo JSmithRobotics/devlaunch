@@ -577,17 +577,24 @@ fn a_remote_agent_that_failed_ends_with_the_agents_status() {
 ///
 /// Diffed against the command as devpod receives it, rather than against the source
 /// table, so the page is checked against what a launch does and not against another
-/// copy of the same list. Every row is required to name an agent this build knows,
-/// which is what stops the guard passing on a table that has quietly lost a row.
+/// copy of the same list.
+///
+/// The set of names is asserted, not the count. Counting was the first shape of this
+/// guard and Sourcery broke it on sight: three rows reading claude, claude, codex
+/// satisfy a length check while the page has quietly lost gemini. The names the
+/// table has to carry are therefore spelled out here, and every row is launched, so
+/// a row naming an agent this build has never heard of fails at the launch rather
+/// than being skipped as unrecognised.
 #[test]
 fn the_full_auto_section_names_the_flags_each_agent_is_actually_started_with() {
     let doc = std::fs::read_to_string(repo_root().join("docs/cli.md")).expect("docs/cli.md");
     let rows = full_auto_rows(&doc);
+    let mut named: Vec<&str> = rows.iter().map(|(agent, _)| agent.as_str()).collect();
+    named.sort_unstable();
     assert_eq!(
-        rows.len(),
-        3,
-        "docs/cli.md's full-auto table has {} rows, not one per agent: {rows:?}",
-        rows.len()
+        named,
+        ["claude", "codex", "gemini"],
+        "docs/cli.md's full-auto table names {named:?}, not one row per agent"
     );
 
     for (agent, flag) in rows {
@@ -599,8 +606,15 @@ fn the_full_auto_section_names_the_flags_each_agent_is_actually_started_with() {
             .unwrap_or_else(|| panic!("`aid --{agent}` opened no session"))
             .clone();
 
+        // As a whole word and not by `contains`, which is the same trap
+        // `the_force_placement_section_quotes_the_refusals_it_says_it_does` records:
+        // every truncation of a flag is a substring of it, so a table reflowed or
+        // mistyped down to `--d` would satisfy a substring test against a launch
+        // that says `--dangerously-bypass-approvals-and-sandbox`.
         assert!(
-            command.contains(&flag),
+            command
+                .split_whitespace()
+                .any(|word| word.trim_matches('\'') == flag),
             "docs/cli.md says `{agent}` runs with {flag:?}; the launch is {command:?}"
         );
     }
@@ -616,6 +630,13 @@ fn the_full_auto_section_names_the_flags_each_agent_is_actually_started_with() {
 /// The agent is the first cell's single backticked word; the flag is the first
 /// `--word` in the second cell, which is the whole of what the copy has to get
 /// right. The rest of the cell is prose and is deliberately not read.
+///
+/// Requiring the backticks is what separates a row from the two lines every markdown
+/// table starts with. `| Agent |` is not backticked and the `| --- |` separator is
+/// not either, which matters more than it looks: the separator's cells begin `--`
+/// and would otherwise parse as an agent named `---` asking for a flag named `---`.
+/// No allow-list of names is applied here on purpose, so an unknown name reaches the
+/// caller and fails there.
 fn full_auto_rows(document: &str) -> Vec<(String, String)> {
     const HEADING: &str = "## Full auto: every agent, every launch";
     let start = document
@@ -631,14 +652,22 @@ fn full_auto_rows(document: &str) -> Vec<(String, String)> {
         .lines()
         .filter_map(|line| {
             let mut cells = line.trim().strip_prefix('|')?.split('|');
-            let agent = cells.next()?.trim().trim_matches('`').to_owned();
-            if !["claude", "codex", "gemini"].contains(&agent.as_str()) {
+            let agent = cells
+                .next()?
+                .trim()
+                .strip_prefix('`')?
+                .strip_suffix('`')?
+                .to_owned();
+            if agent.split_whitespace().count() != 1 {
                 return None;
             }
             let flag = cells
                 .next()?
                 .split_whitespace()
-                .map(|word| word.trim_end_matches(|c: char| !c.is_ascii_alphanumeric()))
+                .map(|word| {
+                    word.trim_start_matches('`')
+                        .trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
+                })
                 .find(|word| word.starts_with("--"))?
                 .to_owned();
             Some((agent, flag))

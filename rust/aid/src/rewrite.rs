@@ -57,13 +57,16 @@ pub(crate) const AGENT_ENV_VAR: &str = "DEVLAUNCH_AID_AGENT";
 /// Held by `every_agent_starts_in_full_auto`.
 ///
 /// codex is the one worth spelling out, because it offers two modes and only one of
-/// them is this one. `--full-auto` reads like the answer and is not: it approves
-/// every action but keeps codex's own sandbox, which is workspace-write with the
+/// them is this one. `--full-auto` reads like the answer and is not, for two
+/// reasons and the first is the one that matters: it *still escalates to a person*.
+/// It is an approval policy plus a sandbox, not an absence of approvals, so an
+/// unattended run stops and asks -- which is exactly the failure this rule exists to
+/// prevent. Only `--dangerously-bypass-approvals-and-sandbox` sets the policy to
+/// never ask. The second reason is the sandbox it keeps: workspace-write with the
 /// network off, so `gh`, `cargo fetch` and `pip install` fail inside a container
 /// that has a network and a checkout the agent is meant to be able to push from.
-/// The bypass flag is the analogue of claude's, and it is the honest one here: the
-/// container is the sandbox, so a second one nested inside it subtracts exactly the
-/// capabilities dl went to the trouble of provisioning.
+/// The container is already the sandbox, so a second one nested inside it subtracts
+/// exactly the capabilities dl went to the trouble of provisioning.
 ///
 /// `IS_SANDBOX=1` is what makes that flag usable at all here. claude refuses it
 /// outright under uid 0 — "cannot be used with root/sudo privileges", exit 1 — and
@@ -1073,31 +1076,42 @@ mod tests {
         // full-auto flag fails here instead of stopping an unattended run to ask
         // about its first edit. Each CLI spells the flag its own way, so the
         // spellings are named rather than pattern-matched -- codex in particular
-        // has a second mode, `--full-auto`, that approves everything but keeps its
-        // own network-less sandbox, and picking that one would be a silent
-        // regression rather than a visible one.
+        // has a second mode, `--full-auto`, which still escalates to a person, and
+        // picking it would be a silent regression rather than a visible one.
         let expected = [
             ("claude", "--dangerously-skip-permissions"),
             ("codex", "--dangerously-bypass-approvals-and-sandbox"),
             ("gemini", "--yolo"),
         ];
+
+        // The *names* against the table's keys, not `expected.len()` against
+        // `AGENTS.len()`, which was the first shape of this and let an agent through
+        // unchecked: `expected` holding claude, codex, codex is three rows long
+        // beside a three-row table while claude is never launched at all. Reviewed
+        // into existence -- with the count, dropping claude's flag and duplicating
+        // codex's row passed here.
+        let mut named: Vec<&str> = expected.iter().map(|(agent, _)| *agent).collect();
+        named.sort_unstable();
+        let mut known: Vec<&str> = AGENTS.iter().map(|(name, _)| *name).collect();
+        known.sort_unstable();
         assert_eq!(
-            expected.len(),
-            AGENTS.len(),
+            named, known,
             "an agent was added or removed without saying how it starts unattended"
         );
+
         for (agent, flag) in expected {
-            let command = build_agent_command(agent, "hi", None).expect("a known agent");
-            assert!(
-                command.contains(flag),
-                "{agent} is not in full auto: {command}"
-            );
-            assert!(
-                build_agent_command(agent, "", None)
-                    .expect("a known agent")
-                    .contains(flag),
-                "{agent} is not in full auto without a prompt"
-            );
+            // As a whole argv word. `contains` is the same trap the docs guard in
+            // `aid/tests/rewrite.rs` records: every truncation of a flag is a
+            // substring of it, and so is every flag that merely starts with one, so
+            // a table entry reading `--yolo-dry-run` satisfied a `contains("--yolo")`
+            // while asking gemini for the opposite of full auto.
+            for prompt in ["hi", ""] {
+                let command = build_agent_command(agent, prompt, None).expect("a known agent");
+                assert!(
+                    command.split_whitespace().any(|word| word == flag),
+                    "{agent} is not in full auto (prompt {prompt:?}): {command}"
+                );
+            }
         }
     }
 

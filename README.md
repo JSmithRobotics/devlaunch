@@ -346,13 +346,11 @@ the question and launches one-shot, so scripts behave as they always have.
 
 **The trade, stated plainly.** Every agent starts in full auto, because it is already inside a
 disposable container holding only this repo and the per-tool prompts would stall an unattended
-run. Each CLI spells that its own way: `claude --dangerously-skip-permissions`,
-`codex --dangerously-bypass-approvals-and-sandbox`, `gemini --yolo`. codex gets the bypass rather
-than its `--full-auto`, which approves every action but keeps codex's own sandbox, and that
-sandbox has no network, so `gh` and `cargo fetch` would fail inside a container that has one.
-`IS_SANDBOX=1` rides along for `claude` because it otherwise refuses its flag under `uid 0`, and
-devcontainers that run as root are ordinary. That variable is scoped to the agent process and is
-not exported into your shell.
+run. Each CLI spells that its own way, and
+[docs/cli.md](docs/cli.md#full-auto-every-agent-every-launch) has the flag per agent. `claude`'s
+is `--dangerously-skip-permissions`, with `IS_SANDBOX=1` beside it because it otherwise refuses
+that flag under `uid 0` and devcontainers that run as root are ordinary. That variable is scoped
+to the agent process and is not exported into your shell.
 
 The agent cannot reach your host, but it can rewrite the checkout it is in. Review an `aid`
 workspace before pushing rather than treating it as a sandbox that will stop the agent for you.

@@ -4,7 +4,8 @@
 selector decides what you picked, which verb refreshes git state and which only
 touch the container, which commands get a terminal, what `--rm` promises and where
 it stops, which exits fire it, the spellings that were retired and what they say
-now, what `aid`'s Remote Control default starts and how to turn it off, what
+now, which full-auto flag `aid` starts each agent with and why codex gets the one it
+gets, what `aid`'s Remote Control default starts and how to turn it off, what
 `kill` does to a workspace that will not answer, and what happens when devpod is
 missing, will not answer, or injects the wrong agent binary.
 
@@ -467,11 +468,16 @@ section back and diffs them against what the binary prints.
 started in that agent's full auto mode. There is no flag to type and no flag to
 type differently per agent:
 
-| Agent | What `aid` runs |
+| Agent | Full-auto flag |
 | --- | --- |
-| `claude` | `claude --dangerously-skip-permissions`, with `IS_SANDBOX=1` beside it |
-| `codex` | `codex --dangerously-bypass-approvals-and-sandbox` |
-| `gemini` | `gemini --yolo` |
+| `claude` | `--dangerously-skip-permissions`, with `IS_SANDBOX=1` beside it |
+| `codex` | `--dangerously-bypass-approvals-and-sandbox` |
+| `gemini` | `--yolo` |
+
+The flag and not the whole command line, which is longer than one column: a default
+`claude` launch also carries `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` and a
+`--remote-control=<workspace>`, and gemini takes its initial prompt through
+`--prompt-interactive`.
 
 One rule, three spellings, and the table in `rust/aid/src/rewrite.rs` is where they
 live. `every_agent_starts_in_full_auto` holds the rule against that table rather
@@ -481,8 +487,12 @@ of stopping someone's unattended run to ask about its first edit.
 Two of those rows have a reason worth reading.
 
 **codex gets the bypass, not `--full-auto`.** codex offers both and only one of them
-is this. `--full-auto` approves every action but keeps codex's own sandbox, which is
-workspace write with the network off. That would break `gh`, `cargo fetch` and
+is this, for two reasons of which the first is the one that matters: `--full-auto`
+still escalates to a person. It is an approval policy plus a sandbox rather than an
+absence of approvals, so an unattended run stops and asks, which is the whole of
+what this rule exists to prevent. Only `--dangerously-bypass-approvals-and-sandbox`
+sets the policy to never ask. The second reason is the sandbox `--full-auto` keeps:
+workspace write with the network off, which would break `gh`, `cargo fetch` and
 `pip install` inside a container that has a network and a checkout the agent is
 meant to be able to push from. The container is already the sandbox, so a second one
 nested inside it subtracts exactly the capabilities `dl` went to the trouble of
