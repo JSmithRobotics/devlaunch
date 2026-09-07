@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-09-07
+
 ### Fixed
 
 - **`aid --codex` and `aid --gemini` now start in full auto, which only
