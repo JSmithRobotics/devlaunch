@@ -28,7 +28,7 @@
         // everything else, and a cache miss -- including a `:latest` that does
         // not exist yet, as on the very first prebuild run -- is a warning
         // rather than a failure.
-        "cacheFrom": "ghcr.io/blooop/devlaunch-devcontainer:latest"
+        "cacheFrom": "ghcr.io/jsmithrobotics/devlaunch-devcontainer:latest"
     },
     "initializeCommand": ".devcontainer/claude-code/init-host.sh",
     "customizations": {
