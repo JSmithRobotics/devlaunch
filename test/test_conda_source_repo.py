@@ -108,8 +108,15 @@ class TestTheRecipeDoesNotHardcodeARepo:
         in the metadata instead of the build."""
         text = recipe_text()
         for key in ("homepage:", "documentation:", "repository:"):
-            line = next(l for l in text.splitlines() if l.strip().startswith(key))
-            assert "${{" in line, f"about.{key} is a bare literal: {line!r}"
+            line = next(row for row in text.splitlines() if row.strip().startswith(key))
+            # `CONTEXT_VAR` and not merely `${{`, for the reason
+            # `test_source_git_resolves_through_the_env_var_rather_than_a_literal`
+            # spells out: `${{ "https://github.com/blooop/devlaunch" }}` is a
+            # literal in an expression's clothes and satisfies a check for jinja.
+            assert CONTEXT_VAR in line, (
+                f"about.{key} no longer resolves through `{CONTEXT_VAR}`, so it "
+                f"names one repository while the build fetches another: {line!r}"
+            )
 
     def test_the_recipe_maintainer_is_left_alone_and_explained(self):
         """`extra.recipe-maintainers` names a person, not a publish location --
