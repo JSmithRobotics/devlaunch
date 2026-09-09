@@ -314,6 +314,151 @@ done
         for cmd in ["up", "stop", "rm", "code", "restart", "recreate", "reset"]:
             assert cmd not in completions
 
+    def test_an_agent_flag_does_not_move_the_workspace_spec(self):
+        """`aid --codex <spec>` completes its spec exactly as `aid <spec>` does.
+
+        aid reads its leading flags and calls the first word that is not one the
+        workspace spec (`parse_aid_args`), so an agent flag does not occupy the
+        spec's position. The script counted words from the command instead and
+        offered a spec at word two alone, which made every `aid --codex`,
+        `aid --claude` and `aid --gemini` line complete nothing at all.
+        """
+        # Both halves of what the function answers, because "the same" includes
+        # whether the cursor is left against the `/` -- an owner completed with a
+        # trailing space is a different gesture from one without, and COMPREPLY
+        # cannot show the difference. `run_completion` alone would pass a script
+        # that appended a space here and not there.
+        for spec in ["my-", "", "my-org/", "my-org/my-repo@", "./"]:
+            bare = self.run_completion_with_options(f"aid {spec}")
+            assert bare[0], f"`aid {spec}` completes something to begin with"
+            for flag in ["--claude", "--codex", "--gemini"]:
+                assert self.run_completion_with_options(f"aid {flag} {spec}") == bare, (
+                    f"`aid {flag} {spec}` completes differently from `aid {spec}`, "
+                    "but the flag is read before the spec and does not stand in its "
+                    "place"
+                )
+
+    def test_a_value_option_and_its_value_do_not_move_the_workspace_spec(self):
+        """`dl --devcontainer robot <spec>` completes its spec too.
+
+        The same defect as the agent flags, two words wide instead of one:
+        clap puts options anywhere among the positional words, so the variant
+        name is not the workspace and the workspace is not word two.
+        """
+        bare = self.run_completion("dl my-")
+        assert bare
+        assert self.run_completion("dl --devcontainer robot my-") == bare
+        assert self.run_completion("dl --claude-profile work my-") == bare
+
+    def test_a_leading_modifier_leaves_the_verb_where_it_was(self):
+        """`dl --rm <ws> <verb>`: a flag ahead of the spec shifts nothing.
+
+        `--rm` modifies a launch rather than being one, so the spec is still to
+        come after it and a verb after that.
+
+        The anchor is not decoration: without it both sides are `[]` when the
+        verb branch never fires, and the test passes against a script that
+        completes nothing at all. Mutating `position == 1` to `position == 99`
+        was green before it was added.
+        """
+        verbs = self.run_completion("dl my-workspace ")
+        assert "stop" in verbs, "the line the flag is added to offers verbs at all"
+        assert self.run_completion("dl --rm my-workspace ") == verbs
+
+    def test_a_command_flag_ends_the_line_whatever_follows_it(self):
+        """A flag that *is* the command takes neither a workspace nor a verb.
+
+        The distinction the scan turns on, and the half that is easy to lose
+        when the other half starts working: `--devcontainer` has not started a
+        line and `--ls` has finished one, so only the second stops here.
+        """
+        for line in ["dl --ls ", "dl --purge ", "dl --prune ", "dl --version ", "dl --ls my-"]:
+            assert self.run_completion(line) == [], (
+                f"`{line}` completes something, but the flag on it names the whole "
+                "command and no workspace follows one"
+            )
+
+    def test_only_a_flag_a_spec_can_follow_is_completed_past(self):
+        """A workspace is offered after a flag only if the CLI takes one there.
+
+        The ten flags below all refuse a workspace, and each refusal is the
+        proof: `dl --repos my-ws` answers "--repos takes no workspace",
+        `dl --yes my-ws` answers "--yes means nothing for a workspace command",
+        and `dl --json my-ws` is a clap error about the missing `--ls`. Tabbing
+        to a name and then being refused for something you never typed is worse
+        than no completion at all, which is the same bar
+        `test_the_completion_offers_only_names_a_launch_accepts` holds the
+        profile names to.
+
+        Three groups, and they are why the scan's default arm has to be "this
+        flag ends the line" rather than "a spec is still to come": the hidden
+        members of the command group, the five flags that modify a command
+        already on the line, and the two retired spellings.
+        """
+        for flag in [
+            "--repos",
+            "--completion-data",
+            "--update-cache",
+            "--json",
+            "--size",
+            "--yes",
+            "--force",
+            "--force-worktrees",
+            "--stop",
+            "--autorm",
+        ]:
+            assert self.run_completion(f"dl {flag} ") == [], (
+                f"`dl {flag} <tab>` offers a workspace, and `dl {flag} <ws>` is a "
+                "line the CLI refuses"
+            )
+
+    def test_a_spec_still_follows_the_flags_that_modify_a_launch(self):
+        """The other side of that rule: the three dl flags a spec does follow.
+
+        Named as the whole set rather than sampled, because the fix turns on
+        the default arm being a refusal -- so this is the list of exceptions,
+        and a flag missing from it completes nothing.
+        """
+        for flag in ["--rm", "--devcontainer robot", "--claude-profile work"]:
+            assert self.run_completion(f"dl {flag} my-") == ["my-org/"], (
+                f"`dl {flag} my-<tab>` offers no spec, but the flag modifies a "
+                "launch and a workspace is what comes next"
+            )
+
+    def test_an_unknown_leading_flag_completes_nothing_for_either_binary(self):
+        """A flag neither grammar knows ends the line rather than shifting it.
+
+        For dl because clap refuses the flag outright, and for aid because it
+        cannot know whether an unknown flag takes a value: `parse_aid_args`
+        reads one as a boolean dl option, so on
+        `aid --unknown-taking-a-value foo owner/repo` it calls `foo` the spec.
+        Completing nothing is the honest answer to a line whose slots aid
+        itself cannot place.
+        """
+        for line in ["dl --bogus my-", "aid --bogus my-", "dl --bogus ", "aid --bogus "]:
+            assert self.run_completion(line) == []
+
+    def test_nothing_is_completed_past_the_double_dash(self):
+        """After `--` the words are the command run inside the workspace."""
+        # Anchored the same way: each line without its `--` completes something,
+        # so an empty answer is the `--` and not a script that answers nothing.
+        for line, before in [
+            ("dl my-workspace -- ", "dl my-workspace "),
+            ("dl my-workspace -- ls my-", "dl my-workspace "),
+            ("dl --rm my-ws -- ", "dl --rm "),
+        ]:
+            assert self.run_completion(before), f"`{before}` completes something"
+            assert self.run_completion(line) == []
+
+    def test_an_aid_prompt_is_never_a_verb_however_the_line_began(self):
+        """aid's prompt starts after the spec, leading flags or not."""
+        for line in ["aid my-workspace ", "aid --codex my-workspace ", "aid --codex my-ws stop "]:
+            for verb in ["up", "stop", "rm", "code", "restart", "recreate", "reset"]:
+                assert verb not in self.run_completion(line), (
+                    f"`{line}` offers the verb {verb}, but everything after an aid "
+                    "workspace is prompt text"
+                )
+
     def test_completion_partial_workspace_match(self):
         """Test partial matching of workspace names."""
         # Complete after typing "dl test"

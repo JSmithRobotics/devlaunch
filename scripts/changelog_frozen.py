@@ -32,6 +32,22 @@ Everything below the newest release is frozen, which is what a changelog is for.
 Editing an old entry stays possible; it just has to be a visible, deliberate
 override rather than a thing that happens to you during a rebase.
 
+**The one edit that is allowed, and why it has to be.** A released section may
+move back to what its tag says shipped -- `git show v<version>:CHANGELOG.md`,
+byte for byte. Without that arm the guard has a state it cannot get out of: once
+a misfiled entry is merged, it is on the base branch, so *every* honest
+correction changes a released section and the guard refuses all of them. The
+false record becomes the only text CI will accept, which is the opposite of what
+this is for. It happened -- #591 re-cut a version #593 had already published, and
+its entry landed under the shipped heading from the one direction the base-versus-
+head comparison cannot see.
+
+The tag is what makes this safe rather than a loophole: it is written by the
+release, not by the branch asking to be let through, so a branch cannot forge
+agreement with it. Anything short of a confident answer from git -- no tag, no
+git, an unparsable file at that tag -- refuses, so the arm can only ever permit
+a restoration it has positively proved.
+
 Usage:
     changelog_frozen.py <base-changelog> <head-changelog>
 
@@ -41,6 +57,7 @@ Exits 0 when every version present in both is byte-identical, 1 otherwise, and
 
 import difflib
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -99,7 +116,40 @@ def read(path: Path) -> str:
         raise Unparsable(f"{path}: cannot be read ({problem})") from problem
 
 
-def frozen_sections_differ(base: dict[str, str], head: dict[str, str]) -> list[str]:
+def shipped_at_tag(version: str, run=subprocess.run) -> str | None:
+    """The section for `version` as it stands in the tag that published it.
+
+    The oracle that tells a *restoration* from a corruption, which the two files
+    alone cannot: by content they are the same edit, and only the tag knows which
+    text actually shipped. `git show v<version>:CHANGELOG.md` is the whole of it.
+
+    `None` for anything that is not a confident answer -- no tag, no git, a
+    CHANGELOG.md that will not parse at that tag, a version the tag's own file
+    does not contain. Every one of those returns to the caller as a refusal
+    rather than as permission, because a guard that cannot reach its oracle has
+    checked nothing, and reporting that as success is the defect it exists to
+    find.
+    """
+    try:
+        done = run(
+            ["git", "show", f"v{version}:CHANGELOG.md"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if done.returncode != 0:
+        return None
+    try:
+        return sections(done.stdout, f"v{version}").get(version)
+    except Unparsable:
+        return None
+
+
+def frozen_sections_differ(
+    base: dict[str, str], head: dict[str, str], shipped=shipped_at_tag
+) -> list[str]:
     """Report every version present in both whose text is not identical.
 
     Versions only on `head` are new -- that is a release cut, and the case the
@@ -109,11 +159,21 @@ def frozen_sections_differ(base: dict[str, str], head: dict[str, str]) -> list[s
     compared here.
     """
     complaints = []
+    restored: list[str] = []
     for version, base_text in base.items():
         if version == MOVING or version not in head:
             continue
         head_text = head[version]
         if head_text == base_text:
+            continue
+        # A released section may still move in exactly one direction: back to what
+        # the tag says shipped. That is not a loophole in the rule, it is the rule
+        # applied to the case the guard cannot otherwise reach -- when the bad
+        # entry is already on the base branch, every honest correction changes a
+        # released section, and refusing them all leaves the false record standing
+        # as the only state CI will accept.
+        if head_text == shipped(version):
+            restored.append(version)
             continue
         diff = "".join(
             difflib.unified_diff(
@@ -132,6 +192,8 @@ def frozen_sections_differ(base: dict[str, str], head: dict[str, str]) -> list[s
             f"section, say so in the pull request; this guard is meant to make that a\n"
             f"decision rather than an accident.\n"
         )
+    for version in restored:
+        print(f"'## [{version}]' changed, and now matches v{version} exactly: restored")
     return complaints
 
 
@@ -152,7 +214,7 @@ def main(argv: list[str]) -> int:
         print(complaint, file=sys.stderr)
     if complaints:
         return 1
-    print(f"every released section is untouched ({len(base) - 1} compared)")
+    print(f"every released section is untouched or restored ({len(base) - 1} compared)")
     return 0
 
 

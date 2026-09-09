@@ -19,7 +19,7 @@ one argument instead of a clone, a config file and a build command.
 [![GitHub pull-requests merged](https://badgen.net/github/merged-prs/blooop/devlaunch)](https://github.com/blooop/devlaunch/pulls?q=is%3Amerged)
 [![GitHub release](https://img.shields.io/github/release/blooop/devlaunch.svg)](https://GitHub.com/blooop/devlaunch/releases/)
 [![PyPI](https://img.shields.io/pypi/v/devlaunch)](https://pypi.org/project/devlaunch/)
-[![Conda](https://img.shields.io/badge/conda-v0.32.0-brightgreen?logo=anaconda)](https://prefix.dev/channels/blooop/packages/devlaunch)
+[![Conda](https://img.shields.io/badge/conda-v0.37.0-brightgreen?logo=anaconda)](https://prefix.dev/channels/blooop/packages/devlaunch)
 [![License](https://img.shields.io/github/license/blooop/devlaunch)](https://opensource.org/license/mit/)
 [![Platform](https://img.shields.io/badge/platform-linux--64-blue)](https://github.com/blooop/devlaunch/releases)
 [![Pixi Badge](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/prefix-dev/pixi/main/assets/badge/v0.json)](https://pixi.sh)
@@ -276,7 +276,7 @@ clone, and [docs/cleanup.md](docs/cleanup.md) says what it carries one past and 
 
 ```bash
 $ dl --version
-dl 0.32.0
+dl 0.37.0
 ```
 
 `--devcontainer <variant|path>` picks a non-default `devcontainer.json`. A bare name means
@@ -344,11 +344,13 @@ the question and launches one-shot, so scripts behave as they always have.
 | `--devcontainer <variant\|path>` | Passed through to `dl` |
 | `--claude-profile <name>` | Passed through to `dl`: which host Claude login to forward. Not the claude.ai account the container's `claude` is paired to for Remote Control |
 
-**The trade, stated plainly.** `claude` starts with `--dangerously-skip-permissions`, because the
-agent is already inside a disposable container holding only this repo, and the per-tool prompts
-would stall an unattended run. `IS_SANDBOX=1` rides along because `claude` otherwise refuses that
-flag under `uid 0`, and devcontainers that run as root are ordinary. That variable is scoped to
-the agent process and is not exported into your shell.
+**The trade, stated plainly.** Every agent starts in full auto, because it is already inside a
+disposable container holding only this repo and the per-tool prompts would stall an unattended
+run. Each CLI spells that its own way, and
+[docs/cli.md](docs/cli.md#full-auto-every-agent-every-launch) has the flag per agent. `claude`'s
+is `--dangerously-skip-permissions`, with `IS_SANDBOX=1` beside it because it otherwise refuses
+that flag under `uid 0` and devcontainers that run as root are ordinary. That variable is scoped
+to the agent process and is not exported into your shell.
 
 The agent cannot reach your host, but it can rewrite the checkout it is in. Review an `aid`
 workspace before pushing rather than treating it as a sandbox that will stop the agent for you.
@@ -357,8 +359,8 @@ session is also drivable from the claude.ai account signed in inside the contain
 `DEVLAUNCH_AID_REMOTE_CONTROL=0` turns that off for every launch;
 [docs/cli.md](docs/cli.md) has the rest.
 
-This applies to `aid` starting `claude` and nothing else. `--codex` and `--gemini` are unaffected,
-and `dl <ws> -- claude` runs exactly what you typed.
+This applies to agents `aid` starts, and nothing else. `dl <ws> -- claude` runs exactly what you
+typed.
 
 The agent's CLI has to be in the container already. `aid` runs it; it does not install it.
 

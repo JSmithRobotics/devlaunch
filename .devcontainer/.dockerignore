@@ -1,0 +1,53 @@
+# What the prebuild tag is allowed to notice.
+#
+# devpod hashes the build context as well as the build config, and with a
+# Dockerfile that COPYs nothing it hashes the *whole* directory: every file
+# under the context, keyed by path and CRC32, with only its own feature-staging
+# folder excluded (pkg/util/hash.DirectoryHash, reached from
+# pkg/devcontainer/config.CalculatePrebuildHash). There was no .dockerignore in
+# here, so the context half of the hash was "every byte in .devcontainer/",
+# which is a wider claim than the tag is meant to make: the tag is supposed to
+# move when the image would differ, and three kinds of file in here cannot
+# change the image at all.
+#
+# Measured on devpod 0.26.1, amd64, against this repository's `.devcontainer/`
+# at 4db3427: appending one comment line to claude-code/README.md and one to
+# claude-code/init-host.sh moved the tag from
+# devpod-5bf7be3e3e7e1b3f4fbb01a9b3ab88e7 -- which CI had published, so it
+# pulled -- to devpod-90e9641b9d3661f681e640eeedb3a410, which nothing has ever
+# published. That is a multi-minute local build, per launch, on every branch
+# carrying the edit, bought with a prose change.
+#
+# Nothing here is excluded from the *build* in any meaningful sense, which is
+# what makes this safe rather than a trade: the Dockerfile has no COPY and no
+# ADD, so the context tar is not read at all. The one guard against that
+# changing is a test -- test_the_dockerfile_copies_nothing_out_of_the_context.
+
+# Prose. The feature's README and troubleshooting guide are here because the
+# devcontainer Features spec wants them beside the feature they document, not
+# because anything reads them at build time.
+**/*.md
+
+# The host-side hook. `initializeCommand` runs on the developer's machine
+# before the container exists, and devpod already agrees it is not a build
+# input: normalizeConfigForHash clears DevContainerActions, which is where the
+# command lives, out of the config half of the hash. It then hashed the script
+# itself straight back in as context. Excluding it here is what makes the two
+# halves say the same thing.
+claude-code/init-host.sh
+
+# The manifest itself, for the same reason and with the most to gain from it.
+# devpod does not read devcontainer.json out of the context -- it read the file
+# to get here -- and the config half of the hash already carries every build
+# input it declares: `name`, `features`, `overrideFeatureInstallOrder`, `image`,
+# `dockerfile`, `context` and the whole of `build`. Hashing the raw bytes on top
+# of that adds nothing except the comments, and this file is mostly comments:
+# `abf6d9b` moved the tag with ~30 lines of them beside a one-line mount change.
+#
+# It also stops the raw bytes overruling devpod on the fields it deliberately
+# drops -- `mounts`, `containerEnv`, `postCreateCommand`, `customizations` --
+# all of which devpod applies when it creates the container, so a prebuilt image
+# plus a changed one of them is correct and was being rebuilt for nothing.
+# Verified both directions: a comment-only edit leaves the tag alone, while
+# changing `build.cacheFrom` or adding a feature still moves it.
+devcontainer.json

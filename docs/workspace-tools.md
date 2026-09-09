@@ -55,6 +55,22 @@ that is *already running* skips that step, and the token it was given at startup
 stays in place, including one it was given before you set
 `DEVLAUNCH_NO_GH_TOKEN`. Run `dl <workspace> restart` to replace it.
 
+## Shared agent skills
+
+The repo's [local container feature](../.devcontainer/claude-code/README.md#shared-skills-for-claude-and-codex)
+mounts `~/.agents/skills` for Codex alongside Claude's discovery directory.
+It also protects `~/.claude/shared-skills`, so a relative link can point into
+that directory without making the skill body writable from the container.
+Both storage layouts work across different host and container usernames.
+
+This is a feature opt-in, not a mount injected by `dl` into every workspace.
+Repos with container-local configuration can provision the same directories
+through dotfiles. Existing containers using the feature need recreation to
+receive its new mounts. The feature preserves existing skills and links; it
+does not install Codex or share its credentials and session state. Dotfiles
+installers should skip host-mounted skill roots rather than reconcile their
+contents through a read-only bind.
+
 ## Claude authentication
 
 `claude` starts in every workspace `dl` opens without asking for a login. The
@@ -1485,6 +1501,50 @@ After running `dl --install`, tab completion offers:
 - Known GitHub owners and repositories from your workspaces
 - File/directory paths when starting with `./`, `/`, or `~`
 - All global flags (`--ls`, `--install`, etc.) and workspace commands
+
+### A flag before the spec does not move it
+
+Both command lines take flags ahead of the workspace, and the completion reads
+them rather than counting words:
+
+```
+$ aid --codex kin<TAB>
+kinisi-robotics/
+$ dl --devcontainer robot kin<TAB>
+kinisi-robotics/
+```
+
+Counting is what this used to do, and it put the spec at the second word alone,
+so every one of those lines completed nothing. The rule each command actually
+follows is different. aid reads its leading flags and calls the first word that
+is not one the spec, which is `parse_aid_args`, and dl is a clap grammar, which
+lets an option sit anywhere among the positional words.
+
+The flags a spec may follow are the ones that modify a launch: `--rm`,
+`--devcontainer` and `--claude-profile` for `dl`, and for `aid` those two plus
+the agent flags and either polarity of `--remote-control`. Every other flag ends
+the line, and nothing is offered after one:
+
+```
+$ dl --ls <TAB>
+$ dl --json <TAB>
+$ dl --repos <TAB>
+```
+
+Listing the flags a spec may follow, rather than the flags that end the line, is
+the load-bearing choice. The flags nobody thinks to list are all on the ending
+side, and each of them refuses a workspace for a different reason: `--repos`
+answers "--repos takes no workspace", `--json` is an error about the missing
+`--ls` it requires, `--yes` is refused as meaningless for a workspace command,
+and a leading `--force` is not a modifier at all but the workspace slot itself,
+so `dl --force my-ws` answers "Unknown workspace '--force'". Tabbing to a name
+and then being refused for a word you never typed is worse than no completion,
+which is the same bar the profile names are held to under
+[Naming a profile](#naming-a-profile).
+
+Once one modifier is on the line the only flags still offered are the other
+modifiers, since `dl --rm --ls` is refused and `aid --codex --help` is not aid's
+help but an unknown option handed to dl.
 
 ### Owners come before workspace ids, and why
 

@@ -7,6 +7,217 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-09-09
+
+### Fixed
+
+- **`dl <ws> -- <command>` no longer re-splits a quoted argument, and no longer
+  runs one as shell.** The words after `--` were rejoined with plain spaces and
+  handed to `bash -lc` as a command line, so every space the host's shell had
+  already consumed became a separator again. `dl <ws> -- claude 'fix the bug'`
+  arrived as four arguments where one was meant. Each word is quoted now
+  (`shell::join`), so the remote argv is the argv that was typed.
+
+  Two consequences beyond the splitting, both of them silent. A word holding `#`
+  commented out the rest of the line: a supervisor sending
+  `claude 'Address the open review on PR #10848 (...)'` reached the agent as the
+  single word `Address`, and everything after the `#` -- the whole prompt,
+  including every rule it carried -- was discarded by the remote shell before
+  `claude` ran. And a word holding `$(...)` or a backtick was *executed*, in a
+  workspace that has the forwarded `GH_TOKEN`, which made any text flowing into
+  a `dl --` command line (a PR title, a review body) shell code.
+
+  `aid` composed its own line and passed it as one word, which survived only
+  because the rejoin was an identity on a single argument. It hands dl argv now
+  and quotes nothing itself. The composed payload is byte for byte what it was:
+  a bare `NAME=value` needs no quoting, so the assignment-prefix spelling the
+  README documents still reaches the shell as one.
+
+  A shell snippet is still asked for by naming a shell -- `dl <ws> -- bash -lc
+  'a && b'` -- and that spelling was broken before this too, running `bash -lc a`
+  and then `b`. Passing a snippet as a single word no longer works, because a
+  single word is now a program name: `dl <ws> -- 'exit 7'` looks for a program
+  called `exit 7` and exits 127 where it used to exit 7. The e2e probes were the
+  only callers in the tree spelling it that way, and they name `bash -lc` now.
+  `dl <ws> -- ""` went from exit 0 to 127 for the same reason.
+
+## [0.36.0] - 2026-09-09
+
+### Fixed
+
+- **A flag before the workspace spec no longer stops tab completion.**
+  `aid --codex owner/repo<TAB>` offered nothing at all, and neither did
+  `aid --claude`, `aid --gemini` or `dl --devcontainer robot owner/repo<TAB>`.
+  The completion script found the spec by counting words from the command, word
+  two for the spec and word three for a verb, and neither grammar works that
+  way: `parse_aid_args` reads aid's leading flags and calls the first word that
+  is not one the spec, and dl is clap, which puts options anywhere among the
+  positional words.
+
+  The script now scans the words before the cursor and counts the positional
+  ones, stepping over a value option with its value and stopping at `--`, so
+  the spec is wherever it actually lands. `dl --rm my-ws<TAB>` completes a
+  workspace, `dl --rm my-ws <TAB>` completes a verb, and `aid --codex my-ws`
+  completes exactly what `aid my-ws` does, trailing space included.
+
+  That needs a distinction the old guard could not make, since it ended
+  completion on any leading `--`: a flag a spec may follow against one that
+  ends the line. The table lists the first, three flags for dl and nine for
+  aid, and every other flag ends the line. That direction is deliberate and it
+  is where the first attempt went wrong: listing the endings instead put ten
+  flags in the wrong arm, because the ones nobody thinks to list are all on
+  that side. `dl --repos my-workspace` answers "--repos takes no workspace",
+  `dl --json my-workspace` is a clap error about the missing `--ls`, and
+  `dl --force my-workspace` answers "Unknown workspace '--force'" because a
+  leading `--force` is the workspace slot itself. Completing a name onto any of
+  those is worse than completing nothing, so the default arm is the refusal.
+
+  Both tables are derived rather than hand-judged, and
+  `rust/dl/tests/completion_tables.rs` diffs them: dl's is every flag the
+  grammar declares minus clap's `what` group, minus the hidden ones, minus the
+  five that need something already on the line, and aid's is the three tables
+  `parse_aid_args` reads past.
+
+- **Editing prose under `.devcontainer/` no longer throws away the prebuilt
+  container.** Opening this repository with `dl` pulls a published image instead
+  of building one, and it had gone back to building. The prebuild tag is a hash
+  of the build context, and with a Dockerfile that `COPY`s nothing devpod hashes
+  the *whole* context directory -- so the feature's `README.md`, its
+  `TROUBLESHOOTING.md`, the host-side `initializeCommand`, and this manifest's
+  own comments were all hashed into a tag that is supposed to move only when the
+  image would differ. None of the four can reach the image.
+
+  Measured on devpod 0.26.1, amd64, at `4db3427`: one comment line appended to
+  `claude-code/README.md` and one to `claude-code/init-host.sh` moved the tag
+  from `devpod-5bf7be3e3e7e1b3f4fbb01a9b3ab88e7`, which CI had published and
+  every launch pulled, to `devpod-90e9641b9d3661f681e640eeedb3a410`, which
+  nothing had ever built. The cost was several minutes per launch, on every
+  branch carrying the edit, and the only symptom was that opening a container
+  was slow again -- devpod treats an unmatched tag as a cache miss and builds
+  locally without complaint.
+
+  `.devcontainer/.dockerignore` is the fix, and the narrowing is checked in both
+  directions rather than only the useful one. Prose, the host hook and
+  `devcontainer.json` stop moving the tag; the Dockerfile,
+  `claude-code/install.sh`, `claude-code/devcontainer-feature.json` and the
+  build inputs the manifest declares still do -- `build.cacheFrom` and an added
+  feature were both confirmed to move it, since devpod hashes those from the
+  parsed config rather than from the file. An exclusion too wide would be the
+  worse bug: a launch pulling an image built from a Dockerfile the branch no
+  longer has, coming up fine and being the wrong container.
+
+  **One rebuild is still owed.** The `.dockerignore` is itself part of the
+  context, so this commit moves the tag once; launches build locally until
+  `devcontainer-prebuild.yml` republishes on `main`.
+
+## [0.35.0] - 2026-09-09
+
+### Added
+
+- The local container feature shares `~/.agents/skills` with Codex and mounts
+  `~/.claude/shared-skills` read-only. Relative links between the shared roots
+  now resolve across host and container usernames, and writes through those
+  links cannot modify the host's shared skill bodies. Existing containers need
+  recreation to receive the mounts.
+
+### Fixed
+
+- **The feature's own troubleshooting page no longer claims protection it does
+  not provide.** `What's Protected (Read-Only)` listed `CLAUDE.md` and
+  `settings.json`, both of which are writable from the container and reach the
+  host, and a write to `settings.json` is host command execution because it can
+  name a hook command inline. The README's equivalent section had been
+  corrected; this copy was missed.
+- **The documented way to unblock a refused container create now creates every
+  directory the create needs.** `bind mount source path does not exist` told the
+  reader to make three of the seven mounted directories, so following it left
+  the create refused, and to run `echo '{}' > ~/.claude/settings.json`, which
+  truncates the settings file of anyone who already had one.
+
+## [0.34.0] - 2026-09-09
+
+### Fixed
+
+- **A forwarded Claude login no longer loses to an empty credentials file.**
+  `dl --claude-profile bear <ws>` resolved the profile, forwarded the token as
+  `CLAUDE_CODE_OAUTH_TOKEN`, and `claude` asked the operator to log in anyway.
+  The devcontainer feature seeded `{}` into `.credentials.json` when the file was
+  missing, and Claude Code reads that file before it reads the environment: an
+  empty one is not a placeholder, it is a logged-out session, and it wins.
+
+  The stub was invisible for as long as the feature mounted the host's real
+  credentials file *over* it, so the bug could only ever appear where the
+  forwarded token was the container's only login -- which is the one
+  configuration those mounts rule out, since `forwarded_claude` declines to
+  forward into a config directory it does not own. It surfaced the moment a
+  workspace had its Claude mounts removed, which is what wanting a profile
+  requires.
+
+  `.claude.json` went with it, and that half fixed something else. The
+  provisioner seeds `{"hasCompletedOnboarding":true}` there and exits early when
+  the file exists, so the stub had been suppressing devlaunch's own onboarding
+  seed: every container built from this feature met its operator with the trust
+  prompt. Claude Code creates the credentials file itself on first use, so
+  neither stub had anything to replace it.
+
+- **The ssh agent socket is bound from `$SSH_AUTH_SOCK` rather than from a guess
+  at where it lives.** The mount source was `${localEnv:HOME}/.ssh/agent.sock`,
+  which is not a path any agent picks by itself: gpg-agent listens on
+  `$XDG_RUNTIME_DIR/gnupg/S.gpg-agent.ssh` and `ssh-agent` on a `/tmp/ssh-XXXX`
+  mktemp path. On such a host `devpod up` refused the create outright with
+  `bind mount source path does not exist`, before the container existed, which
+  reads as a broken tool rather than as a manifest naming a path the host never
+  had. `init-host.sh` cannot paper over this the way it does for `known_hosts`:
+  that one is touched into existence, and there is no touching a socket into
+  being an agent.
+
+## [0.33.0] - 2026-09-07
+
+### Fixed
+
+- **`aid --codex` and `aid --gemini` now start in full auto, which only
+  `aid --claude` ever did.** The other two ran their CLIs bare, so codex stopped at
+  its first approval prompt and gemini at its first tool call: an
+  `aid owner/repo fix the bug` opened a workspace, printed a question and waited for
+  somebody who had already walked away. The reason for claude's
+  `--dangerously-skip-permissions` was never claude-specific. It is that the agent
+  is already inside a disposable container holding only this repo, so the per-tool
+  prompts buy nothing and stall the run, and that is true of every agent `aid`
+  starts.
+
+  One rule, three spellings, because each CLI has its own:
+
+  | Agent | Full-auto flag |
+  | --- | --- |
+  | `claude` | `--dangerously-skip-permissions`, with `IS_SANDBOX=1` beside it |
+  | `codex` | `--dangerously-bypass-approvals-and-sandbox` |
+  | `gemini` | `--yolo` |
+
+  **codex gets the bypass and not its `--full-auto`**, which is the trap in this
+  change, for two reasons of which the first is the one that matters: `--full-auto`
+  still escalates to a person. It is an approval policy plus a sandbox rather than an
+  absence of approvals, so an unattended run stops and asks, which is the whole of
+  the failure being fixed here. Only `--dangerously-bypass-approvals-and-sandbox`
+  sets the policy to never ask. The second reason is the sandbox `--full-auto` keeps:
+  workspace-write with the network off, so `gh`, `cargo fetch` and `pip install`
+  would fail inside a container that has a network and a checkout the agent is meant
+  to be able to push from. The container is already the sandbox; nesting a second one
+  inside it subtracts exactly the capabilities `dl` went to the trouble of
+  provisioning.
+
+  Held as a rule rather than as three assertions. `every_agent_starts_in_full_auto`
+  diffs the *names* it expects against the agent table's keys, so an agent added
+  later without a flag breaks a test instead of stopping somebody's unattended run.
+  The full-auto table now in `docs/cli.md` is a second hand-maintained copy of that
+  fact, so `the_full_auto_section_names_the_flags_each_agent_is_actually_started_with`
+  diffs the page against the command devpod receives. Both compare flags as whole
+  argv words: every truncation of a flag is a substring of it, and so is every flag
+  that merely starts with one, so `--yolo-dry-run` satisfied a substring test while
+  asking gemini for the opposite of what the page promised.
+
+  Unchanged: a command you typed yourself. `dl <ws> -- codex` runs codex, exactly as
+  written, with nothing added.
+
 ## [0.32.0] - 2026-09-04
 
 ### Added

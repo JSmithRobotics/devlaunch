@@ -4,7 +4,8 @@
 selector decides what you picked, which verb refreshes git state and which only
 touch the container, which commands get a terminal, what `--rm` promises and where
 it stops, which exits fire it, the spellings that were retired and what they say
-now, what `aid`'s Remote Control default starts and how to turn it off, what
+now, which full-auto flag `aid` starts each agent with and why codex gets the one it
+gets, what `aid`'s Remote Control default starts and how to turn it off, what
 `kill` does to a workspace that will not answer, and what happens when devpod is
 missing, will not answer, or injects the wrong agent binary.
 
@@ -98,6 +99,37 @@ workspace devpod already has and, when the checkout is behind the `origin/<branc
 that clone last fetched, the attach says how far behind before it hands over the
 shell. [How fresh a launch is](workspaces.md#how-fresh-a-launch-is) is the whole
 of the freshness rules, and the section under it names which verb moves what.
+
+## What `--` takes
+
+The command and its arguments, one word each. `dl` quotes every word on the way
+into the remote payload, so a quoted argument stays one argument: `dl <ws> --
+claude 'fix the bug'` runs `claude` with a single argument, and a word holding a
+space, a `#`, a `$(...)` or a backtick is that word rather than shell syntax.
+
+It has to be built that way because the payload is one `bash -lc <line>` for both
+transports. The words used to be rejoined with plain spaces, which gave the remote
+shell back every separator your own shell had already consumed: quoted arguments
+were re-split, a `#` commented out the rest of the line, and a `$(...)` ran.
+
+One exception, and it is deliberate. The quoting leaves a word alone when it needs
+none, and `=` counts as needing none, so a leading `NAME=value` still reaches the
+shell as an assignment prefix and sets that variable for that command only. That
+is what makes `dl <ws> -- IS_SANDBOX=1 claude ...` work, which is the spelling
+`aid` uses and the one the README shows.
+
+The exception ends where the quoting begins, and it ends abruptly. It is the
+whole word that has to need no quoting, value included, so `FOO=bar` is an
+assignment and `FOO='a b'` is not: the value's space makes the word
+`'FOO=a b'`, and a shell reads a quoted word as a program name, so the command
+exits 127 with the variable never set. Values made of `[A-Za-z0-9_@%+=:,./-]`
+are the ones that survive. For anything else, name the shell and write the
+assignment inside it: `dl <ws> -- bash -lc 'FOO="a b" cmd'`.
+
+A shell snippet is a command like any other, so name the shell: `dl <ws> -- bash
+-lc 'a && b'`. Redirections and pipes typed on your own command line belong to
+your own shell and never reach `dl`, which is what makes `dl <ws> -- ls >
+files.txt` write the file here.
 
 ## Commands that need a terminal
 
@@ -460,6 +492,58 @@ Pinned by `force_deletes_only_where_it_follows_both_the_name_and_the_verb` and
 strings `render.rs` and `lib.rs` own, so
 `the_force_placement_section_quotes_the_refusals_it_says_it_does` reads this
 section back and diffs them against what the binary prints.
+
+## Full auto: every agent, every launch
+
+`aid` exists to hand a repo to an agent and walk away, so every agent it starts is
+started in that agent's full auto mode. There is no flag to type and no flag to
+type differently per agent:
+
+| Agent | Full-auto flag |
+| --- | --- |
+| `claude` | `--dangerously-skip-permissions`, with `IS_SANDBOX=1` beside it |
+| `codex` | `--dangerously-bypass-approvals-and-sandbox` |
+| `gemini` | `--yolo` |
+
+The flag and not the whole command line, which is longer than one column: a default
+`claude` launch also carries `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` and a
+`--remote-control=<workspace>`, and gemini takes its initial prompt through
+`--prompt-interactive`.
+
+One rule, three spellings, and the table in `rust/aid/src/rewrite.rs` is where they
+live. `every_agent_starts_in_full_auto` holds the rule against that table rather
+than against one row of it, so an agent added without its flag fails a test instead
+of stopping someone's unattended run to ask about its first edit.
+
+Two of those rows have a reason worth reading.
+
+**codex gets the bypass, not `--full-auto`.** codex offers both and only one of them
+is this, for two reasons of which the first is the one that matters: `--full-auto`
+still escalates to a person. It is an approval policy plus a sandbox rather than an
+absence of approvals, so an unattended run stops and asks, which is the whole of
+what this rule exists to prevent. Only `--dangerously-bypass-approvals-and-sandbox`
+sets the policy to never ask. The second reason is the sandbox `--full-auto` keeps:
+workspace write with the network off, which would break `gh`, `cargo fetch` and
+`pip install` inside a container that has a network and a checkout the agent is
+meant to be able to push from. The container is already the sandbox, so a second one
+nested inside it subtracts exactly the capabilities `dl` went to the trouble of
+provisioning.
+
+**`IS_SANDBOX=1` is what makes claude's flag usable.** claude refuses
+`--dangerously-skip-permissions` outright under `uid 0`, exiting 1 with "cannot be
+used with root/sudo privileges", and devcontainers that run as root are ordinary.
+The variable is claude's own way of being told the refusal is answering for a
+machine that is not there. It is scoped to the agent process and is not exported
+into your shell.
+
+What this buys and what it costs is the same sentence: the agent will not stop to
+ask, so an `aid owner/repo fix the bug` can run to the end unattended, and it can
+also rewrite the checkout it is in without asking. It cannot reach your host. Review
+an `aid` workspace before pushing rather than treating it as something that will
+stop the agent for you.
+
+None of this reaches a command you typed yourself. `dl <ws> -- claude` runs claude,
+exactly as written, with no flags added and no variables set.
 
 ## Remote Control: every `aid` session, on your phone too
 

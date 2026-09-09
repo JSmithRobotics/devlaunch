@@ -273,6 +273,10 @@ fn a_prompt_reaches_the_agent_as_one_argument_through_dls_own_launch() {
     // dl's own launch of the workspace, and one `devpod ssh --command` carrying the
     // agent. Byte for byte Python's, quoting included — the payload travels in argv.
     //
+    // The echoed `aid -> dl` line shows the tail as the words it is, because that is
+    // what aid now hands dl; the `--command` below is unchanged, since dl puts back
+    // the same quoting aid used to apply itself.
+    //
     // Remote Control rides along with nothing typed, which is what it is now: the
     // default. The name is the spec, which here is the workspace the line named.
     let world = World::with(&["--warm"]);
@@ -281,9 +285,9 @@ fn a_prompt_reaches_the_agent_as_one_argument_through_dls_own_launch() {
     assert_eq!(
         run.err.lines().collect::<Vec<&str>>(),
         [
-            "aid -> dl devlaunch-main-3j1t -- 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 \
+            "aid -> dl devlaunch-main-3j1t -- CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 \
              IS_SANDBOX=1 claude --dangerously-skip-permissions \
-             --remote-control=devlaunch-main-3j1t '\"'\"'fix the bug'\"'\"''",
+             --remote-control=devlaunch-main-3j1t 'fix the bug'",
             "Workspace devlaunch-main-3j1t is already running, attaching...",
             "SSH command: devpod ssh devlaunch-main-3j1t --command bash -lc \
              'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
@@ -432,13 +436,16 @@ fn the_detached_cache_refresh_reaches_dl_through_aids_own_name() {
 #[test]
 fn each_agent_is_started_the_way_its_own_cli_takes_a_prompt() {
     // gemini's initial prompt is a flag that is a syntax error without one, so the
-    // flag only appears beside a prompt; codex takes neither a flag nor a variable.
+    // flag only appears beside a prompt; codex takes no prompt flag and no
+    // variable. Each line also carries the agent's full-auto flag, which is the
+    // spelling of one rule in three CLIs and is held as a rule by
+    // `every_agent_starts_in_full_auto` (rust/aid/src/rewrite.rs).
     let world = World::with(&["--warm"]);
     world.aid(&["--gemini", MAIN, "explain", "this"]).exited(0);
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc 'gemini --prompt-interactive '\"'\"'explain this'\"'\"''"
+            "devpod ssh {MAIN} --command bash -lc 'gemini --yolo --prompt-interactive '\"'\"'explain this'\"'\"''"
         )
     );
 
@@ -446,14 +453,16 @@ fn each_agent_is_started_the_way_its_own_cli_takes_a_prompt() {
     bare.aid(&["--gemini", MAIN]).exited(0);
     assert_eq!(
         bare.devpod_calls().last().expect("a session"),
-        &format!("devpod ssh {MAIN} --command bash -lc gemini")
+        &format!("devpod ssh {MAIN} --command bash -lc 'gemini --yolo'")
     );
 
     let codex = World::with(&["--warm"]);
     codex.aid(&["--codex", MAIN, "hi"]).exited(0);
     assert_eq!(
         codex.devpod_calls().last().expect("a session"),
-        &format!("devpod ssh {MAIN} --command bash -lc 'codex hi'")
+        &format!(
+            "devpod ssh {MAIN} --command bash -lc 'codex --dangerously-bypass-approvals-and-sandbox hi'"
+        )
     );
 }
 
@@ -559,4 +568,113 @@ fn a_remote_agent_that_failed_ends_with_the_agents_status() {
     // here.
     let world = World::with(&["--warm", "--remote-exit"]);
     world.aid(&[MAIN, "boom"]).exited(130);
+}
+
+/// The full-auto table `docs/cli.md` prints, held to the lines `aid` actually runs.
+///
+/// The "Full auto: every agent, every launch" section writes each agent's flag into
+/// a table. That is a hand-maintained copy of a fact owned by `rewrite.rs`'s agent
+/// table, and this repository allows a second copy only with a test beside it that
+/// diffs it against the first. `every_agent_starts_in_full_auto` in
+/// `rust/aid/src/rewrite.rs` is not that test: it pins the *behaviour*, and would
+/// still pass with a flag changed and the page left naming the old one.
+///
+/// Diffed against the command as devpod receives it, rather than against the source
+/// table, so the page is checked against what a launch does and not against another
+/// copy of the same list.
+///
+/// The set of names is asserted, not the count. Counting was the first shape of this
+/// guard and Sourcery broke it on sight: three rows reading claude, claude, codex
+/// satisfy a length check while the page has quietly lost gemini. The names the
+/// table has to carry are therefore spelled out here, and every row is launched, so
+/// a row naming an agent this build has never heard of fails at the launch rather
+/// than being skipped as unrecognised.
+#[test]
+fn the_full_auto_section_names_the_flags_each_agent_is_actually_started_with() {
+    let doc = std::fs::read_to_string(repo_root().join("docs/cli.md")).expect("docs/cli.md");
+    let rows = full_auto_rows(&doc);
+    let mut named: Vec<&str> = rows.iter().map(|(agent, _)| agent.as_str()).collect();
+    named.sort_unstable();
+    assert_eq!(
+        named,
+        ["claude", "codex", "gemini"],
+        "docs/cli.md's full-auto table names {named:?}, not one row per agent"
+    );
+
+    for (agent, flag) in rows {
+        let world = World::with(&["--warm"]);
+        world.aid(&[&format!("--{agent}"), MAIN]).exited(0);
+        let command = world
+            .devpod_calls()
+            .last()
+            .unwrap_or_else(|| panic!("`aid --{agent}` opened no session"))
+            .clone();
+
+        // As a whole word and not by `contains`, which is the same trap
+        // `the_force_placement_section_quotes_the_refusals_it_says_it_does` records:
+        // every truncation of a flag is a substring of it, so a table reflowed or
+        // mistyped down to `--d` would satisfy a substring test against a launch
+        // that says `--dangerously-bypass-approvals-and-sandbox`.
+        assert!(
+            command
+                .split_whitespace()
+                .any(|word| word.trim_matches('\'') == flag),
+            "docs/cli.md says `{agent}` runs with {flag:?}; the launch is {command:?}"
+        );
+    }
+}
+
+/// The `(agent, flag)` pairs the full-auto table states.
+///
+/// Matched on the heading rather than on a phrase under it, so the prose around the
+/// table stays free to be rewritten while this test keeps pointing at one span. A
+/// missing heading says so rather than yielding an empty section that every
+/// assertion passes over.
+///
+/// The agent is the first cell's single backticked word; the flag is the first
+/// `--word` in the second cell, which is the whole of what the copy has to get
+/// right. The rest of the cell is prose and is deliberately not read.
+///
+/// Requiring the backticks is what separates a row from the two lines every markdown
+/// table starts with. `| Agent |` is not backticked and the `| --- |` separator is
+/// not either, which matters more than it looks: the separator's cells begin `--`
+/// and would otherwise parse as an agent named `---` asking for a flag named `---`.
+/// No allow-list of names is applied here on purpose, so an unknown name reaches the
+/// caller and fails there.
+fn full_auto_rows(document: &str) -> Vec<(String, String)> {
+    const HEADING: &str = "## Full auto: every agent, every launch";
+    let start = document
+        .find(HEADING)
+        .unwrap_or_else(|| panic!("docs/cli.md no longer has a '{HEADING}' section"));
+    let rest = &document[start + HEADING.len()..];
+    let section = match rest.find("\n## ") {
+        Some(end) => &rest[..end],
+        None => rest,
+    };
+
+    section
+        .lines()
+        .filter_map(|line| {
+            let mut cells = line.trim().strip_prefix('|')?.split('|');
+            let agent = cells
+                .next()?
+                .trim()
+                .strip_prefix('`')?
+                .strip_suffix('`')?
+                .to_owned();
+            if agent.split_whitespace().count() != 1 {
+                return None;
+            }
+            let flag = cells
+                .next()?
+                .split_whitespace()
+                .map(|word| {
+                    word.trim_start_matches('`')
+                        .trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
+                })
+                .find(|word| word.starts_with("--"))?
+                .to_owned();
+            Some((agent, flag))
+        })
+        .collect()
 }

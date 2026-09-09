@@ -126,6 +126,10 @@ struct Flag {
     /// A value follows this flag as a separate word, which the script has to know
     /// so it can complete the value instead of another flag.
     takes_value: bool,
+    /// `group = "what"`: the flag *is* the command, so no workspace follows it.
+    /// The group exists because its members are mutually exclusive for exactly
+    /// that reason, which is what makes it the original this fact is copied from.
+    names_a_command: bool,
 }
 
 /// Every flag the `Cli` struct declares, in declaration order.
@@ -172,6 +176,7 @@ fn grammar_flags(grammar: &str) -> Vec<Flag> {
             long: format!("--{long}"),
             hidden: parts.contains(&"hide = true"),
             takes_value: ty.trim().trim_end_matches(',') != "bool",
+            names_a_command: parts.contains(&"group = \"what\""),
         });
     }
     assert!(
@@ -262,18 +267,50 @@ fn aid_agents(rewrite: &str) -> BTreeSet<String> {
 }
 
 /// A `const NAME: &[&str] = &["a", "b"];` list of flag spellings.
+///
+/// An entry may be another `const` rather than a literal — `REMOTE_CONTROL_FLAGS`
+/// names `REMOTE_CONTROL_FLAG` so the flag and the list of its spellings cannot
+/// disagree — so a bare identifier is resolved to the string that `const` is
+/// declared as. Every entry has to resolve to exactly one flag, asserted against
+/// the number of entries actually written: reading one of two spellings and
+/// comparing the short list against the script is the silent pass this whole file
+/// exists to prevent, and it is what happened before the count went in.
 fn aid_flag_list(rewrite: &str, name: &str) -> BTreeSet<String> {
-    let flags: BTreeSet<String> = slice_body(rewrite, name)
+    let body = slice_body(rewrite, name);
+    let entries: Vec<&str> = body
         .split(',')
-        .filter_map(|part| {
-            part.trim()
-                .strip_prefix('"')
-                .and_then(|rest| rest.strip_suffix('"'))
-                .map(str::to_owned)
-        })
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
         .collect();
-    assert!(!flags.is_empty(), "{name} lists at least one flag");
+    let flags: BTreeSet<String> = entries
+        .iter()
+        .map(
+            |part| match part.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+                Some(literal) => literal.to_owned(),
+                // A named const: `const THAT_NAME: &str = "--flag";`.
+                None => named_str_const(rewrite, part),
+            },
+        )
+        .collect();
+    assert_eq!(
+        flags.len(),
+        entries.len(),
+        "one flag was read per entry of {name}; {entries:?} became {flags:?}"
+    );
     flags
+}
+
+/// The string a `const NAME: &str = "...";` in aid's rewrite is declared as.
+fn named_str_const(rewrite: &str, name: &str) -> String {
+    let after = rewrite
+        .split_once(&format!("const {name}: &str = \""))
+        .unwrap_or_else(|| panic!("aid's rewrite declares {name} as a &str const"))
+        .1;
+    after
+        .split_once('"')
+        .unwrap_or_else(|| panic!("{name}'s literal ends"))
+        .0
+        .to_owned()
 }
 
 /// Flags the grammar accepts that the completion deliberately does not offer for a
@@ -282,10 +319,21 @@ fn aid_flag_list(rewrite: &str, name: &str) -> BTreeSet<String> {
 /// **Hand-written, and that is the point.** Everything else is derived, so a flag
 /// added to the grammar breaks the test below until somebody either completes it or
 /// writes it here — which is the decision this guard exists to force. The common
-/// thread is position: the completion offers this table where a *command* goes, and
-/// none of these is one. They modify a line that already named one, and the script
-/// offers nothing in that position at all (a first word starting with `--` ends
-/// completion) — a gap worth closing, but a different change than this.
+/// thread is position: each needs something already on the line, so none is ever
+/// the first word.
+///
+/// A leading `--` no longer ends completion by itself — the script tells a flag a
+/// spec may follow from one that ends the line, which is what
+/// [`the_flags_a_spec_may_follow_are_the_launch_modifiers_the_grammar_leaves_over`]
+/// pins — so a launch modifier reaches this table now (`dl --rm --<tab>` offers
+/// the other modifiers). These five still do not, and the reason is not one
+/// reason: `--json` and `--size` carry `requires = "ls"` and are a clap error
+/// without it; `--yes` and `--force-worktrees` are refused by name as meaningless
+/// for a workspace command; and a *leading* `--force` is not a modifier at all but
+/// the workspace slot itself — `force_placement` reads `--force` with no word
+/// before it as `ForcePlace::WorkspaceSlot`, so `dl --force my-ws` answers
+/// "Unknown workspace '--force'". All four refusals are what
+/// `test_only_a_flag_a_spec_can_follow_is_completed_past` quotes.
 const NOT_OFFERED_FIRST: [(&str, &str); 5] = [
     (
         "--json",
@@ -415,6 +463,98 @@ fn the_flags_a_value_follows_are_the_grammars_value_taking_flags() {
     );
 }
 
+#[test]
+fn the_flags_a_spec_may_follow_are_the_launch_modifiers_the_grammar_leaves_over() {
+    // The script has to tell a flag a workspace spec still follows from one that
+    // ends the line, because that is what decides whether to complete a spec at
+    // all: `dl --devcontainer robot` has not started and `dl --ls` is finished.
+    //
+    // Listed in the direction of the exceptions, and derived by subtraction, for
+    // the reason the script's own comment gives: the flags nobody thinks to list
+    // are all on the ending side, so a hand-written list of *those* is the one
+    // that silently drifts. Three subtrahends, each already pinned by a test in
+    // this file or forced by `NOT_OFFERED_FIRST`:
+    //
+    //   every flag  -  clap's `what` group  -  the hidden ones  -  NOT_OFFERED_FIRST
+    //
+    // `what` because each of its members is the whole command; hidden because a
+    // spelling `--help` does not show is one only a retired build still answers
+    // (`--stop`, `--autorm`) or an internal re-entry (`--repos`,
+    // `--completion-data`, `--update-cache`), and none of those takes a
+    // workspace; `NOT_OFFERED_FIRST` because each of those five modifies a
+    // *command* that is already on the line, which is the very thing whose
+    // presence ends it.
+    //
+    // What survives is the launch modifiers, and the subtraction is what makes
+    // that a derivation rather than a second opinion.
+    let script = completion_script();
+    let grammar = argument_grammar();
+
+    let withheld: BTreeSet<&str> = NOT_OFFERED_FIRST.iter().map(|(flag, _)| *flag).collect();
+    let expected: BTreeSet<String> = grammar_flags(&grammar)
+        .iter()
+        .filter(|flag| {
+            !flag.names_a_command && !flag.hidden && !withheld.contains(flag.long.as_str())
+        })
+        .map(|flag| flag.long.clone())
+        .collect();
+
+    assert!(
+        !expected.is_empty(),
+        "the subtraction leaves something: a spec follows at least one flag"
+    );
+    assert_eq!(
+        assigned(&script, "local spec_follows="),
+        expected,
+        "the completion script's launch modifiers have drifted from the grammar"
+    );
+    assert!(
+        expected.is_subset(&dl_first_argument_flags(&script)),
+        "a flag a spec follows is a flag that can be tabbed to in the first place"
+    );
+}
+
+#[test]
+fn every_flag_whose_value_is_completed_is_one_a_spec_may_follow() {
+    // The scan steps over a value option *and its value* and then keeps looking
+    // for the spec, so a value option missing from `spec_follows` would eat its
+    // value and end the line in the same breath -- `dl --devcontainer robot
+    // owner/repo` would complete nothing, which is half of the defect this whole
+    // change fixes. Checked for both binaries, because aid's table is its own.
+    let script = completion_script();
+
+    let values = assigned(&script, "local value_opts=");
+    for table in ["local spec_follows=", "spec_follows="] {
+        let follows = assigned(&script, table);
+        for flag in &values {
+            assert!(
+                follows.contains(flag),
+                "{flag} takes a value that {table} does not let a spec follow"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_flag_offered_beside_a_workspace_is_one_a_spec_could_have_followed() {
+    // `ws_cmds` offers `--rm` *after* a spec and `spec_follows` lets one come
+    // after it, and both readings have to hold of the same word: `dl --rm <ws>`
+    // and `dl <ws> --rm` are the same request written either way round, so a
+    // flag in one table and not the other would answer them differently.
+    let script = completion_script();
+
+    let follows = assigned(&script, "local spec_follows=");
+    let (_, beside) = dl_workspace_words(&script);
+
+    assert!(!beside.is_empty(), "the list offers at least one flag");
+    for flag in &beside {
+        assert!(
+            follows.contains(flag),
+            "{flag} is offered beside a workspace but no spec may follow it"
+        );
+    }
+}
+
 /// Flags `aid` offers for a first argument beyond one per agent, and where each
 /// comes from.
 ///
@@ -454,4 +594,44 @@ fn aid_offers_one_flag_per_agent_it_can_start() {
         expected,
         "the completion script's aid flags have drifted from aid's agent table"
     );
+}
+
+#[test]
+fn the_aid_flags_a_spec_may_follow_are_the_ones_parse_aid_args_reads_past() {
+    // aid's half of `the_flags_a_spec_may_follow_are_the_launch_modifiers_...`, and
+    // derived the same way even though aid's grammar is not a clap one: these are
+    // exactly the three tables `parse_aid_args` reads and then keeps looking for the
+    // spec -- an agent flag, either polarity of the remote-control flag, or a dl
+    // value option.
+    //
+    // The three flags aid answers itself are absent, and so is an unknown flag: aid
+    // passes one through to dl as a boolean option, so on `aid --unknown-taking-a-
+    // value foo owner/repo` it calls `foo` the spec, and no completion is honest
+    // about a slot aid itself cannot place.
+    let script = completion_script();
+    let rewrite = aid_rewrite();
+
+    let mut expected: BTreeSet<String> = aid_agents(&rewrite)
+        .iter()
+        .map(|agent| format!("--{agent}"))
+        .collect();
+    for table in [
+        "REMOTE_CONTROL_FLAGS",
+        "NO_REMOTE_CONTROL_FLAGS",
+        "DL_VALUE_OPTIONS",
+    ] {
+        expected.extend(aid_flag_list(&rewrite, table));
+    }
+
+    assert_eq!(
+        assigned(&script, "spec_follows="),
+        expected,
+        "aid's launch modifiers have drifted from what `parse_aid_args` reads past"
+    );
+    for (flag, _) in AID_FLAGS_BESIDE_THE_AGENTS {
+        assert!(
+            !expected.contains(flag),
+            "{flag} is one aid answers itself, so no spec follows it"
+        );
+    }
 }
