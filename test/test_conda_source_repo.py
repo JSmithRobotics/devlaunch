@@ -189,3 +189,62 @@ class TestTheUpstreamURLHasOneAuthoritativeCopy:
             f"recipe default {UPSTREAM_URL!r} and Cargo.toml repository "
             f"{cargo_url!r} have drifted apart"
         )
+
+
+class TestTheDocumentedInstallGetsThisForksPackage:
+    """The publish side being right does not make the consume side right.
+
+    Pixi resolves with strict channel priority: the first channel in the list
+    that carries a package wins, and the version is not consulted. Upstream's
+    channel carries `devlaunch` too, at the same build string
+    (`h8eb5a96_0` -- the recipe hash is unchanged by who builds it), so an
+    install line naming upstream's channel before this fork's silently installs
+    upstream's build. It resolves, it runs, and `pixi list` prints the version
+    without the `+fork.1` segment, so nothing about the result announces which
+    package arrived.
+
+    Measured rather than reasoned about: solving the previous form of this line
+    produced
+    `https://prefix.dev/blooop/linux-64/devlaunch-0.37.0-h8eb5a96_0.conda`,
+    and solving this one produces
+    `.../jsmithrobotics/jsmithrobotics/linux-64/devlaunch-0.37.0+fork.1-...`.
+
+    Upstream's channel cannot simply be dropped: the package's one run
+    dependency is `devpod >=0.26.1` and devpod is not on conda-forge at all, so
+    the line needs both channels and needs them in this order.
+    """
+
+    FORK_CHANNEL = "https://prefix.dev/jsmithrobotics/jsmithrobotics"
+    UPSTREAM_CHANNEL = "https://prefix.dev/blooop"
+
+    def _install_lines(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        return [line for line in readme.splitlines() if "pixi global install" in line]
+
+    def test_the_readme_documents_the_install_at_all(self):
+        assert self._install_lines(), "README no longer shows how to install devlaunch"
+
+    def test_this_forks_channel_comes_before_upstreams(self):
+        for line in self._install_lines():
+            assert self.FORK_CHANNEL in line, (
+                f"install line does not name this fork's channel, so it installs "
+                f"upstream's package: {line!r}"
+            )
+            assert self.UPSTREAM_CHANNEL in line, (
+                f"install line drops upstream's channel, so `devpod >=0.26.1` "
+                f"cannot resolve at all: {line!r}"
+            )
+            assert line.index(self.FORK_CHANNEL) < line.index(self.UPSTREAM_CHANNEL), (
+                "upstream's channel precedes this fork's, and strict channel "
+                f"priority means that installs upstream's build: {line!r}"
+            )
+
+    def test_the_forks_channel_is_the_namespaced_url(self):
+        """`https://prefix.dev/jsmithrobotics` (once) is a 404 on
+        `noarch/repodata.json`; the channel lives under owner/channel, spelled
+        twice. Both spellings look plausible and only one resolves, which is
+        why this is asserted rather than remembered."""
+        for line in self._install_lines():
+            assert "prefix.dev/jsmithrobotics/jsmithrobotics" in line, (
+                f"the single-segment channel URL does not resolve: {line!r}"
+            )
