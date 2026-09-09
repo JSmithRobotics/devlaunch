@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Editing prose under `.devcontainer/` no longer throws away the prebuilt
+  container.** Opening this repository with `dl` pulls a published image instead
+  of building one, and it had gone back to building. The prebuild tag is a hash
+  of the build context, and with a Dockerfile that `COPY`s nothing devpod hashes
+  the *whole* context directory -- so the feature's `README.md`, its
+  `TROUBLESHOOTING.md`, the host-side `initializeCommand`, and this manifest's
+  own comments were all hashed into a tag that is supposed to move only when the
+  image would differ. None of the four can reach the image.
+
+  Measured on devpod 0.26.1, amd64, at `4db3427`: one comment line appended to
+  `claude-code/README.md` and one to `claude-code/init-host.sh` moved the tag
+  from `devpod-5bf7be3e3e7e1b3f4fbb01a9b3ab88e7`, which CI had published and
+  every launch pulled, to `devpod-90e9641b9d3661f681e640eeedb3a410`, which
+  nothing had ever built. The cost was several minutes per launch, on every
+  branch carrying the edit, and the only symptom was that opening a container
+  was slow again -- devpod treats an unmatched tag as a cache miss and builds
+  locally without complaint.
+
+  `.devcontainer/.dockerignore` is the fix, and the narrowing is checked in both
+  directions rather than only the useful one. Prose, the host hook and
+  `devcontainer.json` stop moving the tag; the Dockerfile,
+  `claude-code/install.sh`, `claude-code/devcontainer-feature.json` and the
+  build inputs the manifest declares still do -- `build.cacheFrom` and an added
+  feature were both confirmed to move it, since devpod hashes those from the
+  parsed config rather than from the file. An exclusion too wide would be the
+  worse bug: a launch pulling an image built from a Dockerfile the branch no
+  longer has, coming up fine and being the wrong container.
+
+  **One rebuild is still owed.** The `.dockerignore` is itself part of the
+  context, so this commit moves the tag once; launches build locally until
+  `devcontainer-prebuild.yml` republishes on `main`.
+
 ## [0.35.0] - 2026-09-09
 
 ### Added

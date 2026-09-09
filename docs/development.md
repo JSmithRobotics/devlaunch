@@ -396,14 +396,26 @@ Two consequences worth knowing:
   what makes the tag usable. The Dockerfile copies nothing out of the context,
   so the root was never needed, but it was hashed, which meant a different tag
   on every commit to any file and a prebuilt image that never matched one.
-  Scoped to `.devcontainer`, the tag moves when `.devcontainer/**` moves, the
-  Dockerfile and the local feature's scripts included.
-- **A commit whose `.devcontainer/` differs from the last prebuild builds
-  locally.** That is the correct answer rather than a gap: the alternative is a
-  container built from something other than what the branch asks for. The pull
-  comes back once the change is on `main`. What the tag does not promise is the
-  converse, that one `.devcontainer/` tree always yields one image; see "What
-  the prebuild tag does not promise" below.
+- **Inside `.devcontainer/`, only the files the image is built from are
+  hashed**, and `.devcontainer/.dockerignore` is what draws that line. Scoping
+  the context to this directory was not enough on its own: a Dockerfile with no
+  `COPY` leaves devpod's `includeFiles` empty and it hashes the whole directory,
+  so the feature's `README.md`, its `TROUBLESHOOTING.md`, the host-side
+  `initializeCommand` and `devcontainer.json`'s own comments all moved the tag
+  without changing the image. Measured on devpod 0.26.1 at `4db3427`: one
+  comment line appended to `claude-code/README.md` and one to
+  `claude-code/init-host.sh` moved the tag off the published
+  `devpod-5bf7be3e3e7e1b3f4fbb01a9b3ab88e7` and onto a tag nothing had ever
+  built. What still moves it: the Dockerfile, `claude-code/install.sh`,
+  `claude-code/devcontainer-feature.json`, and the build inputs
+  `devcontainer.json` declares -- `build`, `features`, `image`, `name` -- which
+  devpod hashes from the parsed config rather than from the file.
+- **A commit that changes what the image is built from builds locally until it
+  reaches `main`.** That is the correct answer rather than a gap: the
+  alternative is a container built from something other than what the branch
+  asks for. The pull comes back once the change is on `main`. What the tag does
+  not promise is the converse, that one `.devcontainer/` tree always yields one
+  image; see "What the prebuild tag does not promise" below.
 
 `.github/workflows/devcontainer-prebuild.yml` publishes it, on pushes to `main`
 that touch `.devcontainer/**` and on manual dispatch. Its path filter is exactly

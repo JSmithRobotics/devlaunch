@@ -9,16 +9,22 @@
         // is a hash *of the build context* as well as of the config
         // (pkg/devcontainer/config/prebuild.go). With the root as context that
         // hash moved on every commit to any file in the repository, so a
-        // prebuilt image could never match one. Scoped here it moves when
-        // `.devcontainer/**` moves, which is exactly when the image has to be
-        // rebuilt -- this Dockerfile and the local `claude-code` feature's
-        // scripts included, since they sit inside the context and are hashed
-        // with it.
+        // prebuilt image could never match one.
         //
-        // The root `.dockerignore` is no longer read for this build (docker
-        // looks for one inside the context); its patterns existed to keep
-        // `.pixi/` and `rust/target/` out of a root-sized context, and nothing
-        // of that shape is in here.
+        // Scoping it here narrowed that to "every commit under
+        // `.devcontainer/**`", which is close to right but not the same claim as
+        // "every commit that changes the image", and the gap cost real launches.
+        // A Dockerfile with no COPY leaves devpod's includeFiles empty, and it
+        // then hashes the whole directory -- so this file's own comments, the
+        // feature's README, and the host-side `initializeCommand` were all
+        // hashed into the tag, none of which the image can see.
+        // `.dockerignore`, below, is what closes it; read that file for the
+        // measurement and the reasoning.
+        //
+        // The root `.dockerignore` is not read for this build -- docker looks
+        // for one inside the context, and there is one there now. The root
+        // file's patterns existed to keep `.pixi/` and `rust/target/` out of a
+        // root-sized context, and nothing of that shape is in here.
         "context": ".",
 
         // Best-effort layer cache for builders that know nothing about devpod
