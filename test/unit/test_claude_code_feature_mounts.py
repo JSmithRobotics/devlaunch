@@ -1,10 +1,10 @@
 """The protection the claude-code feature documents, held against what it mounts.
 
 The feature's README describes a read-write bind of `~/.claude` with the
-subdirectories holding *executable instructions* -- `agents/`, `commands/`,
-`hooks/`, `skills/` and `wf-skills/` -- mounted read-only on top of it, and gives
-the reason: those are files a prompt injection that edits one of them is not
-confined by. The edit is on the host, and it runs again in every later session,
+subdirectories holding *executable instructions* mounted read-only on top of it,
+plus `~/.agents/skills` outside it for the skills Claude and Codex share, and
+gives the reason: those are files a prompt injection that edits one of them is
+not confined by. The edit is on the host, and it runs again in every later session,
 in every other container, on the developer's own machine.
 
 Two failures have to be prevented here, and they pull in opposite directions.
@@ -79,15 +79,22 @@ READ_WRITE_HEADING = "### Read-Write Mounts (Authentication & State)"
 # character is the whole difference between a directory the pre-create hook has
 # to `mkdir` and a file it must not mount. The README's trailing slash is
 # therefore read as a declaration rather than as typography.
-DOCUMENTED_PATH = re.compile(r"^- `~/\.claude/(?P<path>[^`]+)`")
+DOCUMENTED_PATH = re.compile(r"^- `~/(?P<path>[^`]+)`")
 
 
-def documented_paths(heading: str) -> set:
-    """The `~/.claude/...` paths the README lists under one mount heading.
+def documented_home_paths(heading: str) -> set:
+    """The home-relative paths the README lists under one mount heading.
 
     Only the leading code span of a bullet counts. Prose under the heading
     mentions these files too, and a test that matched anywhere in the section
     would be satisfied by a sentence *about* a mount that no longer exists.
+
+    Home-relative and not `~/.claude`-relative, for every caller, because the
+    feature now mounts outside the configuration directory. A second accessor
+    returning the `.claude/` subset was the same `set` of the same `str` under a
+    different name, so the base each one was relative to lived only in that
+    name -- and it silently dropped `~/.agents/skills/`, which is how
+    `mounted_files` came to promise a derivation it no longer performed.
     """
     paths = {
         match.group("path")
@@ -97,6 +104,12 @@ def documented_paths(heading: str) -> set:
         if match
     }
     assert paths, f"the README lists no mounts under {heading!r}"
+    escaping = sorted(path for path in paths if path.startswith("/"))
+    assert not escaping, (
+        f"{escaping} under {heading!r} came out absolute, and every caller joins these onto a "
+        f"home: `scratch / '/.claude/x'` is '/.claude/x', so the path leaves the scratch home "
+        f"for the developer's real one"
+    )
     return paths
 
 
@@ -110,36 +123,38 @@ def mounts_fixture(feature) -> list:
     return [parse_mount(spec) for spec in feature["mounts"]]
 
 
-@pytest.fixture(name="host_config")
-def host_config_fixture(tmp_path) -> Path:
-    """A host `~/.claude` as the pre-create hook leaves it, on a fresh machine.
+@pytest.fixture(name="host_home")
+def host_home_fixture(tmp_path) -> Path:
+    """A host home as the pre-create hook leaves it, on a fresh machine.
 
     Every test that asks what *kind* of thing a mount source is needs a host to
     look at, and this is the only honest one to use: the hook is what creates
     these paths on a machine that has never run Claude, so the answer it gives is
     the answer Docker will get.
+
+    The home and not the `~/.claude` inside it, because the feature now mounts
+    `~/.agents/skills` too and a fixture returning the child left every caller
+    walking back up out of it.
     """
     devcontainer = json.loads(strip_jsonc_comments(DEVCONTAINER_JSON.read_text()))
     result = run_initialize_command(devcontainer, tmp_path)
     assert result.returncode == 0, result.stderr
-    return tmp_path / CONFIG_DIRNAME
+    return tmp_path
 
 
-def resolve(source: str, host_config: Path) -> Path:
+def resolve(source: str, host_home: Path) -> Path:
     """A manifest mount source as a path under the test's scratch home.
 
-    The separator is part of the prefix, so `~/.claudeX` is outside the
-    configuration directory rather than a zero-length path inside it. Without
-    that, a mount of any sibling whose name merely starts with `.claude`
-    resolved to the configuration directory itself and was then checked in its
-    place -- passing whatever the real source would have failed, the missing
-    source that refuses the container create included.
+    The assert is the whole of what this adds over a `removeprefix`, and it is
+    what keeps a wrong answer from being a plausible one: a source that is not
+    under `${localEnv:HOME}` has no place under the scratch home either, and
+    silently resolving it to one would check a path the real mount never names.
+    Which host paths may be mounted at all is a separate question, asked by
+    `test_no_mount_reaches_a_host_path_the_readme_does_not_list`.
     """
-    if source == HOST_CONFIG_DIR:
-        return host_config
-    prefix = f"{HOST_CONFIG_DIR}/"
-    assert source.startswith(prefix), f"{source} is outside the configuration directory"
-    return host_config / source[len(prefix) :]
+    prefix = f"{LOCAL_HOME}/"
+    assert source.startswith(prefix), f"{source} is outside the host home"
+    return host_home / source.removeprefix(prefix)
 
 
 def nested_sources(mounts: list) -> dict:
@@ -183,7 +198,7 @@ def test_every_mount_is_a_bind_of_a_host_path(mounts):
         assert mount.get("type") == "bind", f"{mount.get('target')} is not a bind mount"
 
 
-def test_every_mount_source_is_a_directory(mounts, host_config):
+def test_every_mount_source_is_a_directory(mounts, host_home):
     """No mount names a file, whatever flags it would carry.
 
     This is the rule that keeps the read-only list honest, and it is stated over
@@ -197,7 +212,7 @@ def test_every_mount_source_is_a_directory(mounts, host_config):
     directory" is measured rather than inferred from the path's spelling.
     """
     for mount in mounts:
-        source = resolve(mount["source"], host_config)
+        source = resolve(mount["source"], host_home)
         assert source.is_dir(), (
             f"{mount['source']} is mounted but is not a directory. A bind mount of a file "
             f"does not survive its source being replaced by rename: the mount leaves the "
@@ -226,9 +241,183 @@ def test_the_paths_documented_as_protected_are_exactly_the_read_only_mounts(moun
     defect this ticket reports, and an undocumented read-only mount is a file the
     container cannot write for reasons nobody wrote down.
     """
-    read_only = {path for path, mount in nested_sources(mounts).items() if "readonly" in mount}
-    documented = {path.rstrip("/") for path in documented_paths(READ_ONLY_HEADING)}
+    read_only = {
+        mount["source"].removeprefix(f"{LOCAL_HOME}/") for mount in mounts if "readonly" in mount
+    }
+    documented = {path.rstrip("/") for path in documented_home_paths(READ_ONLY_HEADING)}
     assert read_only == documented
+
+
+def test_no_mount_reaches_a_host_path_the_readme_does_not_list(mounts):
+    """Every mount is a documented read-only one, or the configuration bind itself.
+
+    The test above only inspects mounts that carry `readonly`, so a mount that
+    carries no flag at all is invisible to it. That was harmless while `resolve`
+    refused any source outside `~/.claude`, because the only place an
+    undocumented mount could land was under a parent that was already writable.
+    Sharing `~/.agents/skills` widened `resolve` to the whole host home and took
+    that limit away with it: a writable bind of any home directory -- `~/.codex`,
+    `~/.ssh` -- now satisfies every other rule in this file, because it is a
+    bind, its source is a directory the hook creates, and it is nested inside
+    nothing.
+    """
+    sources = {
+        mount["source"].removeprefix(f"{LOCAL_HOME}/")
+        for mount in mounts
+        if mount["source"] != HOST_CONFIG_DIR
+    }
+    documented = {path.rstrip("/") for path in documented_home_paths(READ_ONLY_HEADING)}
+    assert sources == documented, (
+        f"{sorted(sources - documented)} are mounted into the container from the host "
+        f"home and appear under no mount heading in the README"
+    )
+
+
+def test_every_mount_of_a_protected_source_carries_readonly(mounts):
+    """A protected source is read-only at *every* target it is mounted at.
+
+    The rules above are set equality and dict lookup, and a source is what they
+    key on, so a *second* mount of an already-protected source is absorbed by
+    all of them: the set already contains it, and the dict keeps whichever entry
+    came last. Docker creates both. One line --
+    `source=${localEnv:HOME}/.agents/skills,target=/home/vscode/.agents/skills-rw,type=bind`
+    -- hands the container write access to the host's shared skill bodies at a
+    second path while every assertion in this file stays green, which is the
+    protection this feature exists for, defeated by an entry that reads like a
+    typo.
+    """
+    documented = {path.rstrip("/") for path in documented_home_paths(READ_ONLY_HEADING)}
+    writable = sorted(
+        mount["target"]
+        for mount in mounts
+        if mount["source"].removeprefix(f"{LOCAL_HOME}/") in documented and "readonly" not in mount
+    )
+    assert not writable, (
+        f"{writable} mount a documented read-only source without `readonly`, so the host "
+        f"path is writable from the container through those targets"
+    )
+
+
+def test_no_host_path_is_mounted_twice(mounts):
+    """One source, one target, so nothing can be absorbed by keying on it.
+
+    The narrower rule above catches the case that costs a protection. This is
+    the general one, and it is what makes the set- and dict-shaped assertions in
+    this file sound rather than accidentally sound.
+    """
+    sources = [mount["source"] for mount in mounts]
+    repeated = sorted({source for source in sources if sources.count(source) > 1})
+    assert not repeated, (
+        f"{repeated} are each mounted more than once, and every other rule here keys on the "
+        f"source, so the duplicate is invisible to them while Docker creates it"
+    )
+
+
+TROUBLESHOOTING = FEATURE_DIR / "TROUBLESHOOTING.md"
+
+
+# Both documents draw their trees *inside* `~/.claude`, so a leading `~/` is the
+# only thing marking a path as home-relative: `skills/` is the configuration
+# directory's, `~/.agents/skills/` is not.
+def as_mount_source(path: str) -> str:
+    path = path.rstrip("/")
+    return path.removeprefix("~/") if path.startswith("~/") else f"{CONFIG_DIRNAME}/{path}"
+
+
+# A drawn directory entry, with or without box-drawing lead-in and with or
+# without a trailing comment. Deliberately not keyed on `(read-only mount)`:
+# the README draws the same seven paths with comments that say `# Custom
+# agents`, so a pattern requiring the annotation read that copy as empty and
+# then compared it against nothing.
+TREE_ENTRY = re.compile(r"^[│├└─ ]*(?P<path>[~.\w][\w./-]*/)(?:\s+#.*)?$")
+CODE_SPAN = re.compile(r"`([^`]+)`")
+READ_ONLY_SYMPTOM = "→ Read-only"
+
+# The tree under this heading is rooted at `~/.claude/` and names it, so the
+# configuration bind is a legitimate entry there and the seven read-only mounts
+# are the rest.
+HOST_LAYOUT_HEADING = "### Host Machine"
+
+# The two places the README hands over a `mkdir` to run. Anchored per section
+# because it offers others -- a dotfiles installer example, a three-directory
+# fragment -- and only these two claim to create what the feature mounts.
+MKDIR_HEADINGS = ("### Host Machine", "### `bind mount source path does not exist`")
+
+
+def brace_expanded(word: str) -> set:
+    """`~/.claude/{agents,hooks}` as the two paths a shell would create."""
+    head, brace, rest = word.partition("{")
+    if not brace:
+        return {word}
+    names, _, tail = rest.partition("}")
+    return {f"{head}{name}{tail}" for name in names.split(",")}
+
+
+def documented_mkdir(heading: str) -> set:
+    for line in _section(FEATURE_README, heading).splitlines():
+        if line.startswith("mkdir -p "):
+            return {
+                as_mount_source(path)
+                for word in line.removeprefix("mkdir -p ").split()
+                for path in brace_expanded(word)
+            }
+    raise AssertionError(f"the README section {heading!r} no longer offers a by-hand mkdir")
+
+
+def drawn_tree(lines: list) -> set:
+    """The mount sources an ASCII directory tree draws, from its entry lines.
+
+    Both trees mix roots: they are drawn inside `~/.claude` and then name
+    `~/.agents/skills/` at the same indent, so the tilde is what says which
+    base an entry is relative to. Both also draw `~/.claude/` itself as the
+    root they hang from, which is the one bind that is supposed to be writable
+    and is asserted elsewhere, so it is not part of what these copies promise.
+    """
+    paths = {
+        as_mount_source(match.group("path"))
+        for match in (TREE_ENTRY.match(line) for line in lines)
+        if match
+    }
+    assert paths, "no tree entry was recognised, so this compares nothing"
+    return paths - {CONFIG_DIRNAME}
+
+
+def test_every_hand_written_copy_of_the_mount_list_says_the_same_thing(mounts):
+    """The trees, the symptom list and the by-hand `mkdir`s agree with the manifest.
+
+    Five hand-maintained copies of one list, and this repo's rule is that a
+    second copy is allowed only where a test diffs it against the first. Only
+    the README's Read-Only Mounts bullets had one, so the rest could and did
+    drift: the `bind mount source path does not exist` remedy still created
+    three directories of seven, which is a documented fix for a refused
+    container create that leaves the create refused, and told the developer to
+    truncate their own `settings.json` on the way past.
+    """
+    read_only = {
+        mount["source"].removeprefix(f"{LOCAL_HOME}/") for mount in mounts if "readonly" in mount
+    }
+    troubleshooting = TROUBLESHOOTING.read_text().splitlines()
+    copies = {
+        "TROUBLESHOOTING.md's tree": drawn_tree(troubleshooting),
+        f"the README's {HOST_LAYOUT_HEADING!r} tree": drawn_tree(
+            _section(FEATURE_README, HOST_LAYOUT_HEADING).splitlines()
+        ),
+        "TROUBLESHOOTING.md's read-only symptom": {
+            as_mount_source(path)
+            for line in troubleshooting
+            if READ_ONLY_SYMPTOM in line
+            for path in CODE_SPAN.findall(line)
+        },
+        **{
+            f"the README's {heading!r} mkdir": documented_mkdir(heading)
+            for heading in MKDIR_HEADINGS
+        },
+    }
+    for where, listed in copies.items():
+        assert listed == read_only, (
+            f"{where} disagrees with the manifest: {sorted(listed ^ read_only)} appears in one "
+            f"and not the other"
+        )
 
 
 def test_nothing_nested_inside_the_configuration_directory_is_writable(mounts):
@@ -259,9 +448,9 @@ def test_the_paths_documented_as_writable_have_no_mount_of_their_own(mounts):
     token refresh and onboarding state, and that argument is what a reviewer
     weighs -- so the check is that the argument survives while the mount does not.
     """
-    documented = {path.rstrip("/") for path in documented_paths(READ_WRITE_HEADING)}
+    documented = {path.rstrip("/") for path in documented_home_paths(READ_WRITE_HEADING)}
     assert documented, "the README no longer says which files must stay writable"
-    mounted = set(nested_sources(mounts))
+    mounted = {f"{CONFIG_DIRNAME}/{path}" for path in nested_sources(mounts)}
     assert not (documented & mounted), (
         f"{sorted(documented & mounted)} are documented as writable and mounted individually; "
         f"a file mount pins the inode, so the container stops seeing host changes to them"
@@ -283,7 +472,7 @@ def test_each_mount_lands_where_the_feature_tells_claude_to_look(feature, mounts
         assert mount.get("target") == f"{config_dir}/{relative}"
 
 
-def test_the_pre_create_hook_creates_every_host_path_the_feature_mounts(mounts, host_config):
+def test_the_pre_create_hook_creates_every_host_path_the_feature_mounts(mounts, host_home):
     """The mounted paths exist on the host before the container is asked to start.
 
     A missing bind source is not a degraded container: the create is refused
@@ -297,11 +486,11 @@ def test_the_pre_create_hook_creates_every_host_path_the_feature_mounts(mounts, 
     this is where that stays true.
     """
     for mount in mounts:
-        source = resolve(mount["source"], host_config)
+        source = resolve(mount["source"], host_home)
         assert source.exists(), f"{mount['source']} is mounted but the hook does not create it"
 
 
-def test_the_pre_create_hook_creates_no_file_the_feature_does_not_mount(host_config):
+def test_the_pre_create_hook_creates_no_file_the_feature_does_not_mount(host_home):
     """It seeds no `{}` placeholders for paths nothing binds any more.
 
     The empty `.credentials.json` and `.claude.json` this used to write existed
@@ -310,7 +499,7 @@ def test_the_pre_create_hook_creates_no_file_the_feature_does_not_mount(host_con
     use -- while an empty credentials file on a host that has never run Claude is
     indistinguishable from a logged-out session.
     """
-    stray = [path.name for path in host_config.iterdir() if path.is_file()]
+    stray = [path.name for path in (host_home / CONFIG_DIRNAME).iterdir() if path.is_file()]
     assert not stray, f"the hook creates {sorted(stray)}, which nothing mounts"
 
 
@@ -333,7 +522,7 @@ def test_the_pre_create_hook_leaves_a_configuration_that_already_exists_alone(mo
     devcontainer = json.loads(strip_jsonc_comments(DEVCONTAINER_JSON.read_text()))
     run_initialize_command(devcontainer, tmp_path)
 
-    existing = [tmp_path / CONFIG_DIRNAME / relative for relative in nested_sources(mounts)]
+    existing = [resolve(mount["source"], tmp_path) for mount in mounts if "readonly" in mount]
     assert existing, "no configuration was created, so this asserts nothing"
     for path in existing:
         os.utime(path, ns=(0, 0))
@@ -368,26 +557,31 @@ def _protection_headings(readme: str) -> list:
     ]
 
 
-def test_no_heading_claims_protection_for_a_writable_file():
+@pytest.mark.parametrize("document", [FEATURE_README, TROUBLESHOOTING], ids=lambda p: p.name)
+def test_no_heading_claims_protection_for_a_writable_file(document):
     """No section listing protected paths may name a file that is writable.
 
     The mount-agreement test binds one heading by its exact text, so a *second*
-    list of protected paths — which is what this README grew — is checked by
+    list of protected paths — which is what these documents grew — is checked by
     nothing. This asks the question of every heading that claims protection
     instead of one, because the failure was a heading nobody had registered.
 
-    Only bullets count, for `documented_paths`'s reason: the prose under these
-    headings discusses `settings.json` precisely to say it is *not* protected,
-    and a substring match anywhere in the section would fail on the sentence
-    that fixes the problem.
+    Both documents, because scoping it to the README is how TROUBLESHOOTING.md
+    went on promising that `CLAUDE.md` and `settings.json` were read-only after
+    they stopped being. That one is the worse of the two to get wrong: it is
+    the page a developer opens when a write has just been refused.
+
+    Only bullets count, for `documented_home_paths`'s reason: the prose under
+    these headings discusses `settings.json` precisely to say it is *not*
+    protected, and a substring match anywhere in the section would fail on the
+    sentence that fixes the problem.
     """
-    readme = FEATURE_README.read_text()
-    headings = _protection_headings(readme)
-    assert headings, "no heading in the README claims protection; the guard is guarding nothing"
+    headings = _protection_headings(document.read_text())
+    assert headings, f"no heading in {document.name} claims protection; the guard guards nothing"
 
     offences = []
     for heading in headings:
-        for line in _section(FEATURE_README, heading).splitlines():
+        for line in _section(document, heading).splitlines():
             stripped = line.lstrip()
             if not stripped.startswith(("-", "*")):
                 continue

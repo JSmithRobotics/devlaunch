@@ -74,11 +74,27 @@ def parse_mount(spec: str) -> dict:
     Valueless words like `readonly` become keys mapped to the empty string, so
     the question to ask of one is `"readonly" in mount` and never
     `mount.get("readonly")` -- the latter is falsy for a flag that is present.
+
+    That question is only honest for the two spellings this refuses, and both
+    were silent. `readonly=false` is a key with a value, so `"readonly" in
+    mount` is True and a writable mount is counted as protected -- a documented
+    protection with nothing behind it, which is what these tests exist to
+    catch. Docker's own synonym `ro` parses to a different key, so a genuinely
+    read-only mount is counted as writable. Refused here rather than handled,
+    because a mount list has no reason to reach for either.
     """
     fields = {}
     for part in spec.split(","):
         key, _, value = part.partition("=")
         fields[key.strip()] = value.strip()
+    assert fields.get("readonly", "") == "", (
+        f"`readonly={fields['readonly']}` in {spec!r} is read as protected by "
+        f'`"readonly" in mount` whatever it says; write the bare flag or drop it'
+    )
+    assert "ro" not in fields, (
+        f"`ro` in {spec!r} is docker's synonym for `readonly` and is read as writable "
+        f'by `"readonly" in mount`; spell it `readonly`'
+    )
     return fields
 
 
@@ -170,6 +186,20 @@ def devcontainer_fixture() -> dict:
 @pytest.fixture(name="mounts")
 def mounts_fixture(devcontainer) -> list:
     return [parse_mount(spec) for spec in devcontainer["mounts"]]
+
+
+@pytest.mark.parametrize("flag", ["readonly=false", "readonly=true", "ro"])
+def test_a_readonly_spelling_the_membership_test_misreads_is_refused(flag):
+    """The two ways `"readonly" in mount` lies, and the one that only looks safe.
+
+    Every protection assertion in this suite is that membership test, so a
+    spelling it misreads is a security claim that passes while being false in
+    whichever direction the spelling chose. `readonly=true` is refused with
+    them: it happens to read correctly, and keeping it out is what stops the
+    question of whether the value is consulted from arising at all.
+    """
+    with pytest.raises(AssertionError):
+        parse_mount(f"source=/a,target=/b,type=bind,{flag}")
 
 
 def test_devcontainer_manifest_is_this_repos_and_parses(devcontainer):

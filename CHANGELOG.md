@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The local container feature shares `~/.agents/skills` with Codex and mounts
+  `~/.claude/shared-skills` read-only. Relative links between the shared roots
+  now resolve across host and container usernames, and writes through those
+  links cannot modify the host's shared skill bodies. Existing containers need
+  recreation to receive the mounts.
+
 ## [0.34.0] - 2026-09-09
 
 ### Fixed
