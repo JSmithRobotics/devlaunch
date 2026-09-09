@@ -99,6 +99,13 @@ _dl_completion() {
     # the grammar's flags, minus clap's `what` group, minus the hidden ones,
     # minus `NOT_OFFERED_FIRST`. `dl/tests/completion_tables.rs` does that
     # subtraction and diffs the answer against this line.
+    #
+    # "Ends the line" means no *workspace* follows, which is not quite the same
+    # as no word: `dl --install [<rc-file>]` takes an optional path. Nothing
+    # completes that path, here or before this scan existed, and offering it
+    # would mean a second exception rather than a wider `spec_follows` -- the
+    # thing that follows is not a spec, and the branch below that handles `./`
+    # is inside the spec position.
     local spec_follows="--rm --devcontainer --claude-profile"
     if [[ "$cmd" == aid ]]; then
         # aid's own, from `parse_aid_args`: it reads an agent flag, a remote
