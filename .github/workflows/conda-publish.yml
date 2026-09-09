@@ -155,13 +155,22 @@ jobs:
       - name: Upload to prefix.dev
         env:
           PIXI_TOKEN: ${{ secrets.PIXI_TOKEN }}
+          # Where this repository publishes, as a repository *variable* rather
+          # than a line of code. A fork configures `CONDA_CHANNEL` in its own
+          # settings and needs no diff here; unset, it is upstream's channel, so
+          # upstream behaves exactly as before.
+          #
+          # A variable and not a secret: a channel name is not one, and a secret
+          # would be invisible in the log of a job whose whole subject is where
+          # the package went.
+          CONDA_CHANNEL: ${{ vars.CONDA_CHANNEL || 'blooop' }}
         run: |
           for pkg in $(find output -type f \( -name "*.conda" -o -name "*.tar.bz2" \)); do
             echo "Uploading ${pkg}"
             # Captured rather than streamed, because the reason a failure is
             # tolerable has to be read before it is tolerated.
             if out=$(pixi exec rattler-build upload prefix \
-              -c jsmithrobotics/jsmithrobotics \
+              -c "${CONDA_CHANNEL}" \
               --api-key "$PIXI_TOKEN" \
               "${pkg}" 2>&1); then
               echo "Successfully uploaded ${pkg}"

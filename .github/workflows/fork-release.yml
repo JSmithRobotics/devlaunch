@@ -1,0 +1,111 @@
+name: Fork release
+
+# FORK-ONLY. Never send this upstream.
+#
+# `conda-publish.yml` builds from a release *tag* -- its recipe fetches the
+# source from one -- and the workflow that cuts tags upstream is
+# `publish.yml`, which also publishes a wheel to PyPI under blooop's trusted
+# publisher. A fork has no such credential and should not have one, so
+# `publish.yml` is disabled here and the tag it used to cut never appears.
+#
+# This is that link and nothing more: a tag, a GitHub release, and the two
+# binaries attached to it. No PyPI, no conda channel -- the channel upload is
+# `conda-publish.yml`'s job, dispatched after this.
+#
+# Manual on purpose. Upstream decides to release by noticing the version
+# changed on a push to main; a fork releases when its operator wants a build
+# they can install elsewhere, which is not a thing a commit can imply.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Cut a release from the version in rust/Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Tags, so the "already released" check below can see them. A shallow
+          # clone without them reports every version as unreleased and then
+          # fails at `gh release create` instead.
+          fetch-depth: 0
+
+      - name: Decide whether there is a release to cut
+        id: decide
+        run: |
+          set -euo pipefail
+          # Read exactly as `publish.yml` and `conda-publish.yml` do: the
+          # `[workspace.package] version` is the first `version = "..."` line,
+          # and the crates inherit it. Three readers, one spelling -- keep them
+          # in step.
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' rust/Cargo.toml | head -1)
+          if [ -z "$version" ]; then
+            echo "::error::could not read a version from rust/Cargo.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # Idempotent: a second dispatch over the same commit finds the tag and
+          # stops, rather than failing at the create. Bump the version to cut
+          # another release.
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already tagged; nothing to cut"
+            echo "cut=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "cut=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: prefix-dev/setup-pixi@v0.10.2
+        if: steps.decide.outputs.cut == 'true'
+        with:
+          # The toolchain this tree pins comes from the pixi environment, so the
+          # binaries are built by the compiler the project names rather than
+          # whatever the runner ships.
+          run-install: true
+
+      - name: Build dl and aid
+        if: steps.decide.outputs.cut == 'true'
+        working-directory: rust
+        run: pixi run cargo build --release --locked -p dl -p aid
+
+      - name: Name the binaries for what they are
+        if: steps.decide.outputs.cut == 'true'
+        id: stage
+        run: |
+          set -euo pipefail
+          version='${{ steps.decide.outputs.version }}'
+          arch=$(uname -m)
+          mkdir -p dist
+          for bin in dl aid; do
+            cp "rust/target/release/$bin" "dist/${bin}-${version}-linux-${arch}"
+          done
+          # Recorded beside the artefacts rather than left for whoever downloads
+          # them to discover: a binary built on a GitHub runner links against
+          # that runner's glibc, so an older distribution can refuse to run it.
+          ldd --version | head -1 > dist/BUILD-ENVIRONMENT.txt
+          echo "built on $(. /etc/os-release && echo "$PRETTY_NAME")" >> dist/BUILD-ENVIRONMENT.txt
+          ls -l dist
+
+      - name: Create the release
+        if: steps.decide.outputs.cut == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version='${{ steps.decide.outputs.version }}'
+          # The tag is created by this call, at this commit. `conda-publish.yml`
+          # waits for it and its recipe fetches from it, so dispatch that after
+          # this succeeds and not before.
+          gh release create "v$version" \
+            --target "$GITHUB_SHA" \
+            --title "v$version" \
+            --notes "Fork build of devlaunch v$version, cut from \`$GITHUB_SHA\`.
+
+          Binaries are \`linux-$(uname -m)\`, built on the runner named in
+          \`BUILD-ENVIRONMENT.txt\`. Not an upstream release: this fork carries
+          changes that are still under review upstream." \
+            dist/*
