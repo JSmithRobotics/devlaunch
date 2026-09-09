@@ -33,7 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   A shell snippet is still asked for by naming a shell -- `dl <ws> -- bash -lc
   'a && b'` -- and that spelling was broken before this too, running `bash -lc a`
-  and then `b`.
+  and then `b`. Passing a snippet as a single word no longer works, because a
+  single word is now a program name: `dl <ws> -- 'exit 7'` looks for a program
+  called `exit 7` and exits 127 where it used to exit 7. The e2e probes were the
+  only callers in the tree spelling it that way, and they name `bash -lc` now.
+  `dl <ws> -- ""` went from exit 0 to 127 for the same reason.
 
 ## [0.34.0] - 2026-09-09
 

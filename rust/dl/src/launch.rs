@@ -104,18 +104,15 @@ pub(crate) fn family(verb: &Verb) -> Family {
         Verb::Attach { rm } => (LaunchVerb::Attach { command: None }, *rm),
         // Re-quoted, not just rejoined. [`RemotePayload::wrap`] quotes this
         // string whole into `bash -lc '<it>'`, so what is built here is a
-        // command line the *remote* shell parses: a plain `words.join(" ")`
-        // handed that shell every space the host's shell had already eaten, and
-        // it re-split on all of them. `dl <ws> -- claude 'fix the bug'` arrived
-        // as four arguments where one was meant, a word holding `#` commented
-        // out the rest of the line, and a word holding `$(...)` was executed.
+        // command line the *remote* shell parses -- and the words arriving here
+        // have already had their quoting removed by the *host's* shell. Joining
+        // them on spaces gave the remote shell every one of those separators
+        // back. The four tests below are one failure mode each.
         //
-        // `shell::join` is the same quoter the rest of the tree already uses,
-        // and this was the one call site not using it. It puts back exactly the
-        // quoting the host's shell removed, which is what makes the remote argv
-        // the argv that was typed. A bare `NAME=value` word survives it
-        // unquoted, since `=` is shell-safe, so the assignment-prefix spelling
-        // the README documents keeps working.
+        // A bare `NAME=value` survives `shell::join` unquoted, because `=` is in
+        // the shell-safe set. That is not an oversight to tidy: it is what keeps
+        // `dl <ws> -- IS_SANDBOX=1 claude ...` setting a variable, which is the
+        // spelling `aid` builds and the README documents.
         Verb::Run(words, rm) => (
             LaunchVerb::Attach {
                 command: Some(shell::join(words.iter().map(String::as_str))),
