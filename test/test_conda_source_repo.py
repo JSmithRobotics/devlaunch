@@ -194,24 +194,35 @@ class TestTheUpstreamURLHasOneAuthoritativeCopy:
 class TestTheDocumentedInstallGetsThisForksPackage:
     """The publish side being right does not make the consume side right.
 
-    Pixi resolves with strict channel priority: the first channel in the list
-    that carries a package wins, and the version is not consulted. Upstream's
-    channel carries `devlaunch` too, at the same build string
-    (`h8eb5a96_0` -- the recipe hash is unchanged by who builds it), so an
-    install line naming upstream's channel before this fork's silently installs
-    upstream's build. It resolves, it runs, and `pixi list` prints the version
-    without the `+fork.1` segment, so nothing about the result announces which
-    package arrived.
+    Upstream's channel carries `devlaunch` too, so an install line naming both
+    channels can resolve to upstream's build. It resolves, it runs, and `pixi
+    list` prints the version with the `+fork.1` segment dropped, so nothing
+    about the result announces which package arrived. The build string is
+    identical either way (`h8eb5a96_0`: the recipe hash does not depend on who
+    builds it).
 
-    Measured rather than reasoned about: solving the previous form of this line
-    produced
-    `https://prefix.dev/blooop/linux-64/devlaunch-0.37.0-h8eb5a96_0.conda`,
-    and solving this one produces
-    `.../jsmithrobotics/jsmithrobotics/linux-64/devlaunch-0.37.0+fork.1-...`.
+    **What protects against it is the version pin, not the channel order.**
+    That correction is worth recording because the order was believed to be the
+    protection for one commit: with both channels at 0.37.0, reordering them
+    did change which package was resolved, and that single observation was
+    generalised into "pixi uses strict channel priority, so the first channel
+    wins and the version is never consulted". That is not pixi's default here.
+    The reorder worked only because it broke a version *tie*. Once upstream's
+    channel reached 0.40.0, the higher version won from the lower-priority
+    channel and the install line silently fetched upstream again, order
+    notwithstanding.
 
-    Upstream's channel cannot simply be dropped: the package's one run
-    dependency is `devpod >=0.26.1` and devpod is not on conda-forge at all, so
-    the line needs both channels and needs them in this order.
+    Measured three ways: `channel-priority = "strict"` in a workspace manifest
+    does hold this fork's channel, and so does an exact `==` pin, while the
+    default with a plain range resolves
+    `https://prefix.dev/blooop/linux-64/devlaunch-0.40.0-h8eb5a96_0.conda`.
+    `pixi global install` has no `--channel-priority` flag, so a one-liner can
+    only say this with a version, which is why the documented command carries
+    one.
+
+    The order is kept anyway: it costs nothing and it is what decides a genuine
+    tie. Upstream's channel cannot be dropped, because the package's one run
+    dependency is `devpod >=0.26.1` and devpod is not on conda-forge at all.
     """
 
     FORK_CHANNEL = "https://prefix.dev/jsmithrobotics/jsmithrobotics"
@@ -247,4 +258,21 @@ class TestTheDocumentedInstallGetsThisForksPackage:
         for line in self._install_lines():
             assert "prefix.dev/jsmithrobotics/jsmithrobotics" in line, (
                 f"the single-segment channel URL does not resolve: {line!r}"
+            )
+
+    def test_the_install_line_pins_the_version_that_ships(self):
+        """The pin is what actually gets this fork's package, so it has to be
+        this fork's version. A stale pin documents an install of something the
+        tree no longer is; a missing one documents an install of upstream's
+        build, which is the defect this class exists for."""
+        cargo = cargo_toml_text()
+        version = next(
+            line.split("=", 1)[1].strip().strip('"')
+            for line in cargo.splitlines()
+            if line.strip().startswith("version")
+        )
+        for line in self._install_lines():
+            assert f"devlaunch={version}" in line, (
+                f"install line does not pin devlaunch={version}, so it can resolve "
+                f"upstream's higher-versioned build instead: {line!r}"
             )

@@ -34,7 +34,7 @@ one argument instead of a clone, a config file and a build command.
 ## Quickstart
 
 ```bash
-pixi global install --channel https://prefix.dev/jsmithrobotics/jsmithrobotics --channel https://prefix.dev/blooop --channel conda-forge devlaunch
+pixi global install --channel https://prefix.dev/jsmithrobotics/jsmithrobotics --channel https://prefix.dev/blooop --channel conda-forge devlaunch=0.37.0+fork.1
 ```
 
 ### 1. Name a repo, land in a shell inside it
@@ -105,7 +105,7 @@ Workspaces pile up. A verb with no workspace opens the same selector, TAB marks 
 ### pixi (recommended)
 
 ```bash
-pixi global install --channel https://prefix.dev/jsmithrobotics/jsmithrobotics --channel https://prefix.dev/blooop --channel conda-forge devlaunch
+pixi global install --channel https://prefix.dev/jsmithrobotics/jsmithrobotics --channel https://prefix.dev/blooop --channel conda-forge devlaunch=0.37.0+fork.1
 ```
 
 That brings `devpod` and everything else along with it.
