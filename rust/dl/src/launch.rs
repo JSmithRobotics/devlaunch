@@ -107,7 +107,10 @@ pub(crate) fn family(verb: &Verb) -> Family {
         // command line the *remote* shell parses -- and the words arriving here
         // have already had their quoting removed by the *host's* shell. Joining
         // them on spaces gave the remote shell every one of those separators
-        // back. The four tests below are one failure mode each.
+        // back. The three failure modes that produced -- a re-split argument, a
+        // truncating `#`, an executed `$(...)` -- are a test each below, beside
+        // the plain command that must stay unquoted and the shell snippet that is
+        // now spelled by naming a shell.
         //
         // A bare `NAME=value` survives `shell::join` unquoted, because `=` is in
         // the shell-safe set. That is not an oversight to tidy: it is what keeps
