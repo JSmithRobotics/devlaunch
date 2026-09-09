@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A flag before the workspace spec no longer stops tab completion.**
+  `aid --codex owner/repo<TAB>` offered nothing at all, and neither did
+  `aid --claude`, `aid --gemini` or `dl --devcontainer robot owner/repo<TAB>`.
+  The completion script found the spec by counting words from the command, word
+  two for the spec and word three for a verb, and neither grammar works that
+  way: `parse_aid_args` reads aid's leading flags and calls the first word that
+  is not one the spec, and dl is clap, which puts options anywhere among the
+  positional words.
+
+  The script now scans the words before the cursor and counts the positional
+  ones, stepping over a value option with its value and stopping at `--`, so
+  the spec is wherever it actually lands. `dl --rm my-ws<TAB>` completes a
+  workspace, `dl --rm my-ws <TAB>` completes a verb, and `aid --codex my-ws`
+  completes exactly what `aid my-ws` does, trailing space included.
+
+  That needs a distinction the old guard could not make, since it ended
+  completion on any leading `--`: a flag a spec may follow against one that
+  ends the line. The table lists the first, three flags for dl and nine for
+  aid, and every other flag ends the line. That direction is deliberate and it
+  is where the first attempt went wrong: listing the endings instead put ten
+  flags in the wrong arm, because the ones nobody thinks to list are all on
+  that side. `dl --repos my-workspace` answers "--repos takes no workspace",
+  `dl --json my-workspace` is a clap error about the missing `--ls`, and
+  `dl --force my-workspace` answers "Unknown workspace '--force'" because a
+  leading `--force` is the workspace slot itself. Completing a name onto any of
+  those is worse than completing nothing, so the default arm is the refusal.
+
+  Both tables are derived rather than hand-judged, and
+  `rust/dl/tests/completion_tables.rs` diffs them: dl's is every flag the
+  grammar declares minus clap's `what` group, minus the hidden ones, minus the
+  five that need something already on the line, and aid's is the three tables
+  `parse_aid_args` reads past.
+
 - **Editing prose under `.devcontainer/` no longer throws away the prebuilt
   container.** Opening this repository with `dl` pulls a published image instead
   of building one, and it had gone back to building. The prebuild tag is a hash
