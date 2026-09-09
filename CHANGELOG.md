@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A forwarded Claude login no longer loses to an empty credentials file.**
+  `dl --claude-profile bear <ws>` resolved the profile, forwarded the token as
+  `CLAUDE_CODE_OAUTH_TOKEN`, and `claude` asked the operator to log in anyway.
+  The devcontainer feature seeded `{}` into `.credentials.json` when the file was
+  missing, and Claude Code reads that file before it reads the environment: an
+  empty one is not a placeholder, it is a logged-out session, and it wins.
+
+  The stub was invisible for as long as the feature mounted the host's real
+  credentials file *over* it, so the bug could only ever appear where the
+  forwarded token was the container's only login -- which is the one
+  configuration those mounts rule out, since `forwarded_claude` declines to
+  forward into a config directory it does not own. It surfaced the moment a
+  workspace had its Claude mounts removed, which is what wanting a profile
+  requires.
+
+  `.claude.json` went with it, and that half fixed something else. The
+  provisioner seeds `{"hasCompletedOnboarding":true}` there and exits early when
+  the file exists, so the stub had been suppressing devlaunch's own onboarding
+  seed: every container built from this feature met its operator with the trust
+  prompt. Claude Code creates the credentials file itself on first use, so
+  neither stub had anything to replace it.
+
+- **The ssh agent socket is bound from `$SSH_AUTH_SOCK` rather than from a guess
+  at where it lives.** The mount source was `${localEnv:HOME}/.ssh/agent.sock`,
+  which is not a path any agent picks by itself: gpg-agent listens on
+  `$XDG_RUNTIME_DIR/gnupg/S.gpg-agent.ssh` and `ssh-agent` on a `/tmp/ssh-XXXX`
+  mktemp path. On such a host `devpod up` refused the create outright with
+  `bind mount source path does not exist`, before the container existed, which
+  reads as a broken tool rather than as a manifest naming a path the host never
+  had. `init-host.sh` cannot paper over this the way it does for `known_hosts`:
+  that one is touched into existence, and there is no touching a socket into
+  being an agent.
+
 ## [0.33.0] - 2026-09-07
 
 ### Fixed
