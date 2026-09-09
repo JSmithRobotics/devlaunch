@@ -158,12 +158,25 @@ jobs:
         run: |
           for pkg in $(find output -type f \( -name "*.conda" -o -name "*.tar.bz2" \)); do
             echo "Uploading ${pkg}"
-            if pixi exec rattler-build upload prefix \
-              -c blooop \
+            # Captured rather than streamed, because the reason a failure is
+            # tolerable has to be read before it is tolerated.
+            if out=$(pixi exec rattler-build upload prefix \
+              -c jsmithrobotics/jsmithrobotics \
               --api-key "$PIXI_TOKEN" \
-              "${pkg}"; then
+              "${pkg}" 2>&1); then
               echo "Successfully uploaded ${pkg}"
+            elif printf '%s' "$out" | grep -qiE "already exist"; then
+              # The one tolerable failure: a re-run after a half-finished release
+              # re-uploads what is already there, and that is not an error.
+              echo "${pkg} is already in the channel"
             else
-              echo "Failed to upload ${pkg} (may already exist)"
+              # Everything else is a release that published nothing. This used to
+              # print "may already exist" for any failure and exit 0, so a wrong
+              # channel name, a bad token or an expired one all produced a green
+              # build and an empty channel -- discovered later, by an install that
+              # could not resolve.
+              echo "$out" >&2
+              echo "::error::upload of ${pkg} failed and not because it exists" >&2
+              exit 1
             fi
           done
