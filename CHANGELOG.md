@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-09-09
+
 ### Added
 
 - The local container feature shares `~/.agents/skills` with Codex and mounts
@@ -14,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now resolve across host and container usernames, and writes through those
   links cannot modify the host's shared skill bodies. Existing containers need
   recreation to receive the mounts.
+
+### Fixed
+
+- **The feature's own troubleshooting page no longer claims protection it does
+  not provide.** `What's Protected (Read-Only)` listed `CLAUDE.md` and
+  `settings.json`, both of which are writable from the container and reach the
+  host, and a write to `settings.json` is host command execution because it can
+  name a hook command inline. The README's equivalent section had been
+  corrected; this copy was missed.
+- **The documented way to unblock a refused container create now creates every
+  directory the create needs.** `bind mount source path does not exist` told the
+  reader to make three of the seven mounted directories, so following it left
+  the create refused, and to run `echo '{}' > ~/.claude/settings.json`, which
+  truncates the settings file of anyone who already had one.
 
 ## [0.34.0] - 2026-09-09
 
