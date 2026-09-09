@@ -117,26 +117,38 @@ def mounts_fixture(feature) -> list:
     return [parse_mount(spec) for spec in feature["mounts"]]
 
 
-@pytest.fixture(name="host_config")
-def host_config_fixture(tmp_path) -> Path:
-    """A host `~/.claude` as the pre-create hook leaves it, on a fresh machine.
+@pytest.fixture(name="host_home")
+def host_home_fixture(tmp_path) -> Path:
+    """A host home as the pre-create hook leaves it, on a fresh machine.
 
     Every test that asks what *kind* of thing a mount source is needs a host to
     look at, and this is the only honest one to use: the hook is what creates
     these paths on a machine that has never run Claude, so the answer it gives is
     the answer Docker will get.
+
+    The home and not the `~/.claude` inside it, because the feature now mounts
+    `~/.agents/skills` too and a fixture returning the child left every caller
+    walking back up out of it.
     """
     devcontainer = json.loads(strip_jsonc_comments(DEVCONTAINER_JSON.read_text()))
     result = run_initialize_command(devcontainer, tmp_path)
     assert result.returncode == 0, result.stderr
-    return tmp_path / CONFIG_DIRNAME
+    return tmp_path
 
 
-def resolve(source: str, host_config: Path) -> Path:
-    """Resolve a host-home mount without assuming it belongs to Claude."""
+def resolve(source: str, host_home: Path) -> Path:
+    """A manifest mount source as a path under the test's scratch home.
+
+    The separator is part of the prefix, so a mount of `~/.claudeX` resolves to
+    a sibling rather than to a zero-length path inside the configuration
+    directory. Without that, a mount of any sibling whose name merely started
+    with the prefix was checked in the configuration directory's place --
+    passing whatever the real source would have failed, the missing source that
+    refuses the container create included.
+    """
     prefix = f"{LOCAL_HOME}/"
     assert source.startswith(prefix), f"{source} is outside the host home"
-    return host_config.parent / source.removeprefix(prefix)
+    return host_home / source.removeprefix(prefix)
 
 
 def nested_sources(mounts: list) -> dict:
@@ -180,7 +192,7 @@ def test_every_mount_is_a_bind_of_a_host_path(mounts):
         assert mount.get("type") == "bind", f"{mount.get('target')} is not a bind mount"
 
 
-def test_every_mount_source_is_a_directory(mounts, host_config):
+def test_every_mount_source_is_a_directory(mounts, host_home):
     """No mount names a file, whatever flags it would carry.
 
     This is the rule that keeps the read-only list honest, and it is stated over
@@ -194,7 +206,7 @@ def test_every_mount_source_is_a_directory(mounts, host_config):
     directory" is measured rather than inferred from the path's spelling.
     """
     for mount in mounts:
-        source = resolve(mount["source"], host_config)
+        source = resolve(mount["source"], host_home)
         assert source.is_dir(), (
             f"{mount['source']} is mounted but is not a directory. A bind mount of a file "
             f"does not survive its source being replaced by rename: the mount leaves the "
@@ -387,7 +399,7 @@ def test_each_mount_lands_where_the_feature_tells_claude_to_look(feature, mounts
         assert mount.get("target") == f"{config_dir}/{relative}"
 
 
-def test_the_pre_create_hook_creates_every_host_path_the_feature_mounts(mounts, host_config):
+def test_the_pre_create_hook_creates_every_host_path_the_feature_mounts(mounts, host_home):
     """The mounted paths exist on the host before the container is asked to start.
 
     A missing bind source is not a degraded container: the create is refused
@@ -401,11 +413,11 @@ def test_the_pre_create_hook_creates_every_host_path_the_feature_mounts(mounts, 
     this is where that stays true.
     """
     for mount in mounts:
-        source = resolve(mount["source"], host_config)
+        source = resolve(mount["source"], host_home)
         assert source.exists(), f"{mount['source']} is mounted but the hook does not create it"
 
 
-def test_the_pre_create_hook_creates_no_file_the_feature_does_not_mount(host_config):
+def test_the_pre_create_hook_creates_no_file_the_feature_does_not_mount(host_home):
     """It seeds no `{}` placeholders for paths nothing binds any more.
 
     The empty `.credentials.json` and `.claude.json` this used to write existed
@@ -414,7 +426,7 @@ def test_the_pre_create_hook_creates_no_file_the_feature_does_not_mount(host_con
     use -- while an empty credentials file on a host that has never run Claude is
     indistinguishable from a logged-out session.
     """
-    stray = [path.name for path in host_config.iterdir() if path.is_file()]
+    stray = [path.name for path in (host_home / CONFIG_DIRNAME).iterdir() if path.is_file()]
     assert not stray, f"the hook creates {sorted(stray)}, which nothing mounts"
 
 
@@ -437,11 +449,7 @@ def test_the_pre_create_hook_leaves_a_configuration_that_already_exists_alone(mo
     devcontainer = json.loads(strip_jsonc_comments(DEVCONTAINER_JSON.read_text()))
     run_initialize_command(devcontainer, tmp_path)
 
-    existing = [
-        resolve(mount["source"], tmp_path / CONFIG_DIRNAME)
-        for mount in mounts
-        if "readonly" in mount
-    ]
+    existing = [resolve(mount["source"], tmp_path) for mount in mounts if "readonly" in mount]
     assert existing, "no configuration was created, so this asserts nothing"
     for path in existing:
         os.utime(path, ns=(0, 0))
