@@ -1036,6 +1036,38 @@ mod tests {
 
     // --------------------------------------------- the agent's command
 
+    #[test]
+    fn every_agent_in_the_table_composes_into_argv_dl_can_carry() {
+        // Two invariants the table has to hold that its type does not, both of them
+        // silent at the point an entry is edited rather than here.
+        //
+        // A value is spliced in bare (`NAME=value`) and stays an assignment prefix
+        // only while dl's quoting leaves the whole word alone. Give one a space or a
+        // `$` and dl quotes it to `'NAME=a b'`, which bash reads as a program name:
+        // the launch dies at 127 with the variable never set. Quoting it here first
+        // does not help, because dl would then quote the quotes.
+        //
+        // An empty `command` would make `build_agent_command` answer `Some(vec![])`,
+        // and `build_dl_args` would emit `[<spec>, "--"]` -- a separator with nothing
+        // after it, which dl reads as a plain interactive attach. An agent was asked
+        // for and a shell would arrive.
+        for (agent, started) in AGENTS {
+            assert!(
+                !started.command.is_empty(),
+                "{agent} has no command, so its `--` tail would be empty"
+            );
+            for (name, value) in started.env {
+                let word = format!("{name}={value}");
+                assert_eq!(
+                    dl::shell::quote(&word),
+                    word,
+                    "{agent}'s {name} needs quoting, so it would reach the remote \
+                     shell as a command name rather than an assignment"
+                );
+            }
+        }
+    }
+
     /// The agent's argv, for a name the table has.
     fn agent_argv(agent: &str, prompt: &str, remote_control: Option<&str>) -> Vec<String> {
         build_agent_command(agent, prompt, remote_control).expect("a known agent")
