@@ -42,6 +42,7 @@ use devlaunch_core::flows::launch::{
 };
 use devlaunch_core::flows::lifecycle::Refresh;
 use devlaunch_core::flows::listing::CommandContext;
+use devlaunch_core::shell;
 
 use crate::cli::{RmOnExit, Verb};
 use crate::commands::Ending;
@@ -101,19 +102,23 @@ pub(crate) fn family(verb: &Verb) -> Family {
         // ending rather than to this pass over one workspace.
         Verb::Remove { force, after: _ } => return Family::Remove { force: *force },
         Verb::Attach { rm } => (LaunchVerb::Attach { command: None }, *rm),
-        // Python's `" ".join(args[2:])`: the words are rejoined with single spaces
-        // and the result is one shell command, quoted whole into the remote
-        // payload. A word that needed quoting to survive the *host's* shell has
-        // already been unquoted by it, so the join is what the user typed.
+        // Re-quoted, not just rejoined. [`RemotePayload::wrap`] quotes this
+        // string whole into `bash -lc '<it>'`, so what is built here is a
+        // command line the *remote* shell parses -- and the words arriving here
+        // have already had their quoting removed by the *host's* shell. Joining
+        // them on spaces gave the remote shell every one of those separators
+        // back. The three failure modes that produced -- a re-split argument, a
+        // truncating `#`, an executed `$(...)` -- are a test each below, beside
+        // the plain command that must stay unquoted and the shell snippet that is
+        // now spelled by naming a shell.
+        //
+        // A bare `NAME=value` survives `shell::join` unquoted, because `=` is in
+        // the shell-safe set. That is not an oversight to tidy: it is what keeps
+        // `dl <ws> -- IS_SANDBOX=1 claude ...` setting a variable, which is the
+        // spelling `aid` builds and the README documents.
         Verb::Run(words, rm) => (
             LaunchVerb::Attach {
-                command: Some(
-                    words
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<&str>>()
-                        .join(" "),
-                ),
+                command: Some(shell::join(words.iter().map(String::as_str))),
             },
             *rm,
         ),
@@ -321,5 +326,83 @@ fn ran(outcome: Result<Launched, LaunchAborted>, cache: &Path) -> Ran {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use devlaunch_core::domain::workspace_state::NonEmpty;
+    use devlaunch_core::flows::launch::LaunchVerb;
+
+    use super::{Family, family};
+    use crate::cli::{RmOnExit, Verb};
+
+    /// The command `dl <ws> -- <words>` would hand the remote shell.
+    fn run_command(words: &[&str]) -> String {
+        let verb = Verb::Run(
+            NonEmpty::of(words.iter().map(|word| (*word).to_owned())).expect("a command"),
+            RmOnExit::No,
+        );
+        match family(&verb) {
+            Family::Launch {
+                verb:
+                    LaunchVerb::Attach {
+                        command: Some(command),
+                    },
+                ..
+            } => command,
+            _ => panic!("`-- <cmd>` is a launch that attaches with a command"),
+        }
+    }
+
+    #[test]
+    fn a_plain_command_is_unchanged() {
+        // The common case has nothing to quote, and quoting it anyway would put
+        // `'make' 'test'` in front of every reader of a `--command` line.
+        assert_eq!(run_command(&["make", "test"]), "make test");
+    }
+
+    #[test]
+    fn a_word_with_spaces_stays_one_word() {
+        // The host's shell had already removed the quotes from `dl <ws> --
+        // claude 'fix the bug'`, so rejoining on spaces handed the remote shell
+        // four words and the agent was prompted with `fix`.
+        assert_eq!(
+            run_command(&["claude", "fix the bug"]),
+            r#"claude 'fix the bug'"#
+        );
+    }
+
+    #[test]
+    fn a_word_holding_a_comment_does_not_swallow_the_rest() {
+        // The failure this was found through: `#10848` began a comment, so everything
+        // after it -- including every hard rule the prompt carried -- was
+        // discarded by the remote shell before the command ran.
+        assert_eq!(
+            run_command(&["claude", "review PR #10848 now"]),
+            r#"claude 'review PR #10848 now'"#
+        );
+    }
+
+    #[test]
+    fn a_word_holding_a_substitution_is_not_executed() {
+        // Command substitution in a prompt is not hypothetical: PR titles and
+        // review bodies reach `dl -- claude <prompt>` from a supervisor, and the
+        // remote shell has the forwarded token.
+        assert_eq!(
+            run_command(&["echo", "uid=$(id -u)"]),
+            r#"echo 'uid=$(id -u)'"#
+        );
+    }
+
+    #[test]
+    fn a_shell_snippet_is_still_writable_the_documented_way() {
+        // `-- <command>` is argv, so a snippet is asked for by naming a shell.
+        // That spelling was broken before the quoting too: `bash -lc a && b`
+        // ran `bash -lc a` and then `b`.
+        assert_eq!(
+            run_command(&["bash", "-lc", "a && b"]),
+            r#"bash -lc 'a && b'"#
+        );
     }
 }

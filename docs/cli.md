@@ -100,6 +100,37 @@ that clone last fetched, the attach says how far behind before it hands over the
 shell. [How fresh a launch is](workspaces.md#how-fresh-a-launch-is) is the whole
 of the freshness rules, and the section under it names which verb moves what.
 
+## What `--` takes
+
+The command and its arguments, one word each. `dl` quotes every word on the way
+into the remote payload, so a quoted argument stays one argument: `dl <ws> --
+claude 'fix the bug'` runs `claude` with a single argument, and a word holding a
+space, a `#`, a `$(...)` or a backtick is that word rather than shell syntax.
+
+It has to be built that way because the payload is one `bash -lc <line>` for both
+transports. The words used to be rejoined with plain spaces, which gave the remote
+shell back every separator your own shell had already consumed: quoted arguments
+were re-split, a `#` commented out the rest of the line, and a `$(...)` ran.
+
+One exception, and it is deliberate. The quoting leaves a word alone when it needs
+none, and `=` counts as needing none, so a leading `NAME=value` still reaches the
+shell as an assignment prefix and sets that variable for that command only. That
+is what makes `dl <ws> -- IS_SANDBOX=1 claude ...` work, which is the spelling
+`aid` uses and the one the README shows.
+
+The exception ends where the quoting begins, and it ends abruptly. It is the
+whole word that has to need no quoting, value included, so `FOO=bar` is an
+assignment and `FOO='a b'` is not: the value's space makes the word
+`'FOO=a b'`, and a shell reads a quoted word as a program name, so the command
+exits 127 with the variable never set. Values made of `[A-Za-z0-9_@%+=:,./-]`
+are the ones that survive. For anything else, name the shell and write the
+assignment inside it: `dl <ws> -- bash -lc 'FOO="a b" cmd'`.
+
+A shell snippet is a command like any other, so name the shell: `dl <ws> -- bash
+-lc 'a && b'`. Redirections and pipes typed on your own command line belong to
+your own shell and never reach `dl`, which is what makes `dl <ws> -- ls >
+files.txt` write the file here.
+
 ## Commands that need a terminal
 
 `dl <ws> -- <command>` gives the command a terminal whenever `dl` itself has one,

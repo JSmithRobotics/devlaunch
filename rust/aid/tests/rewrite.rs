@@ -273,6 +273,10 @@ fn a_prompt_reaches_the_agent_as_one_argument_through_dls_own_launch() {
     // dl's own launch of the workspace, and one `devpod ssh --command` carrying the
     // agent. Byte for byte Python's, quoting included — the payload travels in argv.
     //
+    // The echoed `aid -> dl` line shows the tail as the words it is, because that is
+    // what aid now hands dl; the `--command` below is unchanged, since dl puts back
+    // the same quoting aid used to apply itself.
+    //
     // Remote Control rides along with nothing typed, which is what it is now: the
     // default. The name is the spec, which here is the workspace the line named.
     let world = World::with(&["--warm"]);
@@ -281,9 +285,9 @@ fn a_prompt_reaches_the_agent_as_one_argument_through_dls_own_launch() {
     assert_eq!(
         run.err.lines().collect::<Vec<&str>>(),
         [
-            "aid -> dl devlaunch-main-3j1t -- 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 \
+            "aid -> dl devlaunch-main-3j1t -- CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 \
              IS_SANDBOX=1 claude --dangerously-skip-permissions \
-             --remote-control=devlaunch-main-3j1t '\"'\"'fix the bug'\"'\"''",
+             --remote-control=devlaunch-main-3j1t 'fix the bug'",
             "Workspace devlaunch-main-3j1t is already running, attaching...",
             "SSH command: devpod ssh devlaunch-main-3j1t --command bash -lc \
              'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \

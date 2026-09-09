@@ -6,8 +6,6 @@
 //! containers itself is an `aid` that builds one `dl` would have reused, which is
 //! the drift `aid.py` was rewritten to end.
 
-use dl::shell;
-
 /// How one coding agent is started inside the workspace.
 ///
 /// Split three ways because not every part of the line belongs everywhere: `env`
@@ -712,11 +710,18 @@ fn agent_flag(word: &str) -> Option<&'static str> {
         .find(|name| *name == named)
 }
 
-/// The shell command that starts the agent inside the workspace.
+/// The argv that starts the agent inside the workspace.
 ///
-/// One shell string, because that is what dl's `-- <command>` form takes. The prompt
-/// is quoted here rather than reassembled by the caller, so the words the user typed
-/// reach the agent as the single argument they meant.
+/// Words, not a shell string, because dl's `-- <command>` form is argv: it quotes
+/// what it is given (`shell::join`) on the way into the remote payload, so a caller
+/// that pre-composed a line would have that line quoted as one command name. It used
+/// to be one string, back when dl rejoined the tail with plain spaces and a
+/// pre-quoted line survived by accident — the same accident that re-split everybody
+/// else's quoted argument.
+///
+/// The composed payload is unchanged by all of that: every word this returns is
+/// either already shell-safe or gets the same quoting aid used to apply itself, so
+/// what reaches the remote shell is byte for byte what it was.
 ///
 /// `None` is an agent this build has no entry for, which only a caller inventing a
 /// name can produce — [`parse_aid_args`] answers with a name from the table.
@@ -732,7 +737,7 @@ pub(crate) fn build_agent_command(
     agent: &str,
     prompt: &str,
     remote_control: Option<&str>,
-) -> Option<String> {
+) -> Option<Vec<String>> {
     let (_, started) = AGENTS.iter().find(|(name, _)| *name == agent)?;
     // No prompt to be interactive about: start the agent's plain session, without
     // the flags that only make sense alongside one.
@@ -750,21 +755,25 @@ pub(crate) fn build_agent_command(
     }
     // Assignments prefixing a command set the variables for that command only, so
     // the agent is the one process that sees them and nothing in the login shell dl
-    // runs this under is changed.
+    // runs this under is changed. Still spelled as an assignment rather than as
+    // `env NAME=value`: `=` is in dl's shell-safe set, so a bare `NAME=value` word
+    // reaches the remote shell unquoted and keeps that meaning, and the payload
+    // stays the one README documents.
     let mut line: Vec<String> = started
         .env
         .iter()
-        .map(|(name, value)| format!("{name}={}", shell::quote(value)))
+        .map(|(name, value)| format!("{name}={value}"))
         .collect();
-    line.push(shell::join(words));
-    Some(line.join(" "))
+    line.extend(words.into_iter().map(str::to_owned));
+    Some(line)
 }
 
 /// The dl command line that does the work.
 ///
-/// `[<dl options>…, <spec>, "--", <agent command>]` — the shape `dl` reads back by
-/// joining everything after `--` with spaces, which is why the agent command is one
-/// argument and its quoting lives inside it.
+/// `[<dl options>…, <spec>, "--", <agent argv>…]` — the agent's command and each of
+/// its arguments as their own word, which is the shape `dl` reads: it quotes the tail
+/// itself on the way into the remote payload, so the prompt stays one argument
+/// without aid quoting anything.
 ///
 /// `--rm` lands between the spec and the `--`, so the agent still gets its prompt and
 /// dl still gets the flag: `[…, <spec>, "--rm", "--", <agent command>]`.
@@ -793,7 +802,7 @@ pub(crate) fn build_dl_args(parsed: &AidArgs) -> Option<Vec<String>> {
                 RemoteControl::On => Some(parsed.spec.as_str()),
                 RemoteControl::Off => None,
             };
-            args.push(build_agent_command(agent, prompt, session)?);
+            args.extend(build_agent_command(agent, prompt, session)?);
         }
         Task::Retired => {}
     }
@@ -1028,45 +1037,87 @@ mod tests {
     // --------------------------------------------- the agent's command
 
     #[test]
+    fn every_agent_in_the_table_composes_into_argv_dl_can_carry() {
+        // Two invariants the table has to hold that its type does not, both of them
+        // silent at the point an entry is edited rather than here.
+        //
+        // A value is spliced in bare (`NAME=value`) and stays an assignment prefix
+        // only while dl's quoting leaves the whole word alone. Give one a space or a
+        // `$` and dl quotes it to `'NAME=a b'`, which bash reads as a program name:
+        // the launch dies at 127 with the variable never set. Quoting it here first
+        // does not help, because dl would then quote the quotes.
+        //
+        // An empty `command` would make `build_agent_command` answer `Some(vec![])`,
+        // and `build_dl_args` would emit `[<spec>, "--"]` -- a separator with nothing
+        // after it, which dl reads as a plain interactive attach. An agent was asked
+        // for and a shell would arrive.
+        for (agent, started) in AGENTS {
+            assert!(
+                !started.command.is_empty(),
+                "{agent} has no command, so its `--` tail would be empty"
+            );
+            for (name, value) in started.env {
+                let word = format!("{name}={value}");
+                assert_eq!(
+                    dl::shell::quote(&word),
+                    word,
+                    "{agent}'s {name} needs quoting, so it would reach the remote \
+                     shell as a command name rather than an assignment"
+                );
+            }
+        }
+    }
+
+    /// The agent's argv, for a name the table has.
+    fn agent_argv(agent: &str, prompt: &str, remote_control: Option<&str>) -> Vec<String> {
+        build_agent_command(agent, prompt, remote_control).expect("a known agent")
+    }
+
+    #[test]
     fn claude_is_started_sandboxed_with_and_without_a_prompt() {
         // The flag alone is not enough, and the gap is silent: claude exits 1 with
         // "cannot be used with root/sudo privileges" when it sees
         // --dangerously-skip-permissions under uid 0, and a devcontainer running as
         // root is ordinary.
         assert_eq!(
-            build_agent_command("claude", "fix the bug", None).as_deref(),
-            Some(
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-             --dangerously-skip-permissions 'fix the bug'"
-            )
+            agent_argv("claude", "fix the bug", None),
+            [
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "fix the bug",
+            ]
         );
         assert_eq!(
-            build_agent_command("claude", "", None).as_deref(),
-            Some(
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-             --dangerously-skip-permissions"
-            )
+            agent_argv("claude", "", None),
+            [
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+            ]
         );
     }
 
     #[test]
     fn an_agent_that_needs_no_variable_gets_none() {
         for agent in ["codex", "gemini"] {
-            let command = build_agent_command(agent, "hi", None).expect("a known agent");
-            assert!(!command.contains("IS_SANDBOX"), "{command}");
+            let command = agent_argv(agent, "hi", None);
+            assert!(
+                !command.iter().any(|word| word.contains("IS_SANDBOX")),
+                "{command:?}"
+            );
         }
     }
 
     #[test]
     fn gemini_gets_its_interactive_flag_only_beside_a_prompt() {
         assert_eq!(
-            build_agent_command("gemini", "hi", None).as_deref(),
-            Some("gemini --yolo --prompt-interactive hi")
+            agent_argv("gemini", "hi", None),
+            ["gemini", "--yolo", "--prompt-interactive", "hi"]
         );
-        assert_eq!(
-            build_agent_command("gemini", "", None).as_deref(),
-            Some("gemini --yolo")
-        );
+        assert_eq!(agent_argv("gemini", "", None), ["gemini", "--yolo"]);
     }
 
     #[test]
@@ -1104,12 +1155,13 @@ mod tests {
             // `aid/tests/rewrite.rs` records: every truncation of a flag is a
             // substring of it, and so is every flag that merely starts with one, so
             // a table entry reading `--yolo-dry-run` satisfied a `contains("--yolo")`
-            // while asking gemini for the opposite of full auto.
+            // while asking gemini for the opposite of full auto. The words are argv
+            // now, so this is a comparison per word rather than a split of a line.
             for prompt in ["hi", ""] {
-                let command = build_agent_command(agent, prompt, None).expect("a known agent");
+                let command = agent_argv(agent, prompt, None);
                 assert!(
-                    command.split_whitespace().any(|word| word == flag),
-                    "{agent} is not in full auto (prompt {prompt:?}): {command}"
+                    command.iter().any(|word| word == flag),
+                    "{agent} is not in full auto (prompt {prompt:?}): {command:?}"
                 );
             }
         }
@@ -1117,21 +1169,29 @@ mod tests {
 
     #[test]
     fn a_prompt_is_one_argument_however_it_is_spelled() {
-        // Python's `shlex.quote` spelling, byte for byte: the payload travels in
-        // argv, and a second command cannot be smuggled into it.
+        // The prompt is one word here and stays one word through dl, which quotes
+        // every word it is handed. Nothing is quoted at this layer any more, so what
+        // this asserts is that no layer *splits* it: a second command cannot be
+        // smuggled in, because `;` never reaches a shell as syntax.
         assert_eq!(
-            build_agent_command("claude", "don't break \"this\"", None).as_deref(),
-            Some(
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-             --dangerously-skip-permissions 'don'\"'\"'t break \"this\"'"
-            )
+            agent_argv("claude", "don't break \"this\"", None),
+            [
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "don't break \"this\"",
+            ]
         );
         assert_eq!(
-            build_agent_command("claude", "hi; rm -rf /", None).as_deref(),
-            Some(
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-             --dangerously-skip-permissions 'hi; rm -rf /'"
-            )
+            agent_argv("claude", "hi; rm -rf /", None),
+            [
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "hi; rm -rf /",
+            ]
         );
     }
 
@@ -1149,8 +1209,12 @@ mod tests {
             [
                 "owner/repo@branch",
                 "--",
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-                 --dangerously-skip-permissions --remote-control=owner/repo@branch 'fix it'",
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=owner/repo@branch",
+                "fix it",
             ]
         );
         assert_eq!(
@@ -1161,17 +1225,23 @@ mod tests {
                 "robot",
                 "owner/repo",
                 "--",
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-                 --dangerously-skip-permissions --remote-control=owner/repo",
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=owner/repo",
             ]
         );
     }
 
     #[test]
-    fn dl_reads_the_command_back_whole() {
-        // The prompt survives dl's own parsing of `-- <command>`: dl joins
-        // everything after `--` with spaces, so the quoting aid applies has to live
-        // inside a single argument rather than be spread across several.
+    fn the_tail_after_the_separator_is_argv_and_the_prompt_is_one_word_of_it() {
+        // What this used to assert was the bug: dl rejoined the tail with plain
+        // spaces, so aid kept the quoting inside one argument and everybody else's
+        // quoted argument was re-split. The tail is argv now, and the
+        // property worth holding is that the prompt is *one* word of it however
+        // many words were typed -- dl quotes each one on the way to the remote
+        // shell, so a word that survives here survives all the way.
         let args = build_dl_args(&parsed(&["owner/repo", "fix", "the", "flaky", "test"]))
             .expect("a known agent");
         let after = args
@@ -1180,10 +1250,15 @@ mod tests {
             .expect("the -- separator");
 
         assert_eq!(
-            args[after + 1..].join(" "),
-            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-             --dangerously-skip-permissions --remote-control=owner/repo \
-             'fix the flaky test'"
+            args[after + 1..],
+            [
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=owner/repo",
+                "fix the flaky test",
+            ]
         );
     }
 
@@ -1229,8 +1304,12 @@ mod tests {
                 "owner/repo",
                 "--rm",
                 "--",
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-                 --dangerously-skip-permissions --remote-control=owner/repo 'fix it'"
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=owner/repo",
+                "fix it",
             ]
         );
     }
@@ -1451,9 +1530,12 @@ mod tests {
             [
                 "owner/repo@branch",
                 "--",
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-                 --dangerously-skip-permissions --remote-control=owner/repo@branch \
-                 'fix the flaky test'",
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=owner/repo@branch",
+                "fix the flaky test",
             ]
         );
         // And with no prompt, which is the launch this most often is: the flag is
@@ -1463,8 +1545,11 @@ mod tests {
             [
                 "owner/repo@branch",
                 "--",
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-                 --dangerously-skip-permissions --remote-control=owner/repo@branch",
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=owner/repo@branch",
             ]
         );
     }
@@ -1484,12 +1569,21 @@ mod tests {
             [
                 "owner/repo",
                 "--",
-                "codex --dangerously-bypass-approvals-and-sandbox hi"
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "hi",
             ]
         );
         assert_eq!(
             build_dl_args(&parsed(&["--gemini", "owner/repo", "hi"])).expect("a known agent"),
-            ["owner/repo", "--", "gemini --yolo --prompt-interactive hi"]
+            [
+                "owner/repo",
+                "--",
+                "gemini",
+                "--yolo",
+                "--prompt-interactive",
+                "hi",
+            ]
         );
         // And the same through the variable, which is how somebody who set it once
         // launches every line.
@@ -1561,8 +1655,11 @@ mod tests {
                 [
                     "owner/repo@fix/x",
                     "--",
-                    "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-                     --dangerously-skip-permissions 'fix it'",
+                    "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                    "IS_SANDBOX=1",
+                    "claude",
+                    "--dangerously-skip-permissions",
+                    "fix it",
                 ],
                 "{flag}"
             );
@@ -1650,22 +1747,29 @@ mod tests {
 
     #[test]
     fn a_session_name_that_needs_quoting_is_still_one_word() {
-        // The name travels through the same `shlex.quote` the prompt does, and the
-        // whole `--flag=<name>` is what gets quoted — a name broken across two words
-        // would leave claude reading the rest of the line as its own arguments.
+        // The whole `--flag=<name>` is one word, which is what keeps a name holding
+        // a space from leaving claude reading the rest of the line as its own
+        // arguments. dl quotes it from here.
         assert_eq!(
-            build_agent_command("claude", "", Some("./my project")).as_deref(),
-            Some(
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-                 --dangerously-skip-permissions '--remote-control=./my project'"
-            )
+            agent_argv("claude", "", Some("./my project")),
+            [
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=./my project",
+            ]
         );
         assert_eq!(
-            build_agent_command("claude", "hi", Some("owner/repo@it's-mine")).as_deref(),
-            Some(
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-                 --dangerously-skip-permissions '--remote-control=owner/repo@it'\"'\"'s-mine' hi"
-            )
+            agent_argv("claude", "hi", Some("owner/repo@it's-mine")),
+            [
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=owner/repo@it's-mine",
+                "hi",
+            ]
         );
     }
 
@@ -1874,8 +1978,12 @@ mod tests {
                 "owner/repo",
                 "--rm",
                 "--",
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-                 --dangerously-skip-permissions --remote-control=owner/repo 'fix the bug'"
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=owner/repo",
+                "fix the bug",
             ]
         );
     }
@@ -1891,7 +1999,10 @@ mod tests {
             [
                 "owner/repo",
                 "--",
-                "gemini --yolo --prompt-interactive 'explain this'"
+                "gemini",
+                "--yolo",
+                "--prompt-interactive",
+                "explain this",
             ]
         );
     }
@@ -1910,8 +2021,12 @@ mod tests {
             [
                 "owner/repo@fix/x",
                 "--",
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-                 --dangerously-skip-permissions --remote-control=owner/repo@fix/x 'fix the bug'",
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=owner/repo@fix/x",
+                "fix the bug",
             ]
         );
 
@@ -1924,8 +2039,11 @@ mod tests {
             [
                 "owner/repo@fix/x",
                 "--",
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-                 --dangerously-skip-permissions 'fix it'",
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "fix it",
             ]
         );
     }
@@ -1939,8 +2057,11 @@ mod tests {
             [
                 "owner/repo",
                 "--",
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-                 --dangerously-skip-permissions --remote-control=owner/repo"
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=owner/repo",
             ]
         );
     }
