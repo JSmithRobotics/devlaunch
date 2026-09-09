@@ -93,6 +93,12 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --depth=1 origin "$BASE_SHA"
+          # The tags are the guard's oracle for the one edit it permits: a
+          # released section moving back to what that version actually shipped.
+          # Shallow, because only the CHANGELOG.md at each tag is ever read.
+          # Missing tags are not an error here -- the guard refuses on a tag it
+          # cannot reach, so a fetch that comes up short fails closed.
+          git fetch --depth=1 --tags origin || true
           # `git show` writes nothing and exits non-zero if the path is absent at
           # that commit, and `set -e` turns that into a failure rather than an
           # empty file that would compare equal to anything.
