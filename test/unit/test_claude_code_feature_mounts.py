@@ -324,9 +324,19 @@ def as_mount_source(path: str) -> str:
     return path.removeprefix("~/") if path.startswith("~/") else f"{CONFIG_DIRNAME}/{path}"
 
 
-TREE_MOUNT = re.compile(r"^(?:[├└]──\s+)?(?P<path>[~\w./-]+/)\s+#.*\(read-only mount\)")
+# A drawn directory entry, with or without box-drawing lead-in and with or
+# without a trailing comment. Deliberately not keyed on `(read-only mount)`:
+# the README draws the same seven paths with comments that say `# Custom
+# agents`, so a pattern requiring the annotation read that copy as empty and
+# then compared it against nothing.
+TREE_ENTRY = re.compile(r"^[│├└─ ]*(?P<path>[~.\w][\w./-]*/)(?:\s+#.*)?$")
 CODE_SPAN = re.compile(r"`([^`]+)`")
 READ_ONLY_SYMPTOM = "→ Read-only"
+
+# The tree under this heading is rooted at `~/.claude/` and names it, so the
+# configuration bind is a legitimate entry there and the seven read-only mounts
+# are the rest.
+HOST_LAYOUT_HEADING = "### Host Machine"
 
 # The two places the README hands over a `mkdir` to run. Anchored per section
 # because it offers others -- a dotfiles installer example, a three-directory
@@ -354,10 +364,28 @@ def documented_mkdir(heading: str) -> set:
     raise AssertionError(f"the README section {heading!r} no longer offers a by-hand mkdir")
 
 
+def drawn_tree(lines: list) -> set:
+    """The mount sources an ASCII directory tree draws, from its entry lines.
+
+    Both trees mix roots: they are drawn inside `~/.claude` and then name
+    `~/.agents/skills/` at the same indent, so the tilde is what says which
+    base an entry is relative to. Both also draw `~/.claude/` itself as the
+    root they hang from, which is the one bind that is supposed to be writable
+    and is asserted elsewhere, so it is not part of what these copies promise.
+    """
+    paths = {
+        as_mount_source(match.group("path"))
+        for match in (TREE_ENTRY.match(line) for line in lines)
+        if match
+    }
+    assert paths, "no tree entry was recognised, so this compares nothing"
+    return paths - {CONFIG_DIRNAME}
+
+
 def test_every_hand_written_copy_of_the_mount_list_says_the_same_thing(mounts):
     """The trees, the symptom list and the by-hand `mkdir`s agree with the manifest.
 
-    Four hand-maintained copies of one list, and this repo's rule is that a
+    Five hand-maintained copies of one list, and this repo's rule is that a
     second copy is allowed only where a test diffs it against the first. Only
     the README's Read-Only Mounts bullets had one, so the rest could and did
     drift: the `bind mount source path does not exist` remedy still created
@@ -370,11 +398,10 @@ def test_every_hand_written_copy_of_the_mount_list_says_the_same_thing(mounts):
     }
     troubleshooting = TROUBLESHOOTING.read_text().splitlines()
     copies = {
-        "TROUBLESHOOTING.md's tree": {
-            as_mount_source(match.group("path"))
-            for match in (TREE_MOUNT.match(line) for line in troubleshooting)
-            if match
-        },
+        "TROUBLESHOOTING.md's tree": drawn_tree(troubleshooting),
+        f"the README's {HOST_LAYOUT_HEADING!r} tree": drawn_tree(
+            _section(FEATURE_README, HOST_LAYOUT_HEADING).splitlines()
+        ),
         "TROUBLESHOOTING.md's read-only symptom": {
             as_mount_source(path)
             for line in troubleshooting
