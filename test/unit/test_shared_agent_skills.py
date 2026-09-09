@@ -3,11 +3,10 @@
 import json
 import shlex
 import subprocess
-from pathlib import Path
 
 import pytest
 
-from unit.test_claude_code_feature_mounts import FEATURE_JSON
+from unit.test_claude_code_feature_mounts import CONFIG_DIRNAME, FEATURE_JSON, LOCAL_HOME
 from unit.test_devcontainer_manifest import (
     DEVCONTAINER_JSON,
     parse_mount,
@@ -21,15 +20,45 @@ def skill_mounts():
     return [parse_mount(spec) for spec in json.loads(FEATURE_JSON.read_text())["mounts"]]
 
 
+def container_home() -> str:
+    """The container home the feature puts its configuration directory in."""
+    config = json.loads(FEATURE_JSON.read_text())["containerEnv"]["CLAUDE_CONFIG_DIR"]
+    suffix = f"/{CONFIG_DIRNAME}"
+    assert config.endswith(suffix), f"CLAUDE_CONFIG_DIR {config} does not end in {suffix}"
+    return config.removesuffix(suffix)
+
+
+def under(base, path: str, prefix: str):
+    """`path` re-rooted from `prefix` onto `base`, refusing anything outside it.
+
+    The assertion is the point. `removeprefix` returns its argument unchanged
+    when the prefix is absent and `Path` discards its left side when the right
+    is absolute, so the two compose into a silent escape: with a
+    `CLAUDE_CONFIG_DIR` that is not `<home>/.claude`, every target falls through
+    unchanged and `scratch / "/home/vscode/.claude/skills"` is
+    `/home/vscode/.claude/skills`. The namespace scenario below `mkdir -p`s and
+    bind-mounts what this returns, so a no-op here reaches the real home rather
+    than the test's, and still passes -- the binds satisfy every read and every
+    EROFS probe it makes.
+    """
+    assert path.startswith(f"{prefix}/"), f"{path} is not under {prefix}"
+    return base / path.removeprefix(f"{prefix}/")
+
+
+def test_a_mount_target_outside_the_container_home_is_refused(tmp_path):
+    """Because the alternative is bind-mounting over the developer's own home."""
+    with pytest.raises(AssertionError):
+        under(tmp_path, "/home/somebody-else/.claude/skills", container_home())
+
+
 def test_codex_discovery_and_shared_bodies_are_mounted_read_only():
     mounts = {mount["source"]: mount for mount in skill_mounts()}
     for relative in (".agents/skills", ".claude/shared-skills"):
-        mount = mounts.get(f"${{localEnv:HOME}}/{relative}")
+        mount = mounts.get(f"{LOCAL_HOME}/{relative}")
         assert mount is not None, f"the feature does not expose {relative}"
         assert mount["type"] == "bind"
         assert "readonly" in mount, f"the container can rewrite the host's {relative}"
-        config = json.loads(FEATURE_JSON.read_text())["containerEnv"]["CLAUDE_CONFIG_DIR"]
-        assert mount["target"] == f"{config.removesuffix('/.claude')}/{relative}"
+        assert mount["target"] == f"{container_home()}/{relative}"
 
 
 def test_initialize_creates_missing_skill_roots_without_changing_existing_skills(tmp_path):
@@ -50,8 +79,7 @@ def test_initialize_creates_missing_skill_roots_without_changing_existing_skills
         result = run_initialize_command(config, home)
         assert result.returncode == 0, result.stderr
         for mount in skill_mounts():
-            source = mount["source"].replace("${localEnv:HOME}", str(home))
-            assert Path(source).is_dir()
+            assert under(home, mount["source"], LOCAL_HOME).is_dir()
 
     assert body.read_text() == "the existing instructions\n"
     assert link.readlink().as_posix() == "../../.claude/shared-skills/example"
@@ -79,16 +107,13 @@ def test_both_shared_layouts_resolve_and_stay_read_only_in_a_different_home(tmp_
     (host / ".agents/skills/shared").symlink_to("../../.claude/shared-skills/shared")
     (host / ".claude/.credentials.json").write_text("original\n")
 
-    feature_home = json.loads(FEATURE_JSON.read_text())["containerEnv"][
-        "CLAUDE_CONFIG_DIR"
-    ].removesuffix("/.claude")
+    feature_home = container_home()
     script = []
     for mount in skill_mounts():
-        source = mount["source"].replace("${localEnv:HOME}", str(host))
-        relative = mount["target"].removeprefix(feature_home + "/")
-        target = guest / relative
+        source = under(host, mount["source"], LOCAL_HOME)
+        target = under(guest, mount["target"], feature_home)
         target.mkdir(parents=True, exist_ok=True)
-        script.append(f"mount --bind {shlex.quote(source)} {shlex.quote(str(target))}")
+        script.append(f"mount --bind {shlex.quote(str(source))} {shlex.quote(str(target))}")
         if "readonly" in mount:
             script.append(f"mount -o remount,bind,ro {shlex.quote(str(target))}")
 
