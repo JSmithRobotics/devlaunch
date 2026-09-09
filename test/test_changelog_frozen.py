@@ -206,3 +206,108 @@ def test_ci_runs_the_guard_on_pull_requests():
     # `test_bench_workflow.py` and `test_review_guard.py` both write about.
     workflow = CI.read_text(encoding="utf-8")
     assert "scripts/changelog_frozen.py" in workflow
+
+
+# --------------------------------------------------------- restoring a section
+
+
+def tagged_repo(tmp_path: Path, shipped: str, tag: str) -> Path:
+    """A repository whose `tag` holds `shipped` as its CHANGELOG.md.
+
+    The tag is the whole point: it is the only witness to what a version actually
+    contained, and it is written by the release rather than by the branch asking
+    to be let through, which is what stops the permitted edit from being a way
+    around the rule.
+    """
+    work = tmp_path / "tagged"
+    work.mkdir()
+    git("init", "-q", "-b", "main", cwd=work)
+    git("config", "user.email", "guard@example.invalid", cwd=work)
+    git("config", "user.name", "Guard Fixture", cwd=work)
+    (work / "CHANGELOG.md").write_text(shipped, encoding="utf-8")
+    git("add", "CHANGELOG.md", cwd=work)
+    git("commit", "-qm", "the release", cwd=work)
+    git("tag", tag, cwd=work)
+    return work
+
+
+def check_in(base: str, head: str, tmp_path: Path, cwd: Path) -> subprocess.CompletedProcess:
+    (tmp_path / "base.md").write_text(base, encoding="utf-8")
+    (tmp_path / "head.md").write_text(head, encoding="utf-8")
+    return run(
+        sys.executable,
+        str(GUARD),
+        str(tmp_path / "base.md"),
+        str(tmp_path / "head.md"),
+        cwd=cwd,
+    )
+
+
+def test_a_released_section_restored_to_what_it_shipped_is_permitted(tmp_path):
+    """The state the guard would otherwise have no way out of.
+
+    Once a misfiled entry is merged it is on the base branch, so every honest
+    correction changes a released section -- and a rule that refuses all of them
+    makes the false record the only text CI accepts. blooop/devlaunch#591 re-cut a
+    version #593 had already published and its entry landed under the shipped
+    heading, arriving from the one direction a base-versus-head comparison cannot
+    see.
+    """
+    shipped = changelog("", "## [0.2.0] - 2026-02-02\n\n### Fixed\n\n- What 0.2.0 fixed.\n")
+    corrupted = changelog(
+        "",
+        "## [0.2.0] - 2026-02-02\n\n### Fixed\n\n- What 0.2.0 fixed.\n- An entry it never had.\n",
+    )
+    repo = tagged_repo(tmp_path, shipped, "v0.2.0")
+
+    done = check_in(corrupted, shipped, tmp_path, repo)
+
+    assert done.returncode == 0, done.stderr
+    assert "restored" in done.stdout
+
+
+def test_a_released_section_edited_to_anything_but_its_tag_is_still_refused(tmp_path):
+    """The permitted edit is one destination, not a direction."""
+    shipped = changelog("", "## [0.2.0] - 2026-02-02\n\n### Fixed\n\n- What 0.2.0 fixed.\n")
+    base = changelog("", "## [0.2.0] - 2026-02-02\n\n### Fixed\n\n- What 0.2.0 fixed.\n")
+    invented = changelog(
+        "",
+        "## [0.2.0] - 2026-02-02\n\n### Fixed\n\n- Something nobody released.\n",
+    )
+    repo = tagged_repo(tmp_path, shipped, "v0.2.0")
+
+    done = check_in(base, invented, tmp_path, repo)
+
+    assert done.returncode == 1
+    assert "already released and this branch changes it" in done.stderr
+
+
+def test_a_restoration_it_cannot_prove_from_a_tag_is_refused(tmp_path):
+    """No oracle is a refusal, never a pass.
+
+    The head here is the text that *would* be a restoration, and the only thing
+    missing is the tag that says so. A guard that cannot reach its oracle has
+    checked nothing, and reporting that as success is the same class of defect as
+    the one it exists to find.
+    """
+    shipped = changelog("", "## [0.2.0] - 2026-02-02\n\n### Fixed\n\n- What 0.2.0 fixed.\n")
+    corrupted = changelog(
+        "",
+        "## [0.2.0] - 2026-02-02\n\n### Fixed\n\n- What 0.2.0 fixed.\n- An entry it never had.\n",
+    )
+    repo = tagged_repo(tmp_path, shipped, "v9.9.9-not-the-one")
+
+    done = check_in(corrupted, shipped, tmp_path, repo)
+
+    assert done.returncode == 1
+    assert "already released and this branch changes it" in done.stderr
+
+
+def test_ci_fetches_the_tags_the_guard_reads():
+    """The oracle is unreachable in a shallow checkout unless the tags come too.
+
+    `actions/checkout` fetches none by default, so without this the guard would
+    refuse every restoration -- failing closed, but for a reason nobody could act
+    on from the log.
+    """
+    assert "git fetch --depth=1 --tags origin" in CI.read_text(encoding="utf-8")
