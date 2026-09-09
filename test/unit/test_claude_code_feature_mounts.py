@@ -1,10 +1,10 @@
 """The protection the claude-code feature documents, held against what it mounts.
 
 The feature's README describes a read-write bind of `~/.claude` with the
-subdirectories holding *executable instructions* -- `agents/`, `commands/`,
-`hooks/`, `skills/` and `wf-skills/` -- mounted read-only on top of it, and gives
-the reason: those are files a prompt injection that edits one of them is not
-confined by. The edit is on the host, and it runs again in every later session,
+subdirectories holding *executable instructions* mounted read-only on top of it,
+plus `~/.agents/skills` outside it for the skills Claude and Codex share, and
+gives the reason: those are files a prompt injection that edits one of them is
+not confined by. The edit is on the host, and it runs again in every later session,
 in every other container, on the developer's own machine.
 
 Two failures have to be prevented here, and they pull in opposite directions.

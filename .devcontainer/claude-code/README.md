@@ -62,6 +62,12 @@ only the discovery directory would still allow writes through a link into the
 writable `~/.claude` parent. Existing `skills/wf -> ../wf-skills/wf` links remain
 supported by the `wf-skills` mount.
 
+Read-only for the same reason `commands/` is: a skill is executable
+instructions. That costs one thing, and it is a warning rather than a failure —
+`wf` heals its own links on every launch, so a `wf` run *inside* a container
+reports that it could not refresh them and carries on. Any installer that
+rewrites links on startup behaves the same way.
+
 The feature preserves your selection of skills. It creates missing mount roots
 but does not add, rewrite, or remove individual links. Keep those in your dotfiles
 or skill installer. Relative links to the mounted roots work across usernames;
