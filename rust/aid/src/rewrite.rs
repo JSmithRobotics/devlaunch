@@ -47,10 +47,26 @@ pub(crate) const AGENT_ENV_VAR: &str = "DEVLAUNCH_AID_AGENT";
 /// quoted argument; each of these CLIs takes an initial prompt that way and then
 /// drops into its interactive session.
 ///
-/// claude is started with `--dangerously-skip-permissions`: the whole point of a dl
-/// workspace is that the agent is already inside a disposable container with only
-/// this repo in it, so the per-tool prompts it would otherwise ask on the host buy
-/// nothing and stop an unattended `aid owner/repo fix the bug` dead.
+/// **Every agent here is started in its own full-auto mode**, because the whole
+/// point of a dl workspace is that the agent is already inside a disposable
+/// container with only this repo in it, so the per-tool prompts it would otherwise
+/// ask on the host buy nothing and stop an unattended `aid owner/repo fix the bug`
+/// dead. The flag is per-CLI and each one spells it its own way:
+/// `--dangerously-skip-permissions` for claude,
+/// `--dangerously-bypass-approvals-and-sandbox` for codex, `--yolo` for gemini.
+/// Held by `every_agent_starts_in_full_auto`.
+///
+/// codex is the one worth spelling out, because it offers two modes and only one of
+/// them is this one. `--full-auto` reads like the answer and is not, for two
+/// reasons and the first is the one that matters: it *still escalates to a person*.
+/// It is an approval policy plus a sandbox, not an absence of approvals, so an
+/// unattended run stops and asks -- which is exactly the failure this rule exists to
+/// prevent. Only `--dangerously-bypass-approvals-and-sandbox` sets the policy to
+/// never ask. The second reason is the sandbox it keeps: workspace-write with the
+/// network off, so `gh`, `cargo fetch` and `pip install` fail inside a container
+/// that has a network and a checkout the agent is meant to be able to push from.
+/// The container is already the sandbox, so a second one nested inside it subtracts
+/// exactly the capabilities dl went to the trouble of provisioning.
 ///
 /// `IS_SANDBOX=1` is what makes that flag usable at all here. claude refuses it
 /// outright under uid 0 — "cannot be used with root/sudo privileges", exit 1 — and
@@ -111,7 +127,7 @@ const AGENTS: &[(&str, Agent)] = &[
     (
         "codex",
         Agent {
-            command: &["codex"],
+            command: &["codex", "--dangerously-bypass-approvals-and-sandbox"],
             prompt_flags: &[],
             env: &[],
             remote_control: None,
@@ -120,7 +136,7 @@ const AGENTS: &[(&str, Agent)] = &[
     (
         "gemini",
         Agent {
-            command: &["gemini"],
+            command: &["gemini", "--yolo"],
             prompt_flags: &["--prompt-interactive"],
             env: &[],
             remote_control: None,
@@ -1045,12 +1061,58 @@ mod tests {
     fn gemini_gets_its_interactive_flag_only_beside_a_prompt() {
         assert_eq!(
             build_agent_command("gemini", "hi", None).as_deref(),
-            Some("gemini --prompt-interactive hi")
+            Some("gemini --yolo --prompt-interactive hi")
         );
         assert_eq!(
             build_agent_command("gemini", "", None).as_deref(),
-            Some("gemini")
+            Some("gemini --yolo")
         );
+    }
+
+    #[test]
+    fn every_agent_starts_in_full_auto() {
+        // The rule the table's own doc comment states, held against the table
+        // rather than against one row of it, so an agent added without its
+        // full-auto flag fails here instead of stopping an unattended run to ask
+        // about its first edit. Each CLI spells the flag its own way, so the
+        // spellings are named rather than pattern-matched -- codex in particular
+        // has a second mode, `--full-auto`, which still escalates to a person, and
+        // picking it would be a silent regression rather than a visible one.
+        let expected = [
+            ("claude", "--dangerously-skip-permissions"),
+            ("codex", "--dangerously-bypass-approvals-and-sandbox"),
+            ("gemini", "--yolo"),
+        ];
+
+        // The *names* against the table's keys, not `expected.len()` against
+        // `AGENTS.len()`, which was the first shape of this and let an agent through
+        // unchecked: `expected` holding claude, codex, codex is three rows long
+        // beside a three-row table while claude is never launched at all. Reviewed
+        // into existence -- with the count, dropping claude's flag and duplicating
+        // codex's row passed here.
+        let mut named: Vec<&str> = expected.iter().map(|(agent, _)| *agent).collect();
+        named.sort_unstable();
+        let mut known: Vec<&str> = AGENTS.iter().map(|(name, _)| *name).collect();
+        known.sort_unstable();
+        assert_eq!(
+            named, known,
+            "an agent was added or removed without saying how it starts unattended"
+        );
+
+        for (agent, flag) in expected {
+            // As a whole argv word. `contains` is the same trap the docs guard in
+            // `aid/tests/rewrite.rs` records: every truncation of a flag is a
+            // substring of it, and so is every flag that merely starts with one, so
+            // a table entry reading `--yolo-dry-run` satisfied a `contains("--yolo")`
+            // while asking gemini for the opposite of full auto.
+            for prompt in ["hi", ""] {
+                let command = build_agent_command(agent, prompt, None).expect("a known agent");
+                assert!(
+                    command.split_whitespace().any(|word| word == flag),
+                    "{agent} is not in full auto (prompt {prompt:?}): {command}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1419,11 +1481,15 @@ mod tests {
         }
         assert_eq!(
             build_dl_args(&parsed(&["--codex", "owner/repo", "hi"])).expect("a known agent"),
-            ["owner/repo", "--", "codex hi"]
+            [
+                "owner/repo",
+                "--",
+                "codex --dangerously-bypass-approvals-and-sandbox hi"
+            ]
         );
         assert_eq!(
             build_dl_args(&parsed(&["--gemini", "owner/repo", "hi"])).expect("a known agent"),
-            ["owner/repo", "--", "gemini --prompt-interactive hi"]
+            ["owner/repo", "--", "gemini --yolo --prompt-interactive hi"]
         );
         // And the same through the variable, which is how somebody who set it once
         // launches every line.
@@ -1825,7 +1891,7 @@ mod tests {
             [
                 "owner/repo",
                 "--",
-                "gemini --prompt-interactive 'explain this'"
+                "gemini --yolo --prompt-interactive 'explain this'"
             ]
         );
     }
