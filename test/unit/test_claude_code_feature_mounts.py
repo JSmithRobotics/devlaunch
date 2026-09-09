@@ -235,6 +235,31 @@ def test_the_paths_documented_as_protected_are_exactly_the_read_only_mounts(moun
     assert read_only == documented
 
 
+def test_no_mount_reaches_a_host_path_the_readme_does_not_list(mounts):
+    """Every mount is a documented read-only one, or the configuration bind itself.
+
+    The test above only inspects mounts that carry `readonly`, so a mount that
+    carries no flag at all is invisible to it. That was harmless while `resolve`
+    refused any source outside `~/.claude`, because the only place an
+    undocumented mount could land was under a parent that was already writable.
+    Sharing `~/.agents/skills` widened `resolve` to the whole host home and took
+    that limit away with it: a writable bind of any home directory -- `~/.codex`,
+    `~/.ssh` -- now satisfies every other rule in this file, because it is a
+    bind, its source is a directory the hook creates, and it is nested inside
+    nothing.
+    """
+    sources = {
+        mount["source"].removeprefix(f"{LOCAL_HOME}/")
+        for mount in mounts
+        if mount["source"] != HOST_CONFIG_DIR
+    }
+    documented = {path.rstrip("/") for path in documented_home_paths(READ_ONLY_HEADING)}
+    assert sources == documented, (
+        f"{sorted(sources - documented)} are mounted into the container from the host "
+        f"home and appear under no mount heading in the README"
+    )
+
+
 def test_nothing_nested_inside_the_configuration_directory_is_writable(mounts):
     """Every mount over the directory mount is read-only.
 
