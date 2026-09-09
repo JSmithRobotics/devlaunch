@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-09-09
+
+### Fixed
+
+- **`dl <ws> -- <command>` no longer re-splits a quoted argument, and no longer
+  runs one as shell.** The words after `--` were rejoined with plain spaces and
+  handed to `bash -lc` as a command line, so every space the host's shell had
+  already consumed became a separator again. `dl <ws> -- claude 'fix the bug'`
+  arrived as four arguments where one was meant. Each word is quoted now
+  (`shell::join`), so the remote argv is the argv that was typed.
+
+  Two consequences beyond the splitting, both of them silent. A word holding `#`
+  commented out the rest of the line: a supervisor sending
+  `claude 'Address the open review on PR #10848 (...)'` reached the agent as the
+  single word `Address`, and everything after the `#` -- the whole prompt,
+  including every rule it carried -- was discarded by the remote shell before
+  `claude` ran. And a word holding `$(...)` or a backtick was *executed*, in a
+  workspace that has the forwarded `GH_TOKEN`, which made any text flowing into
+  a `dl --` command line (a PR title, a review body) shell code.
+
+  `aid` composed its own line and passed it as one word, which survived only
+  because the rejoin was an identity on a single argument. It hands dl argv now
+  and quotes nothing itself. The composed payload is byte for byte what it was:
+  a bare `NAME=value` needs no quoting, so the assignment-prefix spelling the
+  README documents still reaches the shell as one.
+
+  A shell snippet is still asked for by naming a shell -- `dl <ws> -- bash -lc
+  'a && b'` -- and that spelling was broken before this too, running `bash -lc a`
+  and then `b`. Passing a snippet as a single word no longer works, because a
+  single word is now a program name: `dl <ws> -- 'exit 7'` looks for a program
+  called `exit 7` and exits 127 where it used to exit 7. The e2e probes were the
+  only callers in the tree spelling it that way, and they name `bash -lc` now.
+  `dl <ws> -- ""` went from exit 0 to 127 for the same reason.
+
 ## [0.36.0] - 2026-09-09
 
 ### Fixed
@@ -75,36 +109,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **One rebuild is still owed.** The `.dockerignore` is itself part of the
   context, so this commit moves the tag once; launches build locally until
   `devcontainer-prebuild.yml` republishes on `main`.
-
-- **`dl <ws> -- <command>` no longer re-splits a quoted argument, and no longer
-  runs one as shell.** The words after `--` were rejoined with plain spaces and
-  handed to `bash -lc` as a command line, so every space the host's shell had
-  already consumed became a separator again. `dl <ws> -- claude 'fix the bug'`
-  arrived as four arguments where one was meant. Each word is quoted now
-  (`shell::join`), so the remote argv is the argv that was typed.
-
-  Two consequences beyond the splitting, both of them silent. A word holding `#`
-  commented out the rest of the line: a supervisor sending
-  `claude 'Address the open review on PR #10848 (...)'` reached the agent as the
-  single word `Address`, and everything after the `#` -- the whole prompt,
-  including every rule it carried -- was discarded by the remote shell before
-  `claude` ran. And a word holding `$(...)` or a backtick was *executed*, in a
-  workspace that has the forwarded `GH_TOKEN`, which made any text flowing into
-  a `dl --` command line (a PR title, a review body) shell code.
-
-  `aid` composed its own line and passed it as one word, which survived only
-  because the rejoin was an identity on a single argument. It hands dl argv now
-  and quotes nothing itself. The composed payload is byte for byte what it was:
-  a bare `NAME=value` needs no quoting, so the assignment-prefix spelling the
-  README documents still reaches the shell as one.
-
-  A shell snippet is still asked for by naming a shell -- `dl <ws> -- bash -lc
-  'a && b'` -- and that spelling was broken before this too, running `bash -lc a`
-  and then `b`. Passing a snippet as a single word no longer works, because a
-  single word is now a program name: `dl <ws> -- 'exit 7'` looks for a program
-  called `exit 7` and exits 127 where it used to exit 7. The e2e probes were the
-  only callers in the tree spelling it that way, and they name `bash -lc` now.
-  `dl <ws> -- ""` went from exit 0 to 127 for the same reason.
 
 ## [0.35.0] - 2026-09-09
 
