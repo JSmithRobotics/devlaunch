@@ -45,8 +45,9 @@ on:
 permissions:
   contents: read
   # The one addition over the rest of this repository's workflows: pushing to
-  # ghcr.io/blooop/devlaunch-devcontainer with the default GITHUB_TOKEN. No new
-  # secret is involved.
+  # the registry `prebuildRepository` names, with the default GITHUB_TOKEN. No
+  # new secret is involved, and a fork pushes to its own namespace for the same
+  # reason -- the token is the one running the job.
   packages: write
 
 # Serialised rather than cancelled. Two runs pushing to one package is the race
@@ -188,7 +189,13 @@ jobs:
       - name: Report
         if: always()
         run: |
-          echo "Local ${{ matrix.arch }} tags for ghcr.io/blooop/devlaunch-devcontainer"
+          # Read from the manifest rather than repeated here: `prebuildRepository`
+          # is where devpod publishes and looks, so a second spelling in this echo
+          # would name the wrong registry in a fork's log and nowhere else.
+          # `sed` on the one key rather than a JSON parse: the manifest is JSONC and
+          # stripping `//` comments would also cut every `https://` in it.
+          repo=$(sed -n 's/.*"prebuildRepository": *"\([^"]*\)".*/\1/p' .devcontainer/devcontainer.json | head -1)
+          echo "Local ${{ matrix.arch }} tags for $repo"
           echo "(empty means the prebuild was already published and nothing was rebuilt):"
           docker images --format '{{.Repository}}:{{.Tag}}' \
-            | grep '^ghcr.io/blooop/devlaunch-devcontainer:' | sort || true
+            | grep "^${repo}:" | sort || true

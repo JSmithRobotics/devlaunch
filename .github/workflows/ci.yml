@@ -67,6 +67,10 @@ jobs:
     # bound is here for the same reason it is on every other job: unbounded is six
     # hours, which is long enough that the run is abandoned rather than read.
     timeout-minutes: 20
+    # Hoisted from the upload step so a step-level `if` can read it: the
+    # `secrets` context is not available in `if`, and `env` is.
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -104,11 +108,13 @@ jobs:
       # coverage". The shipped crates are the `rust` flag, uploaded by the
       # `rust-coverage` job.
       - name: Upload coverage reports to Codecov
+        # Skipped wherever no token is configured, which is every fork: secrets
+        # are not inherited, so this was a red job about somebody else's
+        # coverage project. Upstream sets the secret and this runs as before.
+        if: env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@v7
         with:
           flags: python
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   # The e2e suite: real devpod, real containers, on the runner's own Docker.
   #
@@ -350,6 +356,10 @@ jobs:
     # download is a job that hangs for six hours and reports a timeout nobody
     # reads.
     timeout-minutes: 45
+    # Hoisted from the upload step so a step-level `if` can read it: the
+    # `secrets` context is not available in `if`, and `env` is.
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -445,12 +455,14 @@ jobs:
           }
           echo "lcov.info covers $(grep -c '^SF:' lcov.info) files"
       - name: Upload coverage reports to Codecov
+        # Skipped wherever no token is configured, which is every fork: secrets
+        # are not inherited, so this was a red job about somebody else's
+        # coverage project. Upstream sets the secret and this runs as before.
+        if: env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@v7
         with:
           files: rust/lcov.info
           flags: rust
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   # The API-freeze tripwire (#251 §7, #262, re-scoped by #312). devlaunch-core's
   # crate docs promise two tiers of `pub` — the frozen wf API behind `api`, and
