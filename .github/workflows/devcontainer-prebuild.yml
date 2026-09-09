@@ -29,11 +29,20 @@ name: Devcontainer prebuild
 on:
   push:
     branches: [ "main" ]
-    # Exactly the inputs to the hash. `build.context` is `.devcontainer`, so the
-    # hashed context is this directory and nothing else -- which is what makes a
-    # path filter honest here rather than an optimisation that silently ships a
-    # stale image. A commit that changes `devlaunch/`, `rust/` or `pyproject.toml`
-    # cannot change the tag, so there is nothing for this workflow to do.
+    # A superset of the inputs to the hash, which is the safe direction to err in.
+    # `build.context` is `.devcontainer`, so nothing outside this directory can
+    # move the tag -- a commit to `devlaunch/`, `rust/` or `pyproject.toml` has
+    # nothing for this workflow to do. Inside it, `.devcontainer/.dockerignore`
+    # narrows the hash further, to the files the image is actually built from, so
+    # some commits this filter catches cannot move the tag either. Those cost a
+    # registry lookup and nothing else: `devpod build` finds the prebuild already
+    # published and returns without rebuilding or repushing.
+    #
+    # Narrowing the filter to match the hash exactly is the change not to make.
+    # It would mean restating `.dockerignore`'s patterns here, in a second place,
+    # inverted -- and the failure mode of getting that wrong is a commit that
+    # moved the tag with no image published at it, which is a silent return to
+    # local builds for everyone on `main`.
     #
     # The workflow file itself is in the list because a change to how the image
     # is built or tagged should produce one.

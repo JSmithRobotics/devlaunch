@@ -46,6 +46,45 @@ SHIPPING_PROVISIONER = REPO_ROOT / "rust" / "devlaunch-core" / "src" / "flows" /
 PIXI_GLOBAL_INSTALL = "pixi global install "
 
 DOCKERFILE = REPO_ROOT / ".devcontainer" / "Dockerfile"
+CONTEXT_DIR = REPO_ROOT / ".devcontainer"
+CONTEXT_DOCKERIGNORE = CONTEXT_DIR / ".dockerignore"
+
+# Every file under the build context, split by whether the *image* can see it.
+#
+# devpod hashes the context as well as the config, and with includeFiles empty --
+# which is what a Dockerfile with no COPY leaves it -- it hashes the whole
+# directory (pkg/util/hash.DirectoryHash). So anything in here that the build
+# cannot read is a file whose edits throw the published prebuild away and buy
+# nothing, and `.dockerignore` is what keeps it out of the hash.
+#
+# Split by hand rather than derived, because "can the image see this" is not a
+# property of the path: `install.sh` and `devcontainer-feature.json` are the
+# local feature devpod bakes in, while `init-host.sh` sits beside them and runs
+# on the host. The two sets together have to account for every file present, so
+# a file added here is a test failure until somebody says which side it is on.
+CONTEXT_BUILD_INPUTS = frozenset(
+    {
+        "Dockerfile",
+        "claude-code/install.sh",
+        "claude-code/devcontainer-feature.json",
+    }
+)
+CONTEXT_NON_BUILD_INPUTS = frozenset(
+    {
+        # Prose, here because the Features spec wants it beside its feature.
+        "claude-code/README.md",
+        "claude-code/TROUBLESHOOTING.md",
+        # `initializeCommand`, which runs on the host before the container
+        # exists. devpod clears DevContainerActions out of the config half of
+        # the hash for exactly that reason, then hashed the script back in as
+        # context.
+        "claude-code/init-host.sh",
+        # devpod read this file to get here; it does not read it out of the
+        # context, and the config half of the hash already carries every build
+        # input it declares.
+        "devcontainer.json",
+    }
+)
 LOCKFILE = REPO_ROOT / "pixi.lock"
 #: Lock-file format version -> the lowest pixi release that can read it.
 #:
@@ -200,6 +239,42 @@ def test_a_readonly_spelling_the_membership_test_misreads_is_refused(flag):
     """
     with pytest.raises(AssertionError):
         parse_mount(f"source=/a,target=/b,type=bind,{flag}")
+
+
+def dockerignore_patterns() -> list:
+    """The `.dockerignore` lines devpod's pattern matcher will actually see.
+
+    Comments and blank lines are dropped, which is what `ignorefile.ReadAll`
+    does before the patterns reach `patternmatcher`. Measured on devpod 0.26.1:
+    with this file's three patterns the debug line reports `excludeCount=4`, the
+    fourth being devpod's own feature-staging folder, which it appends itself.
+    """
+    lines = CONTEXT_DOCKERIGNORE.read_text().splitlines()
+    return [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+
+
+def excluded_from_the_context_hash(rel_path: str) -> bool:
+    """Whether `.dockerignore` keeps `rel_path` out of the context hash.
+
+    A deliberately small matcher, covering only the two pattern forms this
+    repository's `.dockerignore` uses: `**/*.ext`, which docker matches at any
+    depth including the top level, and an exact context-relative path. Any other
+    form raises rather than returning False, so this cannot quietly report "not
+    excluded" about a pattern it does not understand -- which is the one way a
+    guard like this fails without saying so.
+    """
+    for pattern in dockerignore_patterns():
+        if pattern.startswith("**/*."):
+            if rel_path.endswith(pattern[len("**/*") :]):
+                return True
+        elif "*" in pattern or "?" in pattern or "[" in pattern:
+            raise AssertionError(
+                f"{CONTEXT_DOCKERIGNORE.name} pattern {pattern!r} is a glob form this "
+                "test cannot evaluate; teach it the form or express the exclusion as a path"
+            )
+        elif rel_path == pattern or rel_path.startswith(pattern + "/"):
+            return True
+    return False
 
 
 def test_devcontainer_manifest_is_this_repos_and_parses(devcontainer):
@@ -865,4 +940,137 @@ def test_the_host_hook_heals_the_socket_it_is_mounted_from(devcontainer, mounts)
     assert f"${{{variable}:-" in hook or f"${variable}" in hook, (
         f"init-host.sh does not heal a stale mount at ${variable}, which is what "
         "the manifest binds the agent socket from"
+    )
+
+
+def test_the_dockerfile_copies_nothing_out_of_the_build_context():
+    """The premise every exclusion below rests on.
+
+    `.dockerignore` is safe here only because the build never reads the context:
+    no `COPY`, no `ADD`, so the tar devpod assembles is opened by nothing. Add
+    one and the excluded files stop being invisible to the image and start being
+    *missing* from it -- a build that fails, or worse, a stale prebuild that
+    matches a context it no longer describes.
+
+    So this is the test to read first when `.dockerignore` looks wrong: it is the
+    claim, and the exclusions are downstream of it.
+    """
+    instructions = [
+        line.split(maxsplit=1)[0].upper()
+        for line in DOCKERFILE.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert not {"COPY", "ADD"} & set(instructions), (
+        f"{DOCKERFILE.name} now reads the build context, which .dockerignore is filtering; "
+        "either the copied paths have to be un-excluded or the exclusions have to go"
+    )
+
+
+def test_every_file_in_the_build_context_is_classified_as_a_build_input_or_not():
+    """A file added under `.devcontainer/` has to be put on one side or the other.
+
+    Left unclassified it defaults to the expensive answer -- hashed, so its edits
+    move the prebuild tag -- and defaults to it silently, because nothing about a
+    launch changes except that it takes minutes again. Failing here is the cheap
+    version of that conversation.
+
+    `.dockerignore` itself is neither: it is what draws the line, and it is
+    hashed, correctly, since changing what the hash can see should move the tag.
+    """
+    present = {
+        str(path.relative_to(CONTEXT_DIR))
+        for path in CONTEXT_DIR.rglob("*")
+        if path.is_file() and path.name != ".dockerignore"
+    }
+    classified = CONTEXT_BUILD_INPUTS | CONTEXT_NON_BUILD_INPUTS
+    assert present == classified, (
+        f"the build context holds {sorted(present - classified)} that no test has "
+        f"classified, and expects {sorted(classified - present)} that are not there; "
+        "add each to CONTEXT_BUILD_INPUTS or CONTEXT_NON_BUILD_INPUTS"
+    )
+
+
+def test_the_prebuild_tag_cannot_move_for_a_file_the_image_never_sees():
+    """The fix for a prebuild that stopped being pulled.
+
+    Measured on devpod 0.26.1, amd64, at 4db3427: appending a comment line to
+    `claude-code/README.md` and another to `claude-code/init-host.sh` moved the
+    tag from `devpod-5bf7be3e3e7e1b3f4fbb01a9b3ab88e7`, which CI had published
+    and every launch pulled, to `devpod-90e9641b9d3661f681e640eeedb3a410`, which
+    nothing had ever published. Neither file can reach the image. The cost was a
+    full local build per launch, on every branch carrying the edit, and the only
+    symptom was that opening a container was slow again.
+    """
+    for rel_path in sorted(CONTEXT_NON_BUILD_INPUTS):
+        assert excluded_from_the_context_hash(rel_path), (
+            f"{rel_path} cannot reach the image but is still hashed into the prebuild "
+            f"tag; {CONTEXT_DOCKERIGNORE.name} has to exclude it or editing it throws "
+            "the published prebuild away"
+        )
+
+
+def test_the_prebuild_tag_still_moves_for_every_file_the_image_is_built_from():
+    """The other half, and the one that makes the exclusions worth having.
+
+    An exclusion too wide is worse than none: the tag stops moving when the image
+    would genuinely differ, so a launch pulls an image built from a Dockerfile or
+    a feature installer that is no longer the one on the branch. That failure is
+    quieter than a slow build and much harder to attribute -- the container comes
+    up, it is simply not the container the branch asks for.
+    """
+    for rel_path in sorted(CONTEXT_BUILD_INPUTS):
+        assert not excluded_from_the_context_hash(rel_path), (
+            f"{rel_path} is built into the image but {CONTEXT_DOCKERIGNORE.name} keeps it "
+            "out of the prebuild tag, so a launch can pull an image that predates it"
+        )
+
+
+def test_the_excluded_manifest_leaves_its_build_inputs_in_the_hash(devcontainer):
+    """Excluding `devcontainer.json` is only safe while devpod hashes what it declares.
+
+    `normalizeConfigForHash` keeps `name`, `features`, `overrideFeatureInstallOrder`,
+    `image`, `dockerfile`, `context` and the whole of `build`, and clears the rest --
+    `mounts`, `containerEnv`, `postCreateCommand`, `customizations` -- because devpod
+    applies those when it creates the container rather than when it builds the image.
+    So the config half of the hash already carries every build input this file has,
+    and hashing its raw bytes on top added only the comments, which this manifest is
+    mostly made of.
+
+    What this test holds is the boundary: every key in here is either one devpod
+    hashes or one it deliberately applies at create time. A key that is neither
+    would be a build input the tag could not see, which is the stale-image failure
+    the test above describes, reached from the other direction.
+    """
+    assert "devcontainer.json" in dockerignore_patterns(), (
+        "this test is about the manifest being excluded from the context hash, and it "
+        "is not excluded; either restore the exclusion or drop this test"
+    )
+    hashed = {
+        "name",
+        "features",
+        "overrideFeatureInstallOrder",
+        "image",
+        "dockerfile",
+        "context",
+        "build",
+    }
+    applied_at_create = {
+        "mounts",
+        "containerEnv",
+        "postCreateCommand",
+        "customizations",
+        "initializeCommand",
+        "runArgs",
+        "workspaceFolder",
+        "workspaceMount",
+        "remoteUser",
+        "remoteEnv",
+        "privileged",
+        "init",
+    }
+    unaccounted = set(devcontainer) - hashed - applied_at_create
+    assert not unaccounted, (
+        f"{DEVCONTAINER_JSON.name} declares {sorted(unaccounted)}, which this test cannot "
+        "say devpod hashes or applies at create time; if any of them affects the image, the "
+        "manifest can no longer be excluded from the context hash"
     )
