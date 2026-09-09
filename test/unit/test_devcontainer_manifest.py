@@ -763,6 +763,39 @@ def test_the_feature_seeds_no_empty_credential():
         assert not seeding, f"{name} is named outside a comment in install.sh: {seeding}"
 
 
+def test_the_installer_may_not_create_the_file_that_marks_claude_onboarded(devcontainer):
+    """`.claude.json` is forbidden for a second reason, and it is devlaunch's own.
+
+    The provisioner seeds ``{"hasCompletedOnboarding":true}`` into
+    ``$CLAUDE_CONFIG_DIR/.claude.json`` and exits early if that file is already
+    there. This feature points ``CLAUDE_CONFIG_DIR`` at the very directory the
+    installer sets up, so the ``{}`` stub was satisfying that guard: every
+    container built from this feature skipped the onboarding seed, which is the
+    opposite of what seeding it was for.
+
+    Two files hold that one fact, so this diffs them rather than restating it:
+    the name the provisioner exits on has to be a name the installer is
+    forbidden to write.
+    """
+    guarded = re.findall(r'\[ -e \\"\$dir/([^\\]+)\\" \]', SHIPPING_PROVISIONER.read_text())
+    assert guarded, (
+        f"{SHIPPING_PROVISIONER.name} no longer guards the onboarding seed on an "
+        "existing file; this test diffs that name against the installer and has "
+        "nothing left to diff"
+    )
+    config_dir = devcontainer["containerEnv"]["CLAUDE_CONFIG_DIR"]
+    assert config_dir.endswith("/.claude"), (
+        f"CLAUDE_CONFIG_DIR is {config_dir}, which is no longer the directory "
+        "install.sh populates, so the two no longer collide and this test is moot"
+    )
+    for name in guarded:
+        assert name in SEEDED_NAMES, (
+            f"the provisioner skips the onboarding seed when {name} exists, but "
+            f"install.sh is only forbidden to create {SEEDED_NAMES}, so the feature "
+            f"is free to suppress it again"
+        )
+
+
 def test_the_agent_socket_is_bound_from_the_variable_that_names_it(devcontainer, mounts):
     """The agent socket mount reads $SSH_AUTH_SOCK, not a guess at where it is.
 

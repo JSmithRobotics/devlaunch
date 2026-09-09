@@ -195,10 +195,18 @@ create_claude_directories() {
     #
     # Measured both ways in one container: with the stub, `claude` prompts for a login;
     # with it removed and nothing else changed, `claude -p` answers on the forwarded
-    # token. Claude Code creates both files itself on first use, so there is nothing to
-    # replace this with.
+    # token. Claude Code creates `.credentials.json` itself on first use, so there is
+    # nothing to replace it with.
     #
-    # Guarded by test_the_feature_seeds_no_empty_credential.
+    # `.claude.json` had a second victim, and it was devlaunch. The provisioner seeds
+    # {"hasCompletedOnboarding":true} into $CLAUDE_CONFIG_DIR/.claude.json and exits
+    # early when that file already exists -- and this feature points CLAUDE_CONFIG_DIR
+    # at the directory being created right here, so the stub satisfied that guard.
+    # Every container built from this feature skipped the onboarding seed and met its
+    # operator with the trust prompt, which is the opposite of what seeding it was for.
+    #
+    # Guarded by test_the_feature_seeds_no_empty_credential and
+    # test_the_installer_may_not_create_the_file_that_marks_claude_onboarded.
 
     # Set proper ownership
     if [ "$(id -u)" -eq 0 ]; then
