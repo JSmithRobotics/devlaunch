@@ -2723,11 +2723,49 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             "Could not create a file to pass the GitHub token to devpod ({reason}), so this \
              workspace opens without a GitHub login."
         ),
+        LaunchNotice::ClaudeProfileBound { name, source } => format!(
+            "Claude profile {}: {} is the container's Claude configuration, so `claude` \
+             there runs as that account and refreshes its own login. Changing profile is \
+             a `recreate`, since a mount lands only when the container is created.",
+            python_repr(name),
+            source.display()
+        ),
         LaunchNotice::ClaudeProfileNotForwarded { name } => format!(
             "Ignoring --claude-profile {}: this workspace's Claude configuration is not the \
              host's to forward into, so `claude` runs as whichever account that configuration \
              holds. A workspace that predates the check picks it up after one `up`.",
             python_repr(name)
+        ),
+        // warning: the bind landed, but this container's uid cannot write into it, so
+        // a refreshed token has nowhere to go. Named for the cause rather than the
+        // symptom -- see LaunchNotice::ClaudeProfileMountUidMismatch's own doc.
+        LaunchNotice::ClaudeProfileMountUidMismatch {
+            name,
+            target,
+            container_uid,
+            dir_uid,
+        } => format!(
+            "Claude profile {}: {} is bound in, but this container's uid ({container_uid}) does \
+             not own it (uid {dir_uid}) and cannot write to it, so a refreshed Claude login \
+             cannot be saved. This repo's devcontainer.json is the likely cause -- \
+             \"updateRemoteUserUID\": false, or containerUser/remoteUser pinned to a fixed user \
+             -- rather than anything on the host.",
+            python_repr(name),
+            target.display()
+        ),
+        // warning: the bind landed, but something inside the container re-pointed
+        // CLAUDE_CONFIG_DIR after devlaunch set it.
+        LaunchNotice::ClaudeProfileMountRedirected {
+            name,
+            target,
+            effective,
+        } => format!(
+            "Claude profile {}: {} is bound in, but this workspace's Claude configuration is {} \
+             instead. Something inside the container re-exported CLAUDE_CONFIG_DIR after \
+             devlaunch set it, so the bind is a directory nothing opens.",
+            python_repr(name),
+            target.display(),
+            effective
         ),
 
         // --- the session (warning at 3845, info at 3864/3891, debug at 3875)

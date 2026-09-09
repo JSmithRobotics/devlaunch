@@ -91,7 +91,10 @@ const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
 const CONFIG_RELPATH: &str = ".claude";
 
 /// The credential file's name inside whichever directory the above resolves to.
-const CREDENTIALS_FILENAME: &str = ".credentials.json";
+/// Shared with [`crate::flows::provision`], which needs the same name to decide whether a
+/// mount covers the credential. One definition rather than two: a second spelling of this
+/// is a second copy of a fact, and the two would decide different things.
+pub(crate) const CREDENTIALS_FILENAME: &str = ".credentials.json";
 
 /// The key the OAuth credential sits under, and the field wanted from it.
 const OAUTH_KEY: &str = "claudeAiOauth";
@@ -345,6 +348,33 @@ const DEFAULT_PROFILE: &str = "default";
 /// of the feature. Two accounts on one machine is what profiles are for, so a typo
 /// that silently forwarded the other one would be worse than a launch that stops: the
 /// launch you can see, and the wrong account you find out about later, somewhere else.
+/// Where a named profile's configuration directory is, if the name is one.
+///
+/// One definition, because two consumers need the same answer for different reasons:
+/// [`from_profile`] reads the credential inside it, and
+/// [`crate::flows::launch::ClaudeProfileMount`] binds the directory itself into a
+/// container. A second spelling of this join is a second copy of a fact, and the two
+/// could name different directories.
+///
+/// `None` for a name [`ProfileName::parse`] rejects, for [`DEFAULT_PROFILE`], or where
+/// no root resolved at all.
+///
+/// `default` is excluded by [`profile_name_is_offerable`] rather than by a second
+/// spelling of the exclusion, and it is not a detail: [`from_profile`] is never
+/// reached for that name because [`resolve_token`] answers it without consulting a
+/// directory, and [`crate::flows::claude_profiles::summarise`] refuses to offer a
+/// directory of that name for exactly that reason. A mount that bound
+/// `<root>/default/` anyway would be the one component of three that disagreed --
+/// binding a directory the resolver ignores and the listing will not show.
+#[must_use]
+pub(crate) fn profile_dir(profiles_root: Option<&Path>, named: &str) -> Option<PathBuf> {
+    if !profile_name_is_offerable(named) {
+        return None;
+    }
+    let name = ProfileName::parse(named)?;
+    Some(profiles_root?.join(name.as_str()))
+}
+
 fn from_profile(named: &str, profiles_root: Option<&Path>) -> TokenLookup {
     let Some(name) = ProfileName::parse(named) else {
         return TokenLookup::Missing(NoToken::ProfileNotAName(named.to_owned()));
