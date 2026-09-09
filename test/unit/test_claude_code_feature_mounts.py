@@ -145,12 +145,12 @@ def host_home_fixture(tmp_path) -> Path:
 def resolve(source: str, host_home: Path) -> Path:
     """A manifest mount source as a path under the test's scratch home.
 
-    The separator is part of the prefix, so a mount of `~/.claudeX` resolves to
-    a sibling rather than to a zero-length path inside the configuration
-    directory. Without that, a mount of any sibling whose name merely started
-    with the prefix was checked in the configuration directory's place --
-    passing whatever the real source would have failed, the missing source that
-    refuses the container create included.
+    The assert is the whole of what this adds over a `removeprefix`, and it is
+    what keeps a wrong answer from being a plausible one: a source that is not
+    under `${localEnv:HOME}` has no place under the scratch home either, and
+    silently resolving it to one would check a path the real mount never names.
+    Which host paths may be mounted at all is a separate question, asked by
+    `test_no_mount_reaches_a_host_path_the_readme_does_not_list`.
     """
     prefix = f"{LOCAL_HOME}/"
     assert source.startswith(prefix), f"{source} is outside the host home"
