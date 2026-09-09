@@ -48,7 +48,7 @@ from unit.test_claude_code_feature_mounts import (
     FEATURE_DIR,
     READ_ONLY_HEADING,
     READ_WRITE_HEADING,
-    documented_paths,
+    documented_home_paths,
 )
 
 INIT_HOST = FEATURE_DIR / "init-host.sh"
@@ -204,9 +204,15 @@ def mounted_files() -> list:
     remembering to extend a list here. The trailing slash is the README's own
     declaration of directory-ness; directories cannot lose their inode to a
     rename and are not healed.
+
+    Home-relative, which is what keeps that promise true now the feature mounts
+    outside `~/.claude`: taking the `.claude/` subset and prefixing it back on
+    read the same for today's list and silently covered nothing else.
     """
-    documented = documented_paths(READ_ONLY_HEADING) | documented_paths(READ_WRITE_HEADING)
-    files = sorted(f"{CONFIG_DIRNAME}/{path}" for path in documented if not path.endswith("/"))
+    documented = documented_home_paths(READ_ONLY_HEADING) | documented_home_paths(
+        READ_WRITE_HEADING
+    )
+    files = sorted(path for path in documented if not path.endswith("/"))
     assert files, "the README documents no file mounts"
     return files + [".ssh/known_hosts"]
 

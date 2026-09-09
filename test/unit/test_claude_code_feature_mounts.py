@@ -88,6 +88,13 @@ def documented_home_paths(heading: str) -> set:
     Only the leading code span of a bullet counts. Prose under the heading
     mentions these files too, and a test that matched anywhere in the section
     would be satisfied by a sentence *about* a mount that no longer exists.
+
+    Home-relative and not `~/.claude`-relative, for every caller, because the
+    feature now mounts outside the configuration directory. A second accessor
+    returning the `.claude/` subset was the same `set` of the same `str` under a
+    different name, so the base each one was relative to lived only in that
+    name -- and it silently dropped `~/.agents/skills/`, which is how
+    `mounted_files` came to promise a derivation it no longer performed.
     """
     paths = {
         match.group("path")
@@ -97,18 +104,6 @@ def documented_home_paths(heading: str) -> set:
         if match
     }
     assert paths, f"the README lists no mounts under {heading!r}"
-    return paths
-
-
-def documented_paths(heading: str) -> set:
-    """The Claude-relative subset used by the authentication/state tests."""
-    prefix = f"{CONFIG_DIRNAME}/"
-    paths = {
-        path.removeprefix(prefix)
-        for path in documented_home_paths(heading)
-        if path.startswith(prefix)
-    }
-    assert paths, f"the README lists no Claude paths under {heading!r}"
     return paths
 
 
@@ -288,9 +283,9 @@ def test_the_paths_documented_as_writable_have_no_mount_of_their_own(mounts):
     token refresh and onboarding state, and that argument is what a reviewer
     weighs -- so the check is that the argument survives while the mount does not.
     """
-    documented = {path.rstrip("/") for path in documented_paths(READ_WRITE_HEADING)}
+    documented = {path.rstrip("/") for path in documented_home_paths(READ_WRITE_HEADING)}
     assert documented, "the README no longer says which files must stay writable"
-    mounted = set(nested_sources(mounts))
+    mounted = {f"{CONFIG_DIRNAME}/{path}" for path in nested_sources(mounts)}
     assert not (documented & mounted), (
         f"{sorted(documented & mounted)} are documented as writable and mounted individually; "
         f"a file mount pins the inode, so the container stops seeing host changes to them"
