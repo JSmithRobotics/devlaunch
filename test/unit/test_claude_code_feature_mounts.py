@@ -255,6 +255,86 @@ def test_no_mount_reaches_a_host_path_the_readme_does_not_list(mounts):
     )
 
 
+TROUBLESHOOTING = FEATURE_DIR / "TROUBLESHOOTING.md"
+
+
+# Both documents draw their trees *inside* `~/.claude`, so a leading `~/` is the
+# only thing marking a path as home-relative: `skills/` is the configuration
+# directory's, `~/.agents/skills/` is not.
+def as_mount_source(path: str) -> str:
+    path = path.rstrip("/")
+    return path.removeprefix("~/") if path.startswith("~/") else f"{CONFIG_DIRNAME}/{path}"
+
+
+TREE_MOUNT = re.compile(r"^(?:[├└]──\s+)?(?P<path>[~\w./-]+/)\s+#.*\(read-only mount\)")
+CODE_SPAN = re.compile(r"`([^`]+)`")
+READ_ONLY_SYMPTOM = "→ Read-only"
+
+# The two places the README hands over a `mkdir` to run. Anchored per section
+# because it offers others -- a dotfiles installer example, a three-directory
+# fragment -- and only these two claim to create what the feature mounts.
+MKDIR_HEADINGS = ("### Host Machine", "### `bind mount source path does not exist`")
+
+
+def brace_expanded(word: str) -> set:
+    """`~/.claude/{agents,hooks}` as the two paths a shell would create."""
+    head, brace, rest = word.partition("{")
+    if not brace:
+        return {word}
+    names, _, tail = rest.partition("}")
+    return {f"{head}{name}{tail}" for name in names.split(",")}
+
+
+def documented_mkdir(heading: str) -> set:
+    for line in _section(FEATURE_README, heading).splitlines():
+        if line.startswith("mkdir -p "):
+            return {
+                as_mount_source(path)
+                for word in line.removeprefix("mkdir -p ").split()
+                for path in brace_expanded(word)
+            }
+    raise AssertionError(f"the README section {heading!r} no longer offers a by-hand mkdir")
+
+
+def test_every_hand_written_copy_of_the_mount_list_says_the_same_thing(mounts):
+    """The trees, the symptom list and the by-hand `mkdir`s agree with the manifest.
+
+    Four hand-maintained copies of one list, and this repo's rule is that a
+    second copy is allowed only where a test diffs it against the first. Only
+    the README's Read-Only Mounts bullets had one, so the rest could and did
+    drift: the `bind mount source path does not exist` remedy still created
+    three directories of seven, which is a documented fix for a refused
+    container create that leaves the create refused, and told the developer to
+    truncate their own `settings.json` on the way past.
+    """
+    read_only = {
+        mount["source"].removeprefix(f"{LOCAL_HOME}/") for mount in mounts if "readonly" in mount
+    }
+    troubleshooting = TROUBLESHOOTING.read_text().splitlines()
+    copies = {
+        "TROUBLESHOOTING.md's tree": {
+            as_mount_source(match.group("path"))
+            for match in (TREE_MOUNT.match(line) for line in troubleshooting)
+            if match
+        },
+        "TROUBLESHOOTING.md's read-only symptom": {
+            as_mount_source(path)
+            for line in troubleshooting
+            if READ_ONLY_SYMPTOM in line
+            for path in CODE_SPAN.findall(line)
+        },
+        **{
+            f"the README's {heading!r} mkdir": documented_mkdir(heading)
+            for heading in MKDIR_HEADINGS
+        },
+    }
+    for where, listed in copies.items():
+        assert listed == read_only, (
+            f"{where} disagrees with the manifest: {sorted(listed ^ read_only)} appears in one "
+            f"and not the other"
+        )
+
+
 def test_nothing_nested_inside_the_configuration_directory_is_writable(mounts):
     """Every mount over the directory mount is read-only.
 

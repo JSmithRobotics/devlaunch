@@ -586,10 +586,13 @@ prerequisite" — that is what creates them, on every create, for everyone. To
 unblock one machine now:
 
 ```bash
-mkdir -p ~/.claude/{agents,commands,hooks}
-touch ~/.claude/CLAUDE.md
-echo '{}' > ~/.claude/settings.json
+mkdir -p ~/.claude/{agents,commands,hooks,skills,wf-skills,shared-skills} ~/.agents/skills
 ```
+
+Directories only. `CLAUDE.md` and `settings.json` have no mount of their own and
+so cannot be what is missing — creating them here fixed nothing, and the
+`echo '{}' >` that used to stand here truncated the settings file of anyone who
+already had one.
 
 ## Security Notes
 
