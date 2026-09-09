@@ -14,11 +14,13 @@
 ├── commands/           # Custom commands (read-only mount)
 ├── hooks/              # Event hooks (read-only mount)
 ├── skills/             # Agent Skills (read-only mount)
+├── shared-skills/      # Shared skill bodies (read-only mount)
 └── wf-skills/          # Skill bodies (read-only mount)
+~/.agents/skills/       # Codex skills (read-only mount)
 ```
 
 Only the directories are mounted. `~/.claude` itself is one read-write bind, and
-the five instruction directories are read-only binds on top of it; the files are
+the instruction directories are read-only binds on top of it; the files are
 reached *through* the directory rather than bound one at a time. That is what
 keeps them live — a bind mount of a file does not survive the host replacing it
 by rename, which is what Claude does on every token refresh — and it is why
@@ -171,7 +173,7 @@ reached through it are missing or unwritable.
 
 **Expected Behavior:**
 This is intentional! The instruction directories are mounted read-only:
-- `agents/`, `commands/`, `hooks/`, `skills/`, `wf-skills/` → Read-only
+- `agents/`, `commands/`, `hooks/`, `skills/`, `wf-skills/`, `shared-skills/` and `~/.agents/skills/` → Read-only
 
 `CLAUDE.md` and `settings.json` are **not** protected, and a write to either
 succeeds and reaches the host. See "Why only directories are mounted" in the

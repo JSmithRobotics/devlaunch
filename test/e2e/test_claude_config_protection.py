@@ -31,6 +31,7 @@ index, and nothing about it changes where a mount lands.
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -45,6 +46,7 @@ from unit.test_claude_code_feature_mounts import (
     READ_ONLY_HEADING,
     READ_WRITE_HEADING,
     documented_paths,
+    documented_home_paths,
 )
 
 WORKSPACE_ID = "e2e-test-claude-config-protection"
@@ -190,17 +192,20 @@ def test_the_container_cannot_write_the_host_files_the_feature_protects(
     # its `readonly` would drop out of a list derived from it and stop being
     # probed, so the list comes from the document that promises the protection.
     config_dir = json.loads(FEATURE_JSON.read_text())["containerEnv"]["CLAUDE_CONFIG_DIR"]
-    protected = documented_paths(READ_ONLY_HEADING)
+    protected = documented_home_paths(READ_ONLY_HEADING)
     writable = documented_paths(READ_WRITE_HEADING)
-    host_config = home / CONFIG_DIRNAME
 
-    before = {name: host_config.joinpath(name).stat().st_mtime_ns for name in protected}
+    before = {name: home.joinpath(name).stat().st_mtime_ns for name in protected}
 
     for name in protected:
         # The README's trailing slash says whether this is a directory, and a
         # directory is probed with a new file: finding out costs nothing that
         # was already there.
-        probe = f"{config_dir}/{name}injected.md" if name.endswith("/") else f"{config_dir}/{name}"
+        probe = (
+            f"{Path(config_dir).parent}/{name}injected.md"
+            if name.endswith("/")
+            else f"{Path(config_dir).parent}/{name}"
+        )
         attempt = in_container(
             f'if echo injected >> "{probe}" 2>/dev/null; then echo accepted; else echo refused; fi'
         )
@@ -208,7 +213,7 @@ def test_the_container_cannot_write_the_host_files_the_feature_protects(
         assert "refused" in attempt.stdout
 
     for name, mtime in before.items():
-        host_path = host_config / name
+        host_path = home / name
         assert host_path.stat().st_mtime_ns == mtime, f"the container changed the host's {name}"
         if host_path.is_dir():
             assert not list(host_path.iterdir()), f"the container added a file to the host's {name}"
@@ -228,6 +233,42 @@ def test_the_container_cannot_write_the_host_files_the_feature_protects(
         f"cd /workspaces/{WORKSPACE_ID} "
         f'&& HOME="$(dirname "{config_dir}")" sh -e .devcontainer/{FEATURE_DIR.name}/init-host.sh'
     )
+
+    # Host installers may keep bodies in either shared root. Both directions
+    # must resolve after crossing the mount boundary, with a different HOME.
+    bodies = (".agents/skills/native", ".claude/shared-skills/shared")
+    for relative in bodies:
+        folder = home / relative
+        folder.mkdir()
+        (folder / "SKILL.md").write_text("original\n")
+    (home / ".claude/skills/native").symlink_to("../../.agents/skills/native")
+    (home / ".claude/skills/shared").symlink_to("../shared-skills/shared")
+    (home / ".agents/skills/shared").symlink_to("../../.claude/shared-skills/shared")
+
+    def check_skill_access(expected):
+        for agent in (".agents", ".claude"):
+            for name in ("native", "shared"):
+                body = shlex.quote(
+                    str(Path(config_dir).parent / agent / "skills" / name / "SKILL.md")
+                )
+                # Read first: a dangling link also refuses a write, but is not
+                # a protected, discoverable skill.
+                seen = in_container(f"cat {body}")
+                assert seen.stdout.strip() == expected
+                refused = in_container(
+                    f"if echo injected >> {body} 2>/dev/null; "
+                    "then echo accepted; else echo refused; fi"
+                )
+                assert refused.stdout.strip() == "refused"
+
+    check_skill_access("original")
+    for relative in bodies:
+        replacement = home / relative / "replacement"
+        replacement.write_text("updated\n")
+        replacement.replace(home / relative / "SKILL.md")
+    check_skill_access("updated")
+    for relative in bodies:
+        assert (home / relative / "SKILL.md").read_text() == "updated\n"
 
 
 @pytest.mark.e2e
@@ -287,8 +328,8 @@ def test_the_container_follows_the_host_replacing_a_file_by_rename(workspace_cle
             f"which is a host account switch reaching no running workspace"
         )
 
-    for name in documented_paths(READ_ONLY_HEADING):
-        probe = f"{config_dir}/{name}injected.md"
+    for name in documented_home_paths(READ_ONLY_HEADING):
+        probe = f"{Path(config_dir).parent}/{name}injected.md"
         attempt = in_container(
             f'if echo injected >> "{probe}" 2>/dev/null; then echo accepted; else echo refused; fi',
             RENAME_WORKSPACE_ID,

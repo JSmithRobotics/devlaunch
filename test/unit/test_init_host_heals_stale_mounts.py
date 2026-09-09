@@ -118,7 +118,7 @@ dir=$(dirname "$target")
 # Everything the hook's creation guards would otherwise write, because the
 # directory is about to stop taking writes -- which is exactly a container
 # whose configuration is fully mounted, where those guards never fire.
-mkdir -p "$dir/agents" "$dir/commands" "$dir/hooks" "$dir/skills" "$dir/wf-skills"
+mkdir -p "$dir/agents" "$dir/commands" "$dir/hooks" "$dir/skills" "$dir/wf-skills" "$dir/shared-skills"
 touch "$dir/CLAUDE.md" "$dir/settings.json" "$dir/.credentials.json" "$dir/.claude.json"
 mount --bind "$dir" "$dir"
 mount -o remount,bind,ro "$dir"

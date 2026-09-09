@@ -79,11 +79,11 @@ READ_WRITE_HEADING = "### Read-Write Mounts (Authentication & State)"
 # character is the whole difference between a directory the pre-create hook has
 # to `mkdir` and a file it must not mount. The README's trailing slash is
 # therefore read as a declaration rather than as typography.
-DOCUMENTED_PATH = re.compile(r"^- `~/\.claude/(?P<path>[^`]+)`")
+DOCUMENTED_PATH = re.compile(r"^- `~/(?P<path>[^`]+)`")
 
 
-def documented_paths(heading: str) -> set:
-    """The `~/.claude/...` paths the README lists under one mount heading.
+def documented_home_paths(heading: str) -> set:
+    """The home-relative paths the README lists under one mount heading.
 
     Only the leading code span of a bullet counts. Prose under the heading
     mentions these files too, and a test that matched anywhere in the section
@@ -97,6 +97,18 @@ def documented_paths(heading: str) -> set:
         if match
     }
     assert paths, f"the README lists no mounts under {heading!r}"
+    return paths
+
+
+def documented_paths(heading: str) -> set:
+    """The Claude-relative subset used by the authentication/state tests."""
+    prefix = f"{CONFIG_DIRNAME}/"
+    paths = {
+        path.removeprefix(prefix)
+        for path in documented_home_paths(heading)
+        if path.startswith(prefix)
+    }
+    assert paths, f"the README lists no Claude paths under {heading!r}"
     return paths
 
 
@@ -126,20 +138,10 @@ def host_config_fixture(tmp_path) -> Path:
 
 
 def resolve(source: str, host_config: Path) -> Path:
-    """A manifest mount source as a path under the test's scratch home.
-
-    The separator is part of the prefix, so `~/.claudeX` is outside the
-    configuration directory rather than a zero-length path inside it. Without
-    that, a mount of any sibling whose name merely starts with `.claude`
-    resolved to the configuration directory itself and was then checked in its
-    place -- passing whatever the real source would have failed, the missing
-    source that refuses the container create included.
-    """
-    if source == HOST_CONFIG_DIR:
-        return host_config
-    prefix = f"{HOST_CONFIG_DIR}/"
-    assert source.startswith(prefix), f"{source} is outside the configuration directory"
-    return host_config / source[len(prefix) :]
+    """Resolve a host-home mount without assuming it belongs to Claude."""
+    prefix = f"{LOCAL_HOME}/"
+    assert source.startswith(prefix), f"{source} is outside the host home"
+    return host_config.parent / source.removeprefix(prefix)
 
 
 def nested_sources(mounts: list) -> dict:
@@ -226,8 +228,10 @@ def test_the_paths_documented_as_protected_are_exactly_the_read_only_mounts(moun
     defect this ticket reports, and an undocumented read-only mount is a file the
     container cannot write for reasons nobody wrote down.
     """
-    read_only = {path for path, mount in nested_sources(mounts).items() if "readonly" in mount}
-    documented = {path.rstrip("/") for path in documented_paths(READ_ONLY_HEADING)}
+    read_only = {
+        mount["source"].removeprefix(f"{LOCAL_HOME}/") for mount in mounts if "readonly" in mount
+    }
+    documented = {path.rstrip("/") for path in documented_home_paths(READ_ONLY_HEADING)}
     assert read_only == documented
 
 
@@ -333,7 +337,11 @@ def test_the_pre_create_hook_leaves_a_configuration_that_already_exists_alone(mo
     devcontainer = json.loads(strip_jsonc_comments(DEVCONTAINER_JSON.read_text()))
     run_initialize_command(devcontainer, tmp_path)
 
-    existing = [tmp_path / CONFIG_DIRNAME / relative for relative in nested_sources(mounts)]
+    existing = [
+        resolve(mount["source"], tmp_path / CONFIG_DIRNAME)
+        for mount in mounts
+        if "readonly" in mount
+    ]
     assert existing, "no configuration was created, so this asserts nothing"
     for path in existing:
         os.utime(path, ns=(0, 0))

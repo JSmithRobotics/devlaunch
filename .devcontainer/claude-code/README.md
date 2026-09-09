@@ -25,6 +25,8 @@ The following files and directories from your **host machine** are mounted into 
 - `~/.claude/hooks/` → Event-driven shell hooks
 - `~/.claude/skills/` → Agent Skills, and the links a skill installer leaves there
 - `~/.claude/wf-skills/` → the skill bodies those links point at
+- `~/.claude/shared-skills/` → Skill bodies shared by Claude and Codex
+- `~/.agents/skills/` → Codex skill discovery and shared skill bodies
 
 These are **read-only** (`readonly` flag) to prevent:
 - Prompt injection attacks that could modify your Claude configuration
@@ -36,15 +38,45 @@ coincidence — see "Why only directories are mounted" below. `CLAUDE.md` and
 `settings.json` are the two instruction files this list does not cover, because
 a read-only mount over either of them could not be kept.
 
-Skills are two mounts because they are one thing. An installer that keeps the
-prompt bodies in a sibling directory and leaves *relative* links behind —
-`skills/wf -> ../wf-skills/wf`, which is what `wf skills install` from
-blooop/wayfinder writes — needs both sides in here or every link arrives
-dangling, and a container with dangling links has no skills at all rather than
-stale ones. Read-only for the same reason `commands/` is: a skill is executable
-instructions. That costs one thing, and it is a warning rather than a failure —
-`wf` heals its own links on every launch, so a `wf` run *inside* a container
-reports that it could not refresh them and carries on.
+### Shared skills for Claude and Codex
+
+The feature mounts both discovery directories at the same paths relative to the
+container home. The host username can differ from the container's `vscode` user.
+Store a skill once and link it into the other agent's discovery directory:
+
+```text
+~/.agents/skills/research/SKILL.md
+~/.claude/skills/research -> ../../.agents/skills/research
+```
+
+A shared payload inside the Claude configuration also works:
+
+```text
+~/.claude/shared-skills/sync/SKILL.md
+~/.claude/skills/sync -> ../shared-skills/sync
+~/.agents/skills/sync -> ../../.claude/shared-skills/sync
+```
+
+Both the links and their target directories are mounted read-only. Protecting
+only the discovery directory would still allow writes through a link into the
+writable `~/.claude` parent. Existing `skills/wf -> ../wf-skills/wf` links remain
+supported by the `wf-skills` mount.
+
+The feature preserves your selection of skills. It creates missing mount roots
+but does not add, rewrite, or remove individual links. Keep those in your dotfiles
+or skill installer. Relative links to the mounted roots work across usernames;
+absolute host paths and targets outside those roots need their own container
+configuration. A pre-existing skill or symlink is never replaced by the host hook.
+
+Codex installation, authentication and `~/.codex/config.toml` remain the
+workspace's responsibility. This feature shares skills and does not mount the
+host's Codex credentials or session state. Recreate existing containers to pick
+up the new mounts. A plain `dl` launch of a repo that does not use this feature
+still gets its skills from that repo's configuration or dotfiles setup.
+
+Dotfiles installers must skip the mounted `~/.agents/skills` root, just as they
+skip host-mounted Claude configuration. Detect ownership from the mount table;
+a container profile alone cannot tell a local directory from a host bind.
 
 ### Read-Write Mounts (Authentication & State)
 - `~/.claude/.credentials.json` → OAuth access/refresh tokens
@@ -110,7 +142,7 @@ container sees the host's copy of each, live, and can write to all of them.
 This is the part of the layout to weigh before using it. The read-only list is
 an allow-list of *protection*, not of visibility: a directory Claude starts
 writing to next month is visible and writable from the container the day it
-appears, and only the five named directories are proof against a prompt
+appears, and only the named directories are proof against a prompt
 injection that tries to edit its own instructions — and that only in an
 unprivileged container; see "The read-only mounts are not a container-escape
 boundary".
@@ -248,7 +280,9 @@ container is created:
 ├── commands/           # Custom commands
 ├── hooks/              # Event hooks
 ├── skills/             # Agent Skills
+├── shared-skills/      # Bodies shared with Codex
 └── wf-skills/          # Skill bodies
+~/.agents/skills/       # Codex discovery and shared skill bodies
 ```
 
 **None of them is optional.** A missing one aborts the container create rather
@@ -256,7 +290,7 @@ than producing a warning — see "The host-side prerequisite" above, which is ho
 this is normally handled. By hand, it is:
 
 ```bash
-mkdir -p ~/.claude/{agents,commands,hooks,skills,wf-skills}
+mkdir -p ~/.claude/{agents,commands,hooks,skills,wf-skills,shared-skills} ~/.agents/skills
 ```
 
 Only directories appear here, and that is the point of the layout rather than an
@@ -379,7 +413,7 @@ devpod up . --recreate
 
 ## Modifying Configuration
 
-The five instruction directories — `agents/`, `commands/`, `hooks/`, `skills/`, `wf-skills/` — are read-only, so an ordinary container process cannot add or change an agent, command, hook or skill. (A *privileged* container can remount them; see "The read-only mounts are not a container-escape boundary".) Everything else under `~/.claude` is writable and reaches the host, `settings.json` and `CLAUDE.md` included; see "Why only directories are mounted" for why those two could not be protected.
+The instruction directories — `agents/`, `commands/`, `hooks/`, `skills/`, `wf-skills/`, `shared-skills/`, plus `~/.agents/skills/`, are read-only, so an ordinary container process cannot add or change an agent, command, hook or skill. (A *privileged* container can remount them; see "The read-only mounts are not a container-escape boundary".) Everything else under `~/.claude` is writable and reaches the host, `settings.json` and `CLAUDE.md` included; see "Why only directories are mounted" for why those two could not be protected.
 
 To change configuration:
 
@@ -563,9 +597,10 @@ This implementation makes conscious security trade-offs to enable OAuth authenti
 
 ### What's Protected (Read-Only Mounts)
 
-Five directories, and only these five: **`agents/`**, **`commands/`**, **`hooks/`**,
-**`skills/`**, **`wf-skills/`**. They carry the code and instructions Claude
-executes, which is why they are the ones singled out.
+The directories listed under [Read-Only Mounts](#read-only-mounts-security-protected)
+carry the code and instructions the agents execute. The list includes discovery
+links and the shared directories they point to. The manifest-to-documentation
+check in `test/unit/test_claude_code_feature_mounts.py` keeps that list current.
 
 `CLAUDE.md` and `settings.json` are **not** among them. They are files, and a
 file cannot be individually protected here — see "Why only directories are
@@ -589,7 +624,7 @@ bind mount. That includes:
 
 - Only use this feature in **trusted repositories**, and treat the container as
   having the same access to your Claude account that you do
-- The five read-only directories hold against an ordinary container process
+- The read-only directories hold against an ordinary container process
 
 That is the honest list. In particular it is *not* true that "writable files are
 limited to authentication/state only", and it is *not* true that "all
@@ -604,7 +639,7 @@ and **the devcontainer in this repository is privileged**, because the
 `docker-in-docker` feature it enables brings `"privileged": true` with it
 (`.devcontainer/devcontainer.json:76`).
 
-So for this repo's own container, read the five directories as protection against
+So for this repo's own container, read the protected directories as protection against
 a prompt injection that tries to edit its own instructions — a mistake, in other
 words — and not as protection against code that is actively trying to get out.
 
@@ -615,7 +650,7 @@ words — and not as protection against code that is actively trying to get out.
   under `projects/`
 - A process in the container can write a hook command into the host's
   `settings.json`, which is host command execution
-- A *privileged* container can additionally remount the five read-only
+- A *privileged* container can additionally remount the read-only
   directories read-write and rewrite the host's agents, commands, hooks and
   skills
 - **Recommendation**: Only use in repositories you trust, as you would with any
