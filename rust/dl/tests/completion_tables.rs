@@ -126,6 +126,10 @@ struct Flag {
     /// A value follows this flag as a separate word, which the script has to know
     /// so it can complete the value instead of another flag.
     takes_value: bool,
+    /// `group = "what"`: the flag *is* the command, so no workspace follows it.
+    /// The group exists because its members are mutually exclusive for exactly
+    /// that reason, which is what makes it the original this fact is copied from.
+    names_a_command: bool,
 }
 
 /// Every flag the `Cli` struct declares, in declaration order.
@@ -172,6 +176,7 @@ fn grammar_flags(grammar: &str) -> Vec<Flag> {
             long: format!("--{long}"),
             hidden: parts.contains(&"hide = true"),
             takes_value: ty.trim().trim_end_matches(',') != "bool",
+            names_a_command: parts.contains(&"group = \"what\""),
         });
     }
     assert!(
@@ -284,8 +289,13 @@ fn aid_flag_list(rewrite: &str, name: &str) -> BTreeSet<String> {
 /// writes it here — which is the decision this guard exists to force. The common
 /// thread is position: the completion offers this table where a *command* goes, and
 /// none of these is one. They modify a line that already named one, and the script
-/// offers nothing in that position at all (a first word starting with `--` ends
-/// completion) — a gap worth closing, but a different change than this.
+/// stops completing a line that has named one, so there is nowhere to offer them.
+///
+/// A leading `--` no longer ends completion by itself — the script tells a flag
+/// that is the command from one that modifies a launch, which is what
+/// [`the_flags_that_end_a_line_are_the_grammars_own_command_group`] pins — so a
+/// modifier reaches this table now (`dl --rm --<tab>`). These five still do not,
+/// because each modifies a *command* flag and the script offers nothing after one.
 const NOT_OFFERED_FIRST: [(&str, &str); 5] = [
     (
         "--json",
@@ -415,6 +425,63 @@ fn the_flags_a_value_follows_are_the_grammars_value_taking_flags() {
     );
 }
 
+#[test]
+fn the_flags_that_end_a_line_are_the_grammars_own_command_group() {
+    // The script has to tell a flag that *is* the command from one that modifies a
+    // launch, because that is what says whether a workspace spec is still to come:
+    // `dl --ls` is finished and `dl --devcontainer robot` has not started. Get it
+    // wrong in one direction and `dl --rm <tab>` offers nothing; wrong in the other
+    // and `dl --ls <tab>` offers every workspace to a command that takes none.
+    //
+    // clap's `what` group is the original, and it is one rather than a coincidence:
+    // its members are mutually exclusive precisely because each one is the whole
+    // command. Hidden flags are dropped for the same reason as everywhere else here
+    // -- a spelling `--help` does not show is not one the script offers -- and the
+    // two retired ones are deliberately outside the group anyway.
+    let script = completion_script();
+    let grammar = argument_grammar();
+
+    let mut expected: BTreeSet<String> = grammar_flags(&grammar)
+        .iter()
+        .filter(|flag| flag.names_a_command && !flag.hidden)
+        .map(|flag| flag.long.clone())
+        .collect();
+    // clap generates these, and both end a line: `dl --help owner/repo` prints the
+    // help and opens nothing.
+    expected.insert("--help".to_owned());
+    expected.insert("-h".to_owned());
+
+    assert_eq!(
+        assigned(&script, "local command_opts="),
+        expected,
+        "the completion script's command flags have drifted from the grammar's \
+         `what` group"
+    );
+    assert!(
+        assigned(&script, "local command_opts=").is_subset(&dl_first_argument_flags(&script)),
+        "a flag that ends a line is a flag that can be tabbed to in the first place"
+    );
+}
+
+#[test]
+fn a_flag_beside_a_workspace_is_never_one_that_ends_the_line() {
+    // The two tables read the same word differently, so a word in both would be a
+    // contradiction: `ws_cmds` offers `--rm` *after* a spec, which only makes sense
+    // for a flag the scan lets a spec follow.
+    let script = completion_script();
+
+    let ends_the_line = assigned(&script, "local command_opts=");
+    let (_, beside) = dl_workspace_words(&script);
+
+    for flag in &beside {
+        assert!(
+            !ends_the_line.contains(flag),
+            "{flag} is offered beside a workspace and also listed as ending the \
+             line, and it cannot be both"
+        );
+    }
+}
+
 /// Flags `aid` offers for a first argument beyond one per agent, and where each
 /// comes from.
 ///
@@ -453,5 +520,27 @@ fn aid_offers_one_flag_per_agent_it_can_start() {
         assigned(&script, "global_opts="),
         expected,
         "the completion script's aid flags have drifted from aid's agent table"
+    );
+}
+
+#[test]
+fn the_only_aid_flags_that_end_a_line_are_the_three_aid_answers_itself() {
+    // aid's half of `the_flags_that_end_a_line_are_the_grammars_own_command_group`.
+    // There is no group to derive it from -- aid's grammar is not a clap grammar --
+    // but there is already a hand-written table of the flags aid answers before it
+    // rewrites anything, and those are exactly the flags no workspace follows. Every
+    // other aid flag, agent flags and unknown pass-throughs alike, is read ahead of
+    // the spec, so the spec is still to come.
+    let script = completion_script();
+
+    let expected: BTreeSet<String> = AID_FLAGS_BESIDE_THE_AGENTS
+        .iter()
+        .map(|(flag, _)| (*flag).to_owned())
+        .collect();
+
+    assert_eq!(
+        assigned(&script, "command_opts="),
+        expected,
+        "aid's command flags have drifted from the flags aid answers itself"
     );
 }
