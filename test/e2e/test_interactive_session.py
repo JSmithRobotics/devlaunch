@@ -58,6 +58,13 @@ from fixtures.pty_helpers import PtySession, devpod_host_configured
 # test's assertions depend on across the suite.
 WORKSPACE_ID = "e2e-test-interactive"
 
+# Every probe below is a shell script, so each is run as one: `dl <ws> -- <cmd>`
+# is the command and its arguments, one word each, and dl quotes every word on
+# the way to the workspace. Passing a script as a single word used to work by
+# accident, back when the tail was rejoined with plain spaces and handed to a
+# shell whole; it now names a program with a space in it. `bash -lc <script>` is
+# the spelling that says what these are.
+
 # Announce readiness, then block on stdin with no exit of its own.
 LONG_RUNNING = (
     "echo READY-$$; "
@@ -240,7 +247,7 @@ class TestCommandGetsATerminal:
             "the sole place the alias can be found"
         )
 
-        with workspace.dl("--", "echo reached-through-$(hostname)") as s:
+        with workspace.dl("--", "bash", "-lc", "echo reached-through-$(hostname)") as s:
             s.expect(r"reached-through-\S+")
             assert f"-F {config}" in s.text, (
                 "dl must hand OpenSSH the config it read the alias out of; "
@@ -250,23 +257,23 @@ class TestCommandGetsATerminal:
             assert s.wait(timeout=30) == 0
 
     def test_one_shot_command_still_runs_and_reports_its_output(self, workspace):
-        with workspace.dl("--", "echo one-shot-worked") as s:
+        with workspace.dl("--", "bash", "-lc", "echo one-shot-worked") as s:
             s.expect("one-shot-worked")
             assert s.wait(timeout=30) == 0
 
     def test_one_shot_command_propagates_failure(self, workspace):
-        with workspace.dl("--", "exit 7") as s:
+        with workspace.dl("--", "bash", "-lc", "exit 7") as s:
             assert s.wait(timeout=60) == 7
 
     def test_command_runs_under_a_login_shell(self, workspace):
         """The reason the payload is wrapped in bash -lc; it must survive."""
-        with workspace.dl("--", LOGIN_SHELL_PROBE) as s:
+        with workspace.dl("--", "bash", "-lc", LOGIN_SHELL_PROBE) as s:
             s.expect("SHELL-PATH:")
             assert "/.pixi/bin" in s.text or "/usr/local" in s.text
 
     def test_command_gets_a_controlling_terminal(self, workspace):
         """The root cause, asserted directly."""
-        with workspace.dl("--", NEEDS_A_TTY) as s:
+        with workspace.dl("--", "bash", "-lc", NEEDS_A_TTY) as s:
             s.expect("TTY-STATUS:HAVE")
             s.expect(r"/dev/pts/\d+")
             assert "TTY-STATUS:MISSING" not in s.text
@@ -274,7 +281,7 @@ class TestCommandGetsATerminal:
 
     def test_term_is_usable_inside_the_workspace(self, workspace):
         """The old transport set TERM=dumb, which TUIs treat as no terminal."""
-        with workspace.dl("--", 'T=TERM; echo "IS-${T}:$TERM"') as s:
+        with workspace.dl("--", "bash", "-lc", 'T=TERM; echo "IS-${T}:$TERM"') as s:
             s.expect("IS-TERM:")
             assert "IS-TERM:dumb" not in s.text
 
@@ -287,7 +294,7 @@ class TestCommandGetsATerminal:
         a silent, confusing regression rather than a visible failure.
         """
         probe = 'D=PWD; echo "IN-${D}:$PWD"'
-        with workspace.dl("--", probe) as s:
+        with workspace.dl("--", "bash", "-lc", probe) as s:
             s.expect(r"IN-PWD:\S+")
             through_ssh = reported_cwd(s.text)
 
@@ -314,19 +321,19 @@ class TestLongRunningSession:
     """The half the user reported broken: a command that is meant not to exit."""
 
     def test_session_stays_up_instead_of_exiting_immediately(self, workspace):
-        with workspace.dl("--", LONG_RUNNING) as s:
+        with workspace.dl("--", "bash", "-lc", LONG_RUNNING) as s:
             s.expect("READY-")
             s.assert_running(grace=5.0)
 
     def test_session_still_accepts_input_after_starting(self, workspace):
         """Alive is not the claim -- interactive is."""
-        with workspace.dl("--", LONG_RUNNING) as s:
+        with workspace.dl("--", "bash", "-lc", LONG_RUNNING) as s:
             s.expect("READY-")
             s.send("hello")
             s.expect("ECHO:hello")
 
     def test_session_survives_several_round_trips(self, workspace):
-        with workspace.dl("--", LONG_RUNNING) as s:
+        with workspace.dl("--", "bash", "-lc", LONG_RUNNING) as s:
             s.expect("READY-")
             for n in range(3):
                 s.send(f"msg{n}")
@@ -335,7 +342,7 @@ class TestLongRunningSession:
 
     def test_session_exits_cleanly_when_the_command_ends(self, workspace):
         """It must not exit on its own, and must exit when told."""
-        with workspace.dl("--", LONG_RUNNING) as s:
+        with workspace.dl("--", "bash", "-lc", LONG_RUNNING) as s:
             s.expect("READY-")
             s.assert_running(grace=2.0)
             s.send("quit")
@@ -348,7 +355,7 @@ class TestLongRunningSession:
         `aid <repo>` runs. On the transport that has no pty this stops at
         TTY-STATUS:MISSING and exits 42 before READY is ever printed.
         """
-        with workspace.dl("--", NEEDS_A_TTY_AND_STAYS) as s:
+        with workspace.dl("--", "bash", "-lc", NEEDS_A_TTY_AND_STAYS) as s:
             s.expect("TTY-STATUS:HAVE")
             s.expect("READY-")
             s.assert_running(grace=5.0)
@@ -376,7 +383,7 @@ class TestAidStartsAnAgent:
         would add over `test_agent_shaped_payload_starts_and_stays` is the `aid`
         entry point rather than the transport, and the transport is the subject.
         """
-        probe = workspace.dl("--", CLAUDE_PROBE, timeout=90)
+        probe = workspace.dl("--", "bash", "-lc", CLAUDE_PROBE, timeout=90)
         with probe:
             probe.expect("AGENT-(YES|NO)")
             if "AGENT-YES" not in probe.text:
