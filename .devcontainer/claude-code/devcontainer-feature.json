@@ -1,8 +1,8 @@
 {
     "name": "Claude Code CLI",
     "id": "claude-code",
-    "version": "0.5.0",
-    "description": "Installs Claude Code CLI via pixi and sets up persistent configuration",
+    "version": "0.6.0",
+    "description": "Installs Claude Code and shares host agent skills with Claude and Codex",
     "options": {},
     "documentationURL": "https://github.com/anthropics/devcontainer-features",
     "licenseURL": "https://github.com/anthropics/devcontainer-features/blob/main/LICENSE",
@@ -22,6 +22,8 @@
         "source=${localEnv:HOME}/.claude/commands,target=/home/vscode/.claude/commands,type=bind,readonly",
         "source=${localEnv:HOME}/.claude/hooks,target=/home/vscode/.claude/hooks,type=bind,readonly",
         "source=${localEnv:HOME}/.claude/skills,target=/home/vscode/.claude/skills,type=bind,readonly",
-        "source=${localEnv:HOME}/.claude/wf-skills,target=/home/vscode/.claude/wf-skills,type=bind,readonly"
+        "source=${localEnv:HOME}/.claude/wf-skills,target=/home/vscode/.claude/wf-skills,type=bind,readonly",
+        "source=${localEnv:HOME}/.claude/shared-skills,target=/home/vscode/.claude/shared-skills,type=bind,readonly",
+        "source=${localEnv:HOME}/.agents/skills,target=/home/vscode/.agents/skills,type=bind,readonly"
     ]
 }

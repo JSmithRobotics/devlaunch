@@ -6,9 +6,10 @@
 
 # The claude-code feature mounts the developer's Claude configuration as the
 # directory itself, plus a read-only mount over each subdirectory holding
-# *executable instructions* -- agents/, commands/, hooks/, skills/ and
-# wf-skills/. Every one of those sources has to exist before the container is
-# created, and the cost of a missing one is not a warning: the create is refused
+# *executable instructions*, plus Codex's ~/.agents/skills. The mount list and
+# these directory prerequisites are checked together by
+# test/unit/test_claude_code_feature_mounts.py. Every source has to exist before
+# the container is created. A missing one means the create is refused
 # outright with `bind mount source path does not exist`, measured on devpod
 # 0.26.1 -- and nothing is written to the host when it happens, which is why
 # creating them here is the whole fix.
@@ -27,7 +28,7 @@
 #       so a token refresh fails
 #
 # A mount of a *directory* survives the same rename with its flags intact, which
-# is why the read-only list is exactly the five instruction directories and why
+# is why the read-only list is the instruction directories and why
 # CLAUDE.md and settings.json are no longer mounted at all: under a writable
 # parent their read-only mounts were enforceable only until the developer next
 # edited them, which is worse than not claiming the protection.
@@ -139,7 +140,7 @@ done
 #
 # Every line is guarded on absence, and that is load-bearing rather than tidy.
 # Run from *inside* a container this repo built -- which is the point of giving
-# it a Docker daemon -- the five instruction directories are the read-only
+# it a Docker daemon -- the instruction directories are the read-only
 # mounts, and a write to one fails with EROFS. A non-zero initializeCommand
 # aborts `devpod up` outright. `mkdir -p` on a directory that already exists
 # writes nothing and is safe there.
@@ -152,7 +153,8 @@ done
 # source, and on a host that has never run Claude it is indistinguishable from
 # a logged-out session.
 mkdir -p "$HOME/.claude" "$HOME/.claude/agents" "$HOME/.claude/commands" \
-    "$HOME/.claude/hooks" "$HOME/.claude/skills" "$HOME/.claude/wf-skills"
+    "$HOME/.claude/hooks" "$HOME/.claude/skills" "$HOME/.claude/wf-skills" \
+    "$HOME/.claude/shared-skills" "$HOME/.agents/skills"
 
 # known_hosts is mounted as a *file*, and Docker creates nothing for a file
 # source: if it is missing the container does not start degraded, it does not

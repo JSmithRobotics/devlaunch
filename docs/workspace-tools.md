@@ -55,6 +55,22 @@ that is *already running* skips that step, and the token it was given at startup
 stays in place, including one it was given before you set
 `DEVLAUNCH_NO_GH_TOKEN`. Run `dl <workspace> restart` to replace it.
 
+## Shared agent skills
+
+The repo's [local container feature](../.devcontainer/claude-code/README.md#shared-skills-for-claude-and-codex)
+mounts `~/.agents/skills` for Codex alongside Claude's discovery directory.
+It also protects `~/.claude/shared-skills`, so a relative link can point into
+that directory without making the skill body writable from the container.
+Both storage layouts work across different host and container usernames.
+
+This is a feature opt-in, not a mount injected by `dl` into every workspace.
+Repos with container-local configuration can provision the same directories
+through dotfiles. Existing containers using the feature need recreation to
+receive its new mounts. The feature preserves existing skills and links; it
+does not install Codex or share its credentials and session state. Dotfiles
+installers should skip host-mounted skill roots rather than reconcile their
+contents through a read-only bind.
+
 ## Claude authentication
 
 `claude` starts in every workspace `dl` opens without asking for a login. The
