@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The fork now carries a version distinct from upstream's.** This fork
+  publishes its own build from its own channel, so it needs a version that
+  cannot be confused with the upstream package of the same number. `+fork.1`
+  is semver build metadata, not a new release: it sorts equal to upstream's
+  `0.37.0` while naming a build that is not upstream's.
+
 ## [0.37.0] - 2026-09-09
 
 ### Fixed

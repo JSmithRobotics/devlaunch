@@ -142,9 +142,7 @@ class TestCondaPublishActuallySetsTheVariable:
         # workflow.
         lines = [line for line in text.splitlines() if ENV_VAR in line and ":" in line]
         setter = [line for line in lines if "github.repository" in line]
-        assert setter, (
-            f"{ENV_VAR} is mentioned but never set from `github.repository`: {lines!r}"
-        )
+        assert setter, f"{ENV_VAR} is mentioned but never set from `github.repository`: {lines!r}"
 
     def test_it_is_set_on_the_build_step_and_not_left_for_publish(self):
         """Setting it on the `publish` job's upload step would be too late:
@@ -173,9 +171,7 @@ class TestTheUpstreamURLHasOneAuthoritativeCopy:
 
     def test_the_recipe_default_agrees_with_cargo_tomls_repository(self):
         cargo_repo_lines = [
-            line
-            for line in cargo_toml_text().splitlines()
-            if line.strip().startswith("repository")
+            line for line in cargo_toml_text().splitlines() if line.strip().startswith("repository")
         ]
         assert len(cargo_repo_lines) == 1, cargo_repo_lines
         cargo_url = cargo_repo_lines[0].split("=", 1)[1].strip().strip('"')
