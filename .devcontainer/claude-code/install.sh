@@ -175,16 +175,38 @@ create_claude_directories() {
     mkdir -p "$TARGET_HOME/.claude/commands"
     mkdir -p "$TARGET_HOME/.claude/hooks"
 
-    # Create empty config files if they don't exist
-    if [ ! -f "$TARGET_HOME/.claude/.credentials.json" ]; then
-        echo "{}" > "$TARGET_HOME/.claude/.credentials.json"
-        chmod 600 "$TARGET_HOME/.claude/.credentials.json"
-    fi
-
-    if [ ! -f "$TARGET_HOME/.claude/.claude.json" ]; then
-        echo "{}" > "$TARGET_HOME/.claude/.claude.json"
-        chmod 600 "$TARGET_HOME/.claude/.claude.json"
-    fi
+    # No empty config files are seeded, and `.credentials.json` is the reason.
+    #
+    # This used to write `{}` into `.credentials.json` and `.claude.json` when they were
+    # missing. Both existed only to give a bind mount a source to cover, from the layout
+    # where this feature mounted nine individual paths under `~/.claude` -- and the
+    # host-side hook already retired its half of that on the same reasoning: "Seeding an
+    # empty {} over a credentials file was never anything but a way to satisfy a bind
+    # source, and on a host that has never run Claude it is indistinguishable from a
+    # logged-out session" (init-host.sh).
+    #
+    # In the container that stub is worse than useless, because it wins. `dl` forwards a
+    # profile's login as CLAUDE_CODE_OAUTH_TOKEN, Claude Code reads the credentials file
+    # first, and an empty one is a logged-out session: the agent asks the operator to log
+    # in while a valid token sits in its environment. It stayed hidden for as long as this
+    # feature mounted the host's real credentials file *over* the stub -- so the bug was
+    # invisible in exactly the configuration that could not use the token anyway, and
+    # surfaced the moment a container was given the forwarded login as its only one.
+    #
+    # Measured both ways in one container: with the stub, `claude` prompts for a login;
+    # with it removed and nothing else changed, `claude -p` answers on the forwarded
+    # token. Claude Code creates `.credentials.json` itself on first use, so there is
+    # nothing to replace it with.
+    #
+    # `.claude.json` had a second victim, and it was devlaunch. The provisioner seeds
+    # {"hasCompletedOnboarding":true} into $CLAUDE_CONFIG_DIR/.claude.json and exits
+    # early when that file already exists -- and this feature points CLAUDE_CONFIG_DIR
+    # at the directory being created right here, so the stub satisfied that guard.
+    # Every container built from this feature skipped the onboarding seed and met its
+    # operator with the trust prompt, which is the opposite of what seeding it was for.
+    #
+    # Guarded by test_the_feature_seeds_no_empty_credential and
+    # test_the_installer_may_not_create_the_file_that_marks_claude_onboarded.
 
     # Set proper ownership
     if [ "$(id -u)" -eq 0 ]; then

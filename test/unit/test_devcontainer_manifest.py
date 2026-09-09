@@ -683,6 +683,119 @@ def test_the_devcontainer_installs_the_committed_lock_rather_than_solving_its_ow
         )
 
 
+SEEDED_NAMES = (".credentials.json", ".claude.json")
+
+
+def _seeding_lines(installer, name):
+    """Lines of `installer` that would put `name` on disk.
+
+    A comment naming the file is the one exemption. Nothing else is: any other
+    mention counts, including one that only assigns the path to a variable.
+
+    Keying on a list of write verbs was the first attempt and it is the reason
+    this is a function with tests of its own. `>`, `tee` and `cp` miss `touch`
+    -- which is what `.devcontainer/claude-code/README.md` prescribes for this
+    exact file, so it is the likeliest way the stub returns -- they miss
+    `install -m 600 /dev/null`, and they miss any spelling that names the path
+    on one line and redirects into the variable on the next.
+    """
+    return [
+        line
+        for line in installer.splitlines()
+        if name in line and not line.lstrip().startswith("#")
+    ]
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        'touch "$TARGET_HOME/.claude/.credentials.json"',
+        'install -m 600 /dev/null "$TARGET_HOME/.claude/.credentials.json"',
+        # Names the path here and redirects into `$cred` on the next line, so
+        # neither line carries both the filename and a redirection.
+        'cred="$TARGET_HOME/.claude/.credentials.json"',
+        ': > "$TARGET_HOME/.claude/.credentials.json"',
+        'echo "{}" > "$TARGET_HOME/.claude/.credentials.json"',
+    ],
+)
+def test_the_seeding_guard_catches_a_write_that_is_not_a_redirection(write):
+    """The guard has to hold against the spellings, not against one idiom.
+
+    Every line here re-seeds the credentials file and every one of them passed
+    the guard as first written, which claimed to hold "over the whole installer
+    ... so it cannot come back under another name" while matching only `>`,
+    `tee` and `cp`.
+    """
+    installer = f'    mkdir -p "$TARGET_HOME/.claude"\n    {write}\n'
+    assert _seeding_lines(installer, ".credentials.json") == [f"    {write}"]
+
+
+def test_the_seeding_guard_reads_a_comment_as_a_comment():
+    """The exemption the guard does grant, since the fix is 22 lines of comment
+    explaining why the file is not seeded, and every one of them names it."""
+    assert _seeding_lines("    # writes .credentials.json\n", ".credentials.json") == []
+
+
+def test_the_feature_seeds_no_empty_credential():
+    """The feature must not write a `.credentials.json` into the container.
+
+    An empty ``{}`` there is not a harmless placeholder, it is a logged-out
+    session that wins: ``dl`` forwards a profile's login as
+    ``CLAUDE_CODE_OAUTH_TOKEN``, Claude Code reads the credentials file first,
+    and the agent then asks the operator to log in while a valid token sits in
+    its environment.
+
+    It stayed hidden for as long as the feature mounted the host's real
+    credentials file *over* the stub, so the bug was invisible in exactly the
+    configuration that could not use a forwarded token anyway.
+
+    ``.claude.json`` is held to the same rule because it was seeded by the same
+    block for the same retired reason.
+
+    The installer names both files only in comments today, so the guard forbids
+    every other mention rather than guessing at write syntax. A future line that
+    genuinely needs to name one is meant to be a conversation, not a match the
+    filter happens to let through.
+    """
+    installer = FEATURE_INSTALLER.read_text()
+    for name in SEEDED_NAMES:
+        seeding = _seeding_lines(installer, name)
+        assert not seeding, f"{name} is named outside a comment in install.sh: {seeding}"
+
+
+def test_the_installer_may_not_create_the_file_that_marks_claude_onboarded(devcontainer):
+    """`.claude.json` is forbidden for a second reason, and it is devlaunch's own.
+
+    The provisioner seeds ``{"hasCompletedOnboarding":true}`` into
+    ``$CLAUDE_CONFIG_DIR/.claude.json`` and exits early if that file is already
+    there. This feature points ``CLAUDE_CONFIG_DIR`` at the very directory the
+    installer sets up, so the ``{}`` stub was satisfying that guard: every
+    container built from this feature skipped the onboarding seed, which is the
+    opposite of what seeding it was for.
+
+    Two files hold that one fact, so this diffs them rather than restating it:
+    the name the provisioner exits on has to be a name the installer is
+    forbidden to write.
+    """
+    guarded = re.findall(r'\[ -e \\"\$dir/([^\\]+)\\" \]', SHIPPING_PROVISIONER.read_text())
+    assert guarded, (
+        f"{SHIPPING_PROVISIONER.name} no longer guards the onboarding seed on an "
+        "existing file; this test diffs that name against the installer and has "
+        "nothing left to diff"
+    )
+    config_dir = devcontainer["containerEnv"]["CLAUDE_CONFIG_DIR"]
+    assert config_dir.endswith("/.claude"), (
+        f"CLAUDE_CONFIG_DIR is {config_dir}, which is no longer the directory "
+        "install.sh populates, so the two no longer collide and this test is moot"
+    )
+    for name in guarded:
+        assert name in SEEDED_NAMES, (
+            f"the provisioner skips the onboarding seed when {name} exists, but "
+            f"install.sh is only forbidden to create {SEEDED_NAMES}, so the feature "
+            f"is free to suppress it again"
+        )
+
+
 def test_the_agent_socket_is_bound_from_the_variable_that_names_it(devcontainer, mounts):
     """The agent socket mount reads $SSH_AUTH_SOCK, not a guess at where it is.
 
