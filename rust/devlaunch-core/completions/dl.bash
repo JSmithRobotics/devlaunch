@@ -58,10 +58,9 @@ _dl_completion() {
     #
     # Every user-facing flag dl's argument grammar declares, and a test diffs the
     # two: `dl/tests/completion_tables.rs`. Five are deliberately absent —
-    # --json, --size, --yes, --force and --force-worktrees modify a command that
-    # is already on the line, and a line that named one is a line this function
-    # stops completing — and that test names them with the reason. Anything added
-    # below has to be added there too.
+    # --json, --size, --yes, --force and --force-worktrees each need something
+    # already on the line, so none is ever the first word, and that test names
+    # them with the reason. Anything added below has to be added there too.
     #
     # "Where the spec goes" is not "the second word": a modifying flag can come
     # first, so these are offered after one too (`dl --rm --<tab>`). Which word
@@ -85,21 +84,31 @@ _dl_completion() {
     # Options that take a value; a variant name, a profile name or a path follows.
     local value_opts="--devcontainer --claude-profile"
 
-    # The flags that are a command in themselves: they say what to do, and no
-    # workspace follows one. Every flag not here modifies a launch that still
-    # needs a spec, which is the distinction the scan below turns on -- `dl --ls`
-    # is finished and `dl --devcontainer robot` has not started.
+    # The flags a workspace spec may still follow: they modify a launch instead
+    # of being one. Every other flag ends the line, and that direction is the
+    # load-bearing half -- listing the flags that *end* it instead put ten flags
+    # in the wrong arm at once, because the ones nobody thinks to list are all on
+    # that side: the command group's hidden members (--repos, --update-cache,
+    # --completion-data), the five that modify a command already on the line
+    # (--json, --size, --yes, --force, --force-worktrees), and the two retired
+    # spellings. `dl --json my-workspace` is a clap error and `dl --repos
+    # my-workspace` answers "--repos takes no workspace", so completing a name
+    # after either is completing onto a refusal.
     #
-    # Derived rather than judged: these are exactly the flags dl declares in
-    # clap's `what` group, whose members are mutually exclusive because each one
-    # *is* the command, plus the help and version clap generates.
-    # `dl/tests/completion_tables.rs` diffs the two.
-    local command_opts="--ls --install --refresh --prune --reconcile --purge --herdr-shell --claude-profiles --help -h --version"
+    # Derived rather than judged, from three tables that are each already pinned:
+    # the grammar's flags, minus clap's `what` group, minus the hidden ones,
+    # minus `NOT_OFFERED_FIRST`. `dl/tests/completion_tables.rs` does that
+    # subtraction and diffs the answer against this line.
+    local spec_follows="--rm --devcontainer --claude-profile"
     if [[ "$cmd" == aid ]]; then
-        # The three aid answers itself, before it rewrites anything into a dl
-        # line. Every other aid flag is read ahead of the spec and passed
-        # through, so the spec is still to come.
-        command_opts="--help -h --version"
+        # aid's own, from `parse_aid_args`: it reads an agent flag, a remote
+        # control flag or a dl value option and keeps looking for the spec. The
+        # three it answers itself (--help, -h, --version) are absent because they
+        # end the line, and so is an unknown flag -- aid cannot tell whether one
+        # takes a value, so on `aid --unknown-taking-a-value foo owner/repo` it
+        # calls `foo` the spec, and completing a slot aid itself cannot place is
+        # worse than completing nothing.
+        spec_follows="--claude --codex --gemini --remote-control --remote --no-remote-control --no-remote --devcontainer --claude-profile"
     fi
 
     # After --claude-profile, offer the profile directories that exist. Read off the
@@ -194,7 +203,7 @@ _dl_completion() {
     # The words strictly before `cur` are indices 1 through word_count-2, which
     # holds whether or not the line ends in a space: the trailing-space branch
     # above incremented word_count without appending to `words`.
-    local position=0 named_a_command=0 scan=1 scanned
+    local position=0 ends_here=0 modified=0 scan=1 scanned
     while (( scan <= word_count - 2 )); do
         scanned="${words[scan]}"
         if [[ "$scanned" == "--" ]]; then
@@ -202,34 +211,43 @@ _dl_completion() {
             # is the user's shell to complete and not ours.
             return 0
         fi
-        if [[ " ${value_opts} " == *" ${scanned} "* ]]; then
-            # Its value is not a positional word, so step over the pair.
-            (( scan += 2 ))
-            continue
-        fi
         if [[ "$scanned" == -* ]]; then
-            if [[ " ${command_opts} " == *" ${scanned} "* ]]; then
-                named_a_command=1
+            if [[ " ${spec_follows} " == *" ${scanned} "* ]]; then
+                modified=1
+            else
+                ends_here=1
             fi
-            (( scan++ ))
+            if [[ " ${value_opts} " == *" ${scanned} "* ]]; then
+                # Its value is not a positional word, so step over the pair.
+                (( scan += 2 ))
+            else
+                (( scan++ ))
+            fi
             continue
         fi
         (( position++ ))
         (( scan++ ))
     done
 
-    # A line that already named a command takes neither a workspace nor a verb.
-    # This is what used to be a guard on the first word starting with `--`, which
-    # could not tell `dl --ls` from `dl --rm`.
-    if (( named_a_command )); then
+    # A line carrying a flag no spec follows takes neither a workspace nor a
+    # verb. This is what used to be a guard on the first word starting with
+    # `--`, which could not tell `dl --ls` from `dl --rm`.
+    if (( ends_here )); then
         return 0
     fi
 
     # The spec's position: flags, workspaces, repos, owners, or paths.
     if (( position == 0 )); then
-        # Global flags
+        # Flags. Once one modifier is on the line the line is a launch, so the
+        # only flags that can still precede the spec are the other modifiers:
+        # `dl --rm --ls` is refused, and `aid --codex --help` is not aid's help
+        # (that is `argv[0]`) but an unknown option handed to dl.
         if [[ ${cur} == -* ]]; then
-            COMPREPLY=( $(compgen -W "${global_opts}" -- ${cur}) )
+            if (( modified )); then
+                COMPREPLY=( $(compgen -W "${spec_follows}" -- ${cur}) )
+            else
+                COMPREPLY=( $(compgen -W "${global_opts}" -- ${cur}) )
+            fi
             return 0
         fi
 
