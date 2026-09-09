@@ -118,6 +118,14 @@ shell as an assignment prefix and sets that variable for that command only. That
 is what makes `dl <ws> -- IS_SANDBOX=1 claude ...` work, which is the spelling
 `aid` uses and the one the README shows.
 
+The exception ends where the quoting begins, and it ends abruptly. It is the
+whole word that has to need no quoting, value included, so `FOO=bar` is an
+assignment and `FOO='a b'` is not: the value's space makes the word
+`'FOO=a b'`, and a shell reads a quoted word as a program name, so the command
+exits 127 with the variable never set. Values made of `[A-Za-z0-9_@%+=:,./-]`
+are the ones that survive. For anything else, name the shell and write the
+assignment inside it: `dl <ws> -- bash -lc 'FOO="a b" cmd'`.
+
 A shell snippet is a command like any other, so name the shell: `dl <ws> -- bash
 -lc 'a && b'`. Redirections and pipes typed on your own command line belong to
 your own shell and never reach `dl`, which is what makes `dl <ws> -- ls >
