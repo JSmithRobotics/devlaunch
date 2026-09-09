@@ -273,6 +273,46 @@ def test_no_mount_reaches_a_host_path_the_readme_does_not_list(mounts):
     )
 
 
+def test_every_mount_of_a_protected_source_carries_readonly(mounts):
+    """A protected source is read-only at *every* target it is mounted at.
+
+    The rules above are set equality and dict lookup, and a source is what they
+    key on, so a *second* mount of an already-protected source is absorbed by
+    all of them: the set already contains it, and the dict keeps whichever entry
+    came last. Docker creates both. One line --
+    `source=${localEnv:HOME}/.agents/skills,target=/home/vscode/.agents/skills-rw,type=bind`
+    -- hands the container write access to the host's shared skill bodies at a
+    second path while every assertion in this file stays green, which is the
+    protection this feature exists for, defeated by an entry that reads like a
+    typo.
+    """
+    documented = {path.rstrip("/") for path in documented_home_paths(READ_ONLY_HEADING)}
+    writable = sorted(
+        mount["target"]
+        for mount in mounts
+        if mount["source"].removeprefix(f"{LOCAL_HOME}/") in documented and "readonly" not in mount
+    )
+    assert not writable, (
+        f"{writable} mount a documented read-only source without `readonly`, so the host "
+        f"path is writable from the container through those targets"
+    )
+
+
+def test_no_host_path_is_mounted_twice(mounts):
+    """One source, one target, so nothing can be absorbed by keying on it.
+
+    The narrower rule above catches the case that costs a protection. This is
+    the general one, and it is what makes the set- and dict-shaped assertions in
+    this file sound rather than accidentally sound.
+    """
+    sources = [mount["source"] for mount in mounts]
+    repeated = sorted({source for source in sources if sources.count(source) > 1})
+    assert not repeated, (
+        f"{repeated} are each mounted more than once, and every other rule here keys on the "
+        f"source, so the duplicate is invisible to them while Docker creates it"
+    )
+
+
 TROUBLESHOOTING = FEATURE_DIR / "TROUBLESHOOTING.md"
 
 
