@@ -5,8 +5,15 @@ name: Fork release
 # `conda-publish.yml` builds from a release *tag* -- its recipe fetches the
 # source from one -- and the workflow that cuts tags upstream is
 # `publish.yml`, which also publishes a wheel to PyPI under blooop's trusted
-# publisher. A fork has no such credential and should not have one, so
-# `publish.yml` is disabled here and the tag it used to cut never appears.
+# publisher. A fork has no such credential and should not have one.
+#
+# Two things keep `publish.yml` from cutting that tag here, and it is worth being
+# precise about which is which. It is disabled in this fork's Actions settings,
+# which is a repository setting and not a fact about the code: a review reading
+# only the tree correctly concluded the workflow was ungated and would run. It
+# is now also gated in code, on `secrets.PYPI_API_TOKEN` being configured, which
+# a fork's repository does not inherit. The setting is the reason it has never
+# run; the gate is the reason re-enabling it would not publish or tag.
 #
 # This is that link and nothing more: a tag, a GitHub release, and the two
 # binaries attached to it. No PyPI, no conda channel -- the channel upload is

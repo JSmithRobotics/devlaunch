@@ -115,6 +115,16 @@ jobs:
 
       - name: Build conda package
         uses: prefix-dev/rattler-build-action@v0.2.39
+        env:
+          # The other half of the recipe's `repo_url` context var: unset, the
+          # recipe defaults to upstream, which is the defect this fixes -- a
+          # fork's build silently fetching and publishing upstream's source
+          # under the fork's name. `github.repository` is automatically correct
+          # for any fork with zero configuration (and resolves to
+          # `blooop/devlaunch` on upstream itself, i.e. unchanged behaviour),
+          # which is why this is a workflow expression and not a repository
+          # variable somebody has to remember to set.
+          DEVLAUNCH_SOURCE_REPO: https://github.com/${{ github.repository }}
         with:
           recipe-path: conda.recipe/recipe.yaml
           # `--experimental` is what enables the recipe's `load_from_file`, which
@@ -127,6 +137,13 @@ jobs:
           # added: the toolchain is a build dependency resolved from the channels
           # like any other, which is what makes the build reproducible from the
           # recipe alone.
+          #
+          # `--channel https://prefix.dev/blooop` here is deliberately unrelated
+          # to DEVLAUNCH_SOURCE_REPO above: it resolves build DEPENDENCIES
+          # (the compilers) from where they are maintained, which is a
+          # different thing from where this run's source comes from or where
+          # its output gets published (settled by 96d27f2; do not change this
+          # to a fork's own channel).
           build-args: --experimental --channel conda-forge --channel https://prefix.dev/blooop --no-include-recipe
 
       - name: Upload build artifacts

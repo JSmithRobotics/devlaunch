@@ -61,12 +61,17 @@ jobs:
       # meaning is "the same launch, over time", so changing this repo makes
       # every existing point incomparable with every later one. Change it the
       # way a stage name is changed -- deliberately, knowing the line breaks.
+      # A repository variable and not a hardcoded literal only so a fork can
+      # bench its own target instead of upstream's without a diff here; the
+      # default is the same literal as before, so upstream's trend is
+      # unaffected and the "deliberately, knowing the line breaks" rule above
+      # is unchanged -- an unset variable changes nothing.
       #
       # Its own devcontainer builds an image and runs `pixi install` in
       # postCreate, both of which the cold-recreate shape pays for. That is the
       # first thing to look at if the cold trend proves noisier than the alert
       # threshold can live with.
-      TARGET: blooop/mcp-devtasks
+      TARGET: ${{ vars.BENCH_TARGET || 'blooop/mcp-devtasks' }}
       # Every byte this job writes, scoped away from anything else on the
       # runner: DEVPOD_HOME (plus DEVPOD_SSH_CONFIG, which `devpod up` writes
       # outside that home) is devpod's own state, XDG_CACHE_HOME is
@@ -290,7 +295,11 @@ jobs:
           # On a push there is no pull request, so the alert is a COMMIT comment
           # -- and commit comments notify almost nobody. This @-mention is what
           # actually produces a notification; without it the alert is invisible.
-          alert-comment-cc-users: '@blooop'
+          # A repository variable, like TARGET above, so a fork's regressions
+          # notify the fork's own owner rather than CC'ing upstream on a repo
+          # they do not maintain; unset, the default is the same handle as
+          # before and upstream is unaffected.
+          alert-comment-cc-users: '${{ vars.BENCH_ALERT_CC || ''@blooop'' }}'
           # The comparison table lands in every run's job summary, so "did it
           # move" is answerable without opening the chart or waiting for a breach.
           summary-always: true

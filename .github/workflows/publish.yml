@@ -24,6 +24,20 @@ jobs:
     runs-on: ubuntu-latest
     permissions: # Don't forget permissions
       contents: write
+    env:
+      # Hoisted to the job so the two steps that act on the outside world can
+      # ask whether it is configured. A step `if` can read `env`; it cannot read
+      # `secrets`, which is the mistake this pattern already caught once in
+      # ci.yml's Codecov upload (`if: secrets.X != ''` is not a condition
+      # GitHub evaluates, so the step silently never runs).
+      #
+      # Why it is a condition at all: secrets do not propagate to a fork's own
+      # repository, so without this a fork's every version bump reaches
+      # "Publish to PyPI" with no credential and fails loudly about somebody
+      # else's package index. Unset here means "this repository does not
+      # publish to PyPI", which is the truth on a fork and never the case
+      # upstream, so upstream's behaviour is unchanged.
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -138,7 +152,7 @@ jobs:
           test "$(/tmp/wheel-check/bin/aid --version)" = "aid $version"
 
       - name: Publish to PyPI
-        if: steps.decide.outputs.publish == 'true'
+        if: steps.decide.outputs.publish == 'true' && env.PYPI_API_TOKEN != ''
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
@@ -148,8 +162,13 @@ jobs:
           # already there.
           skip-existing: true
 
+      # Gated on the token too, deliberately: this tag is what `conda-publish.yml`
+      # waits for and what its recipe fetches from, so cutting it on a
+      # repository that published no wheel would start a chain against a release
+      # that half exists. A fork cuts its tags with `fork-release.yml` instead,
+      # and two workflows racing for one tag name is the thing to avoid.
       - name: Tag the release and write it up
-        if: steps.decide.outputs.publish == 'true'
+        if: steps.decide.outputs.publish == 'true' && env.PYPI_API_TOKEN != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

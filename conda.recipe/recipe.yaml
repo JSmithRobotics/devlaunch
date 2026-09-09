@@ -7,6 +7,20 @@ context:
   # resolves to it rather than repeating it. A release is one edit.
   version: ${{ load_from_file("../rust/Cargo.toml").workspace.package.version }}
 
+  # The source repo, overridable so a fork's build fetches the fork's own code
+  # rather than upstream's. Unset -- a developer render, or upstream's own CI --
+  # resolves to upstream, exactly as before this variable existed.
+  # `.github/workflows/conda-publish.yml` sets DEVLAUNCH_SOURCE_REPO on the build
+  # step to `https://github.com/${{ github.repository }}`, which is what makes a
+  # fork's publish fetch and ship the fork's own code instead of silently
+  # building and publishing upstream's under the fork's name.
+  #
+  # Held WITHOUT the `.git` suffix: `source.git` appends it below and `about.*`
+  # wants the browsable URL. The reverse (holding it with `.git` and stripping
+  # for `about.*`) needs a global `replace(".git", "")`, which silently corrupts
+  # any repository named `<owner>.github.io` -- an idiomatic GitHub name.
+  repo_url: ${{ env.get("DEVLAUNCH_SOURCE_REPO", default="https://github.com/blooop/devlaunch") }}
+
 package:
   name: devlaunch
   version: ${{ version }}
@@ -15,7 +29,7 @@ source:
   # Still the tag rather than the working tree, which is the ordering requirement
   # `.github/workflows/conda-publish.yml` is built around: Auto-publish creates
   # the tag, and only then can this fetch it.
-  git: https://github.com/blooop/devlaunch.git
+  git: ${{ repo_url }}.git
   tag: v${{ version }}
 
 build:
@@ -66,7 +80,7 @@ tests:
       - test "$(aid --version)" = "aid ${{ version }}"
 
 about:
-  homepage: https://github.com/blooop/devlaunch
+  homepage: ${{ repo_url }}
   license: MIT
   license_file: LICENSE
   summary: DevLaunch - A streamlined CLI for devpod workspaces
@@ -74,9 +88,12 @@ about:
     DevLaunch provides a streamlined interface for devpod workspaces with
     interactive workspace selection using an embedded fuzzy finder, intuitive
     autocomplete functionality, and GitHub integration.
-  documentation: https://github.com/blooop/devlaunch#readme
-  repository: https://github.com/blooop/devlaunch
+  documentation: ${{ repo_url }}#readme
+  repository: ${{ repo_url }}
 
 extra:
   recipe-maintainers:
+    # A person, not a publish location: this is who maintains the recipe, and
+    # upstream's own recipe already names itself here. It does not move with
+    # `repo_url` and a fork does not need to touch it.
     - blooop
