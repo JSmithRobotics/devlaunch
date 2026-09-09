@@ -54,7 +54,7 @@
         // miss, and every launch silently builds locally exactly as it did
         // before this existed.
         "devpod": {
-            "prebuildRepository": "ghcr.io/blooop/devlaunch-devcontainer"
+            "prebuildRepository": "ghcr.io/jsmithrobotics/devlaunch-devcontainer"
         },
         "vscode": {
             "settings": {},
