@@ -41,30 +41,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   context, so this commit moves the tag once; launches build locally until
   `devcontainer-prebuild.yml` republishes on `main`.
 
-## [0.35.0] - 2026-09-09
-
-### Added
-
-- The local container feature shares `~/.agents/skills` with Codex and mounts
-  `~/.claude/shared-skills` read-only. Relative links between the shared roots
-  now resolve across host and container usernames, and writes through those
-  links cannot modify the host's shared skill bodies. Existing containers need
-  recreation to receive the mounts.
-
-### Fixed
-
-- **The feature's own troubleshooting page no longer claims protection it does
-  not provide.** `What's Protected (Read-Only)` listed `CLAUDE.md` and
-  `settings.json`, both of which are writable from the container and reach the
-  host, and a write to `settings.json` is host command execution because it can
-  name a hook command inline. The README's equivalent section had been
-  corrected; this copy was missed.
-- **The documented way to unblock a refused container create now creates every
-  directory the create needs.** `bind mount source path does not exist` told the
-  reader to make three of the seven mounted directories, so following it left
-  the create refused, and to run `echo '{}' > ~/.claude/settings.json`, which
-  truncates the settings file of anyone who already had one.
-
 - **`dl <ws> -- <command>` no longer re-splits a quoted argument, and no longer
   runs one as shell.** The words after `--` were rejoined with plain spaces and
   handed to `bash -lc` as a command line, so every space the host's shell had
@@ -94,6 +70,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   called `exit 7` and exits 127 where it used to exit 7. The e2e probes were the
   only callers in the tree spelling it that way, and they name `bash -lc` now.
   `dl <ws> -- ""` went from exit 0 to 127 for the same reason.
+
+## [0.35.0] - 2026-09-09
+
+### Added
+
+- The local container feature shares `~/.agents/skills` with Codex and mounts
+  `~/.claude/shared-skills` read-only. Relative links between the shared roots
+  now resolve across host and container usernames, and writes through those
+  links cannot modify the host's shared skill bodies. Existing containers need
+  recreation to receive the mounts.
+
+### Fixed
+
+- **The feature's own troubleshooting page no longer claims protection it does
+  not provide.** `What's Protected (Read-Only)` listed `CLAUDE.md` and
+  `settings.json`, both of which are writable from the container and reach the
+  host, and a write to `settings.json` is host command execution because it can
+  name a hook command inline. The README's equivalent section had been
+  corrected; this copy was missed.
+- **The documented way to unblock a refused container create now creates every
+  directory the create needs.** `bind mount source path does not exist` told the
+  reader to make three of the seven mounted directories, so following it left
+  the create refused, and to run `echo '{}' > ~/.claude/settings.json`, which
+  truncates the settings file of anyone who already had one.
 
 ## [0.34.0] - 2026-09-09
 
