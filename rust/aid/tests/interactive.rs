@@ -325,9 +325,7 @@ fn a_typed_prompt_reaches_the_agent_with_no_shell_in_the_way() {
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-             --dangerously-skip-permissions --remote-control={MAIN} \
-             '\"'\"'fix the \"flaky\" test'\"'\"''"
+            "devpod ssh {MAIN} --command bash -lc 'env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude --dangerously-skip-permissions --remote-control={MAIN} '\"'\"'fix the \"flaky\" test'\"'\"''"
         )
     );
 }
@@ -350,9 +348,7 @@ fn a_pasted_multi_line_prompt_arrives_whole_rather_than_leaking() {
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-             --dangerously-skip-permissions --remote-control={MAIN} \
-             '\"'\"'fix this\nand then that'\"'\"''"
+            "devpod ssh {MAIN} --command bash -lc 'env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude --dangerously-skip-permissions --remote-control={MAIN} '\"'\"'fix this\nand then that'\"'\"''"
         )
     );
 }
@@ -367,8 +363,7 @@ fn an_empty_enter_is_the_plain_session_it_always_was() {
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-             --dangerously-skip-permissions --remote-control={MAIN}'"
+            "devpod ssh {MAIN} --command bash -lc 'env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude --dangerously-skip-permissions --remote-control={MAIN}'"
         )
     );
 }
@@ -396,8 +391,7 @@ fn the_boot_runs_while_the_prompt_is_still_being_typed() {
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
-             --dangerously-skip-permissions --remote-control={MAIN} go'"
+            "devpod ssh {MAIN} --command bash -lc 'env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude --dangerously-skip-permissions --remote-control={MAIN} go'"
         )
     );
 }

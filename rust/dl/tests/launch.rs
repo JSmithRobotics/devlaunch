@@ -532,13 +532,20 @@ fn a_quoted_prompt_reaches_the_agent_intact() {
     // always single-quotes and escapes each `'` as `'"'"'`, where the `shlex` crate
     // would switch to double quotes for the same word. Both are the same word to a
     // POSIX shell and only one of them is the same bytes.
+    //
+    // What this asserted until #588 was the opposite of its own name: the payload
+    // read `bash -lc 'claude it'"'"'s here'`, which is `claude it's here` to the
+    // remote shell -- two arguments, and the prompt was never intact at all. The
+    // apostrophe made it look right, because escaping it is the visible half of
+    // quoting and keeping the word whole is the half that was missing.
     let world = World::with(&["--warm"]);
     let run = world.dl(&[MAIN, "--", "claude", "it's here"]);
     run.exited(0);
     assert_eq!(
         world.calls().exact(&world.root).last(),
         Some(&format!(
-            "devpod ssh {MAIN} --command bash -lc 'claude it'\"'\"'s here'"
+            "devpod ssh {MAIN} --command bash -lc \
+             'claude '\"'\"'it'\"'\"'\"'\"'\"'\"'\"'\"'s here'\"'\"''"
         ))
     );
 }
@@ -557,7 +564,7 @@ fn the_zellij_opt_in_puts_a_session_beside_the_command() {
         run.stderr_lines()[1],
         format!(
             "SSH command: devpod ssh {MAIN} --command bash -lc 'zellij attach -b devlaunch \
-             >/dev/null 2>&1 || true; claude fix it'"
+             >/dev/null 2>&1 || true; claude '\"'\"'fix it'\"'\"''"
         )
     );
 }
