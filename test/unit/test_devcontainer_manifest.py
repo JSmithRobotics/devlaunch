@@ -683,6 +683,59 @@ def test_the_devcontainer_installs_the_committed_lock_rather_than_solving_its_ow
         )
 
 
+SEEDED_NAMES = (".credentials.json", ".claude.json")
+
+
+def _seeding_lines(installer, name):
+    """Lines of `installer` that would put `name` on disk.
+
+    A comment naming the file is the one exemption. Nothing else is: any other
+    mention counts, including one that only assigns the path to a variable.
+
+    Keying on a list of write verbs was the first attempt and it is the reason
+    this is a function with tests of its own. `>`, `tee` and `cp` miss `touch`
+    -- which is what `.devcontainer/claude-code/README.md` prescribes for this
+    exact file, so it is the likeliest way the stub returns -- they miss
+    `install -m 600 /dev/null`, and they miss any spelling that names the path
+    on one line and redirects into the variable on the next.
+    """
+    return [
+        line
+        for line in installer.splitlines()
+        if name in line and not line.lstrip().startswith("#")
+    ]
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        'touch "$TARGET_HOME/.claude/.credentials.json"',
+        'install -m 600 /dev/null "$TARGET_HOME/.claude/.credentials.json"',
+        # Names the path here and redirects into `$cred` on the next line, so
+        # neither line carries both the filename and a redirection.
+        'cred="$TARGET_HOME/.claude/.credentials.json"',
+        ': > "$TARGET_HOME/.claude/.credentials.json"',
+        'echo "{}" > "$TARGET_HOME/.claude/.credentials.json"',
+    ],
+)
+def test_the_seeding_guard_catches_a_write_that_is_not_a_redirection(write):
+    """The guard has to hold against the spellings, not against one idiom.
+
+    Every line here re-seeds the credentials file and every one of them passed
+    the guard as first written, which claimed to hold "over the whole installer
+    ... so it cannot come back under another name" while matching only `>`,
+    `tee` and `cp`.
+    """
+    installer = f'    mkdir -p "$TARGET_HOME/.claude"\n    {write}\n'
+    assert _seeding_lines(installer, ".credentials.json") == [f"    {write}"]
+
+
+def test_the_seeding_guard_reads_a_comment_as_a_comment():
+    """The exemption the guard does grant, since the fix is 22 lines of comment
+    explaining why the file is not seeded, and every one of them names it."""
+    assert _seeding_lines("    # writes .credentials.json\n", ".credentials.json") == []
+
+
 def test_the_feature_seeds_no_empty_credential():
     """The feature must not write a `.credentials.json` into the container.
 
@@ -696,22 +749,18 @@ def test_the_feature_seeds_no_empty_credential():
     credentials file *over* the stub, so the bug was invisible in exactly the
     configuration that could not use a forwarded token anyway.
 
-    Asserted over the whole installer rather than about one line, so it cannot
-    come back under another name. ``.claude.json`` is included because it was
-    seeded by the same block for the same retired reason; Claude Code creates
-    both itself on first use.
+    ``.claude.json`` is held to the same rule because it was seeded by the same
+    block for the same retired reason.
+
+    The installer names both files only in comments today, so the guard forbids
+    every other mention rather than guessing at write syntax. A future line that
+    genuinely needs to name one is meant to be a conversation, not a match the
+    filter happens to let through.
     """
     installer = FEATURE_INSTALLER.read_text()
-    for name in (".credentials.json", ".claude.json"):
-        seeding = [
-            line
-            for line in installer.splitlines()
-            # A write of the file, rather than a comment naming it.
-            if name in line
-            and not line.lstrip().startswith("#")
-            and (">" in line or "tee" in line or "cp " in line)
-        ]
-        assert not seeding, f"{name} is written by install.sh: {seeding}"
+    for name in SEEDED_NAMES:
+        seeding = _seeding_lines(installer, name)
+        assert not seeding, f"{name} is named outside a comment in install.sh: {seeding}"
 
 
 def test_the_agent_socket_is_bound_from_the_variable_that_names_it(devcontainer, mounts):
