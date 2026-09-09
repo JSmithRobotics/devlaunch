@@ -168,7 +168,7 @@ reached through it are missing or unwritable.
 ### Issue 5: "Read-only file system" Error
 
 **Symptoms:**
-- Error when trying to write to `~/.claude/CLAUDE.md` or similar
+- Error when trying to write to `~/.claude/skills/` or another instruction directory
 - Operations fail with "Read-only file system"
 
 **Expected Behavior:**
@@ -376,13 +376,22 @@ watch -n 1 'stat ~/.claude/.claude.json | grep Modify'
 ## Security Considerations
 
 ### What's Protected (Read-Only)
-- `CLAUDE.md` - Prevents prompt injection
-- `settings.json` - Prevents config tampering
-- `agents/`, `commands/`, `hooks/` - Prevents malicious modifications
+
+The instruction directories, and only those: see the tree at the top of this
+page, which a test holds to the manifest. They carry the code and instructions
+the agents execute, which is why they are the ones singled out.
 
 ### What's Writable (Necessary Risk)
 - `.credentials.json` - OAuth tokens (necessary for auth)
 - `.claude.json` - Setup state (necessary to skip wizard)
+- `CLAUDE.md` - a prompt injection can edit it, and the edit reaches the host
+- `settings.json` - can name a hook command inline, so a write here is host
+  command execution
+
+The last two were mounted read-only under the old file-mount layout and are
+not protected any more. A read-only mount over a file does not survive the
+host replacing that file by rename, so the protection ended at the developer's
+next edit; see "Why only directories are mounted" in the README.
 
 ### Mitigation
 - Only use in trusted repositories

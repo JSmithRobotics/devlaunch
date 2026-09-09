@@ -557,26 +557,31 @@ def _protection_headings(readme: str) -> list:
     ]
 
 
-def test_no_heading_claims_protection_for_a_writable_file():
+@pytest.mark.parametrize("document", [FEATURE_README, TROUBLESHOOTING], ids=lambda p: p.name)
+def test_no_heading_claims_protection_for_a_writable_file(document):
     """No section listing protected paths may name a file that is writable.
 
     The mount-agreement test binds one heading by its exact text, so a *second*
-    list of protected paths — which is what this README grew — is checked by
+    list of protected paths — which is what these documents grew — is checked by
     nothing. This asks the question of every heading that claims protection
     instead of one, because the failure was a heading nobody had registered.
 
-    Only bullets count, for `documented_paths`'s reason: the prose under these
-    headings discusses `settings.json` precisely to say it is *not* protected,
-    and a substring match anywhere in the section would fail on the sentence
-    that fixes the problem.
+    Both documents, because scoping it to the README is how TROUBLESHOOTING.md
+    went on promising that `CLAUDE.md` and `settings.json` were read-only after
+    they stopped being. That one is the worse of the two to get wrong: it is
+    the page a developer opens when a write has just been refused.
+
+    Only bullets count, for `documented_home_paths`'s reason: the prose under
+    these headings discusses `settings.json` precisely to say it is *not*
+    protected, and a substring match anywhere in the section would fail on the
+    sentence that fixes the problem.
     """
-    readme = FEATURE_README.read_text()
-    headings = _protection_headings(readme)
-    assert headings, "no heading in the README claims protection; the guard is guarding nothing"
+    headings = _protection_headings(document.read_text())
+    assert headings, f"no heading in {document.name} claims protection; the guard guards nothing"
 
     offences = []
     for heading in headings:
-        for line in _section(FEATURE_README, heading).splitlines():
+        for line in _section(document, heading).splitlines():
             stripped = line.lstrip()
             if not stripped.startswith(("-", "*")):
                 continue
