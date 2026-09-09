@@ -104,6 +104,12 @@ def documented_home_paths(heading: str) -> set:
         if match
     }
     assert paths, f"the README lists no mounts under {heading!r}"
+    escaping = sorted(path for path in paths if path.startswith("/"))
+    assert not escaping, (
+        f"{escaping} under {heading!r} came out absolute, and every caller joins these onto a "
+        f"home: `scratch / '/.claude/x'` is '/.claude/x', so the path leaves the scratch home "
+        f"for the developer's real one"
+    )
     return paths
 
 
