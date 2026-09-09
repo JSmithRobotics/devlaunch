@@ -102,17 +102,20 @@ pub(crate) fn family(verb: &Verb) -> Family {
         // ending rather than to this pass over one workspace.
         Verb::Remove { force, after: _ } => return Family::Remove { force: *force },
         Verb::Attach { rm } => (LaunchVerb::Attach { command: None }, *rm),
-        // Re-quoted, not just rejoined, and the difference is the whole of
-        // #588. [`RemotePayload::wrap`] quotes this string whole into `bash -lc
-        // '<it>'`, so whatever is built here is a command line the *remote*
-        // shell parses. A plain `words.join(" ")` handed that shell every space
-        // the host's shell had already eaten, and it re-split on all of them:
-        // `dl <ws> -- claude 'fix the bug'` arrived as four arguments where one
-        // was meant, a word holding `#` commented out the rest of the line, and
-        // a word holding `$(...)` was executed. `shell::join` puts back exactly
-        // the quoting the host's shell removed, which is what makes the remote
-        // argv the argv that was typed. Guarded by
-        // `a_word_with_spaces_stays_one_word` and the three beside it.
+        // Re-quoted, not just rejoined. [`RemotePayload::wrap`] quotes this
+        // string whole into `bash -lc '<it>'`, so what is built here is a
+        // command line the *remote* shell parses: a plain `words.join(" ")`
+        // handed that shell every space the host's shell had already eaten, and
+        // it re-split on all of them. `dl <ws> -- claude 'fix the bug'` arrived
+        // as four arguments where one was meant, a word holding `#` commented
+        // out the rest of the line, and a word holding `$(...)` was executed.
+        //
+        // `shell::join` is the same quoter the rest of the tree already uses,
+        // and this was the one call site not using it. It puts back exactly the
+        // quoting the host's shell removed, which is what makes the remote argv
+        // the argv that was typed. A bare `NAME=value` word survives it
+        // unquoted, since `=` is shell-safe, so the assignment-prefix spelling
+        // the README documents keeps working.
         Verb::Run(words, rm) => (
             LaunchVerb::Attach {
                 command: Some(shell::join(words.iter().map(String::as_str))),
@@ -361,7 +364,7 @@ mod tests {
 
     #[test]
     fn a_word_with_spaces_stays_one_word() {
-        // #588: the host's shell had already removed the quotes from `dl <ws> --
+        // The host's shell had already removed the quotes from `dl <ws> --
         // claude 'fix the bug'`, so rejoining on spaces handed the remote shell
         // four words and the agent was prompted with `fix`.
         assert_eq!(
@@ -372,7 +375,7 @@ mod tests {
 
     #[test]
     fn a_word_holding_a_comment_does_not_swallow_the_rest() {
-        // The failure that named #588: `#10848` began a comment, so everything
+        // The failure this was found through: `#10848` began a comment, so everything
         // after it -- including every hard rule the prompt carried -- was
         // discarded by the remote shell before the command ran.
         assert_eq!(

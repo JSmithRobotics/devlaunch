@@ -533,7 +533,7 @@ fn a_quoted_prompt_reaches_the_agent_intact() {
     // would switch to double quotes for the same word. Both are the same word to a
     // POSIX shell and only one of them is the same bytes.
     //
-    // What this asserted until #588 was the opposite of its own name: the payload
+    // What this asserted until the quoting fix was the opposite of its own name: the
     // read `bash -lc 'claude it'"'"'s here'`, which is `claude it's here` to the
     // remote shell -- two arguments, and the prompt was never intact at all. The
     // apostrophe made it look right, because escaping it is the visible half of

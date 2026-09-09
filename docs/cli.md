@@ -102,17 +102,21 @@ of the freshness rules, and the section under it names which verb moves what.
 
 ## What `--` takes
 
-Argv. The words after `--` are the command and its arguments, one word each, and
-`dl` quotes every one of them on the way into the remote payload. So a quoted
-argument stays one argument: `dl <ws> -- claude 'fix the bug'` runs `claude` with
-a single argument, and a word holding a space, a `#`, a `$(...)` or a backtick is
-that word rather than shell syntax.
+The command and its arguments, one word each. `dl` quotes every word on the way
+into the remote payload, so a quoted argument stays one argument: `dl <ws> --
+claude 'fix the bug'` runs `claude` with a single argument, and a word holding a
+space, a `#`, a `$(...)` or a backtick is that word rather than shell syntax.
 
-It reads that way because the payload is one `bash -lc <line>` for both
-transports, and the line has to be built rather than assumed. Before 0.34.1 the
-words were rejoined with plain spaces, which gave the remote shell back every
-separator the host's shell had already consumed. Quoted arguments were re-split,
-a `#` commented out the rest of the line, and a `$(...)` ran.
+It has to be built that way because the payload is one `bash -lc <line>` for both
+transports. The words used to be rejoined with plain spaces, which gave the remote
+shell back every separator your own shell had already consumed: quoted arguments
+were re-split, a `#` commented out the rest of the line, and a `$(...)` ran.
+
+One exception, and it is deliberate. The quoting leaves a word alone when it needs
+none, and `=` counts as needing none, so a leading `NAME=value` still reaches the
+shell as an assignment prefix and sets that variable for that command only. That
+is what makes `dl <ws> -- IS_SANDBOX=1 claude ...` work, which is the spelling
+`aid` uses and the one the README shows.
 
 A shell snippet is a command like any other, so name the shell: `dl <ws> -- bash
 -lc 'a && b'`. Redirections and pipes typed on your own command line belong to

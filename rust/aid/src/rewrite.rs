@@ -717,12 +717,11 @@ fn agent_flag(word: &str) -> Option<&'static str> {
 /// that pre-composed a line would have that line quoted as one command name. It used
 /// to be one string, back when dl rejoined the tail with plain spaces and a
 /// pre-quoted line survived by accident — the same accident that re-split everybody
-/// else's quoted argument (#588).
+/// else's quoted argument.
 ///
-/// The agent's variables are set with `env(1)` rather than the shell's
-/// assignment-prefix syntax, which is the same "this process only" guarantee spelled
-/// in argv instead of in shell. Nothing in the login shell dl runs this under is
-/// changed either way.
+/// The composed payload is unchanged by all of that: every word this returns is
+/// either already shell-safe or gets the same quoting aid used to apply itself, so
+/// what reaches the remote shell is byte for byte what it was.
 ///
 /// `None` is an agent this build has no entry for, which only a caller inventing a
 /// name can produce — [`parse_aid_args`] answers with a name from the table.
@@ -754,20 +753,17 @@ pub(crate) fn build_agent_command(
         words.extend(started.prompt_flags.iter().copied());
         words.push(prompt);
     }
-    // `env NAME=value … cmd` sets the variables for that command only, so the agent
-    // is the one process that sees them. Spelled as argv rather than as the shell's
-    // assignment prefix because this is argv now: the values need no quoting here,
-    // since dl quotes every word it is handed.
-    let mut line: Vec<String> = Vec::new();
-    if !started.env.is_empty() {
-        line.push("env".to_owned());
-        line.extend(
-            started
-                .env
-                .iter()
-                .map(|(name, value)| format!("{name}={value}")),
-        );
-    }
+    // Assignments prefixing a command set the variables for that command only, so
+    // the agent is the one process that sees them and nothing in the login shell dl
+    // runs this under is changed. Still spelled as an assignment rather than as
+    // `env NAME=value`: `=` is in dl's shell-safe set, so a bare `NAME=value` word
+    // reaches the remote shell unquoted and keeps that meaning, and the payload
+    // stays the one README documents.
+    let mut line: Vec<String> = started
+        .env
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect();
     line.extend(words.into_iter().map(str::to_owned));
     Some(line)
 }
@@ -1054,7 +1050,6 @@ mod tests {
         assert_eq!(
             agent_argv("claude", "fix the bug", None),
             [
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -1065,7 +1060,6 @@ mod tests {
         assert_eq!(
             agent_argv("claude", "", None),
             [
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -1150,7 +1144,6 @@ mod tests {
         assert_eq!(
             agent_argv("claude", "don't break \"this\"", None),
             [
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -1161,7 +1154,6 @@ mod tests {
         assert_eq!(
             agent_argv("claude", "hi; rm -rf /", None),
             [
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -1185,7 +1177,6 @@ mod tests {
             [
                 "owner/repo@branch",
                 "--",
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -1202,7 +1193,6 @@ mod tests {
                 "robot",
                 "owner/repo",
                 "--",
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -1216,7 +1206,7 @@ mod tests {
     fn the_tail_after_the_separator_is_argv_and_the_prompt_is_one_word_of_it() {
         // What this used to assert was the bug: dl rejoined the tail with plain
         // spaces, so aid kept the quoting inside one argument and everybody else's
-        // quoted argument was re-split (#588). The tail is argv now, and the
+        // quoted argument was re-split. The tail is argv now, and the
         // property worth holding is that the prompt is *one* word of it however
         // many words were typed -- dl quotes each one on the way to the remote
         // shell, so a word that survives here survives all the way.
@@ -1230,7 +1220,6 @@ mod tests {
         assert_eq!(
             args[after + 1..],
             [
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -1283,7 +1272,6 @@ mod tests {
                 "owner/repo",
                 "--rm",
                 "--",
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -1510,7 +1498,6 @@ mod tests {
             [
                 "owner/repo@branch",
                 "--",
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -1526,7 +1513,6 @@ mod tests {
             [
                 "owner/repo@branch",
                 "--",
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -1637,7 +1623,6 @@ mod tests {
                 [
                     "owner/repo@fix/x",
                     "--",
-                    "env",
                     "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                     "IS_SANDBOX=1",
                     "claude",
@@ -1736,7 +1721,6 @@ mod tests {
         assert_eq!(
             agent_argv("claude", "", Some("./my project")),
             [
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -1747,7 +1731,6 @@ mod tests {
         assert_eq!(
             agent_argv("claude", "hi", Some("owner/repo@it's-mine")),
             [
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -1963,7 +1946,6 @@ mod tests {
                 "owner/repo",
                 "--rm",
                 "--",
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -2007,7 +1989,6 @@ mod tests {
             [
                 "owner/repo@fix/x",
                 "--",
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -2026,7 +2007,6 @@ mod tests {
             [
                 "owner/repo@fix/x",
                 "--",
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",
@@ -2045,7 +2025,6 @@ mod tests {
             [
                 "owner/repo",
                 "--",
-                "env",
                 "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
                 "IS_SANDBOX=1",
                 "claude",

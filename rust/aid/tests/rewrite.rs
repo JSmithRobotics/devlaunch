@@ -273,6 +273,10 @@ fn a_prompt_reaches_the_agent_as_one_argument_through_dls_own_launch() {
     // dl's own launch of the workspace, and one `devpod ssh --command` carrying the
     // agent. Byte for byte Python's, quoting included — the payload travels in argv.
     //
+    // The echoed `aid -> dl` line shows the tail as the words it is, because that is
+    // what aid now hands dl; the `--command` below is unchanged, since dl puts back
+    // the same quoting aid used to apply itself.
+    //
     // Remote Control rides along with nothing typed, which is what it is now: the
     // default. The name is the spec, which here is the workspace the line named.
     let world = World::with(&["--warm"]);
@@ -281,11 +285,14 @@ fn a_prompt_reaches_the_agent_as_one_argument_through_dls_own_launch() {
     assert_eq!(
         run.err.lines().collect::<Vec<&str>>(),
         [
-            "aid -> dl devlaunch-main-3j1t -- env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 \
+            "aid -> dl devlaunch-main-3j1t -- CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 \
              IS_SANDBOX=1 claude --dangerously-skip-permissions \
              --remote-control=devlaunch-main-3j1t 'fix the bug'",
             "Workspace devlaunch-main-3j1t is already running, attaching...",
-            "SSH command: devpod ssh devlaunch-main-3j1t --command bash -lc 'env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude --dangerously-skip-permissions --remote-control=devlaunch-main-3j1t '\"'\"'fix the bug'\"'\"''",
+            "SSH command: devpod ssh devlaunch-main-3j1t --command bash -lc \
+             'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
+             --dangerously-skip-permissions --remote-control=devlaunch-main-3j1t \
+             '\"'\"'fix the bug'\"'\"''",
         ]
     );
     assert_eq!(
@@ -293,7 +300,10 @@ fn a_prompt_reaches_the_agent_as_one_argument_through_dls_own_launch() {
         [
             format!("devpod status {MAIN} --output json"),
             format!(
-                "devpod ssh {MAIN} --command bash -lc 'env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude --dangerously-skip-permissions --remote-control={MAIN} '\"'\"'fix the bug'\"'\"''"
+                "devpod ssh {MAIN} --command bash -lc \
+                 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
+                 --dangerously-skip-permissions --remote-control={MAIN} \
+                 '\"'\"'fix the bug'\"'\"''"
             ),
         ]
     );
@@ -311,7 +321,9 @@ fn no_remote_control_is_the_one_way_back_to_a_purely_local_session() {
         assert_eq!(
             world.devpod_calls().last().expect("a session"),
             &format!(
-                "devpod ssh {MAIN} --command bash -lc 'env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude --dangerously-skip-permissions hi'"
+                "devpod ssh {MAIN} --command bash -lc \
+                 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
+                 --dangerously-skip-permissions hi'"
             ),
             "{flag}"
         );
@@ -349,7 +361,9 @@ fn an_appended_off_switch_is_observed_from_outside_to_turn_it_off() {
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc 'env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude --dangerously-skip-permissions '\"'\"'fix the bug'\"'\"''"
+            "devpod ssh {MAIN} --command bash -lc \
+             'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
+             --dangerously-skip-permissions '\"'\"'fix the bug'\"'\"''"
         )
     );
 }
@@ -387,7 +401,9 @@ fn no_prompt_starts_the_agents_plain_session() {
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc 'env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude --dangerously-skip-permissions --remote-control={MAIN}'"
+            "devpod ssh {MAIN} --command bash -lc \
+             'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
+             --dangerously-skip-permissions --remote-control={MAIN}'"
         )
     );
     // `Command::output()` gives aid no terminal, and off a terminal the promptless
@@ -463,7 +479,9 @@ fn remote_control_reaches_claude_as_one_named_flag_and_dl_never_sees_it() {
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc 'env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude --dangerously-skip-permissions --remote-control={MAIN} '\"'\"'fix the bug'\"'\"''"
+            "devpod ssh {MAIN} --command bash -lc \
+             'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
+             --dangerously-skip-permissions --remote-control={MAIN} '\"'\"'fix the bug'\"'\"''"
         )
     );
 }

@@ -26,11 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `dl --` command line (a PR title, a review body) shell code.
 
   `aid` composed its own line and passed it as one word, which survived only
-  because the rejoin was an identity on a single argument. It hands dl argv now,
-  and its variables are set with `env(1)` rather than the shell's
-  assignment-prefix syntax, so the payload is spelled the same way it is meant:
-  as arguments. The visible difference is one word in the `--command` devpod is
-  given, `bash -lc 'env CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 ...'`.
+  because the rejoin was an identity on a single argument. It hands dl argv now
+  and quotes nothing itself. The composed payload is byte for byte what it was:
+  a bare `NAME=value` needs no quoting, so the assignment-prefix spelling the
+  README documents still reaches the shell as one.
 
   A shell snippet is still asked for by naming a shell -- `dl <ws> -- bash -lc
   'a && b'` -- and that spelling was broken before this too, running `bash -lc a`
