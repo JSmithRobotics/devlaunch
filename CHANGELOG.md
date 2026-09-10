@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A Claude profile now forwards the skills, agents and instructions it
+  appears to.** A profile is mostly symlinks into the operator's real
+  `~/.claude`, whose targets are absolute paths into a home no container has, so
+  every one of them dangled and only the credential arrived. Each dangling
+  top-level link now gets a read-only bind of its resolved target.
+
+### Added
+
+- **`dl --from <ref>`** cuts a new branch from a ref you name instead of from
+  the repository's default branch. Per launch and never stored, like
+  `--claude-profile`: a base describes an event that happened once.
+
+### Changed
+
 - **The fork now carries a version distinct from upstream's.** This fork
   publishes its own build from its own channel, so it needs a version that
   cannot be confused with the upstream package of the same number. `+fork.1`
