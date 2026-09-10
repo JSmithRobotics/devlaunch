@@ -153,6 +153,10 @@ pub(crate) fn dispatch(
                         // agent authenticated as a different account than the agent,
                         // which is the one way this feature could mislead quietly.
                         claude_profile,
+                        // A base is a one-time event and a pane has no branch left
+                        // to cut anyway: this reattaches to a workspace the sibling
+                        // already opened.
+                        from: None,
                     },
                 );
                 if pane_shell::no_session_ran(ending) {
@@ -171,6 +175,7 @@ pub(crate) fn dispatch(
             verb,
             devcontainer,
             claude_profile,
+            from,
         } => {
             let after = verb.after_removal();
             let ending = render_select(
@@ -181,6 +186,7 @@ pub(crate) fn dispatch(
                 verb,
                 devcontainer.as_ref(),
                 claude_profile.as_deref(),
+                from.as_deref(),
             );
             hangup::after_the_command(after, ending)
         }
@@ -189,6 +195,7 @@ pub(crate) fn dispatch(
             verb,
             devcontainer,
             claude_profile,
+            from,
         } => {
             let after = verb.after_removal();
             let ending = render_workspace(
@@ -200,6 +207,7 @@ pub(crate) fn dispatch(
                 verb,
                 devcontainer.as_ref(),
                 claude_profile.as_deref(),
+                from.as_deref(),
                 // A target named on the command line is resolved by the launch
                 // itself; only the picker arrives knowing more than it says.
                 None,
@@ -704,6 +712,7 @@ fn render_workspace<'r>(
     verb: Verb,
     devcontainer: Option<&DevcontainerPath>,
     claude_profile: Option<&str>,
+    from: Option<&str>,
     recognised: Option<WorkspaceId>,
 ) -> Ending {
     // The open's own notices are said where they happen, by the same printer every
@@ -720,16 +729,19 @@ fn render_workspace<'r>(
         Family::Stop => {
             devcontainer_ignored(devcontainer.is_some(), word);
             claude_profile_ignored(claude_profile.is_some(), word);
+            from_ignored(from.is_some(), word);
             render_stop(runner, context, refresh, &mut cold, target)
         }
         Family::Kill => {
             devcontainer_ignored(devcontainer.is_some(), word);
             claude_profile_ignored(claude_profile.is_some(), word);
+            from_ignored(from.is_some(), word);
             render_kill(runner, context, cache, refresh, &mut cold, target, word)
         }
         Family::Remove { force } => {
             devcontainer_ignored(devcontainer.is_some(), word);
             claude_profile_ignored(claude_profile.is_some(), word);
+            from_ignored(from.is_some(), word);
             render_remove(
                 runner,
                 context,
@@ -753,6 +765,7 @@ fn render_workspace<'r>(
                 &launched,
                 devcontainer,
                 claude_profile,
+                from,
                 recognised,
             );
             after_the_session(runner, context, cache, refresh, &mut cold, target, rm, ran)
@@ -895,6 +908,12 @@ fn claude_profile_ignored(given: bool, verb: &str) {
 fn devcontainer_ignored(given: bool, verb: &str) {
     if given {
         eprintln!("Ignoring --devcontainer: it does not apply to '{verb}'.");
+    }
+}
+
+fn from_ignored(given: bool, verb: &str) {
+    if given {
+        eprintln!("Ignoring --from: '{verb}' cuts no branch.");
     }
 }
 
@@ -1551,6 +1570,13 @@ fn render_reconcile(
 ///
 /// A pick that never came is Python's ending exactly: the help on stdout and exit 1
 /// (`dl.py` 4457-4462). The help is clap's (**row 3**).
+// Same trio of launch modifiers as `render_workspace` above, which carries this
+// allow for the same reason: `--devcontainer`, `--claude-profile` and `--from`
+// are one group in the grammar (completion_tables calls them "the launch
+// modifiers the grammar leaves over") but they are three independent `Option`s
+// at every call site, and grouping them into a struct here alone would leave
+// the two siblings spelling one concept two ways.
+#[allow(clippy::too_many_arguments)]
 fn render_select<'r>(
     runner: &'r dyn Runner,
     context: &mut CommandContext<'r>,
@@ -1559,6 +1585,7 @@ fn render_select<'r>(
     verb: Verb,
     devcontainer: Option<&DevcontainerPath>,
     claude_profile: Option<&str>,
+    from: Option<&str>,
 ) -> Ending {
     let workspaces = match context.workspaces() {
         Err(refused) => return refuse_listing(&refused),
@@ -1597,6 +1624,7 @@ fn render_select<'r>(
                     verb.clone(),
                     devcontainer,
                     claude_profile,
+                    from,
                     // The picker knows what it drew: this row's clone said it is
                     // this triple, and the launch it is about to start knows only
                     // the id. See `Launch::recognised_as`.
