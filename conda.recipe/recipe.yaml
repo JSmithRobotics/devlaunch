@@ -34,8 +34,8 @@ source:
 
 build:
   number: 0
-  # No longer `noarch: python`: as of 0.1.0 the package is two compiled binaries
-  # for linux-64 and carries no Python at all.
+  # No longer `noarch: python`: as of 0.1.0 the package is two compiled binaries,
+  # built natively for linux-64 and linux-aarch64, and carries no Python at all.
   script:
     # Both binaries come out of the `dl` package -- its own `dl`, and an `aid`
     # compiled from `rust/aid/src/main.rs` behind the `wheel` feature, which is
