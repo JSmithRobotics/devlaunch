@@ -505,31 +505,39 @@ jobs:
   # names and a contract change for a row whose subject is one of those;
   # `--print-residual` tells them apart.
   #
-  # Nightly because cargo-public-api's rustdoc-JSON backend needs it; the crates
-  # themselves still build on the stable pin everywhere else. The pinned
-  # version, the `-ss` rationale, the split filter and the list of files to
-  # check all live in the regeneration script, which is also what this job runs
-  # — so what CI checks cannot drift from what a developer regenerates, and a
-  # fourth snapshot needs no workflow edit to be covered.
+  # Rendered by the pinned *stable* toolchain under RUSTC_BOOTSTRAP=1, not by a
+  # nightly -- deliberately, and not merely because this environment lacks one.
+  # `cargo public-api`'s rustdoc-JSON backend wants a nightly toolchain, and
+  # nightly's rustdoc rendering moves on its own: switching toolchains changed
+  # a handful of rows here once with no source change behind it at all (a
+  # `core::io::error::Error` path rendering as `std::io::error::Error`, an
+  # auto-derived impl's bound changing shape), which is exactly the class of
+  # failure -- a red tick nobody's commit caused -- this job exists to not be.
+  # `pixi run public-api` is the one task that installs the pin (skipping the
+  # install once it is already there), assembles that environment, and runs
+  # scripts/public-api-snapshots.sh; this job runs the identical task, so what
+  # CI checks cannot drift from what a developer regenerates with, and a
+  # fourth snapshot needs no workflow edit to be covered. See "The public-API
+  # snapshots" in docs/development.md and scripts/run-public-api.sh's header
+  # for the rest of it.
   public-api:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          cache: true
+          frozen: true
+          environments: default
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
-      - name: Install cargo-public-api (the pin the script names)
-        run: |
-          set -euo pipefail
-          cargo install cargo-public-api --locked \
-            --version "$(scripts/public-api-snapshots.sh --print-pin)"
       - name: The public surface is the snapshots the repo carries
         run: |
           set -euo pipefail
-          scripts/public-api-snapshots.sh "$RUNNER_TEMP/public-api"
+          pixi run public-api "$RUNNER_TEMP/public-api"
           changed=0
           checked=0
           while read -r snapshot; do
@@ -550,10 +558,9 @@ jobs:
           fi
           if [ "$changed" -ne 0 ]; then
             echo "::error::A public surface changed. If the change is deliberate," \
-              "regenerate the snapshots and commit them:" \
-              "scripts/public-api-snapshots.sh (needs a nightly toolchain and the" \
-              "cargo-public-api the script pins; see 'The public-API snapshots' in" \
-              "docs/development.md). A diff in devlaunch-core/public-api.api.txt is a change" \
+              "regenerate the snapshots and commit them: pixi run public-api" \
+              "(installs the pinned cargo-public-api itself; see 'The public-API snapshots'" \
+              "in docs/development.md). A diff in devlaunch-core/public-api.api.txt is a change" \
               "to the promised API — say which. A promised type's methods and impls are" \
               "in there too, under the canonical path they are rendered at, so a diff" \
               "that names a flows:: or domain:: path in that file is still a promise."

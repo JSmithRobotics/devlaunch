@@ -462,8 +462,8 @@ pub fn devlaunch_core::domain::metadata::OsFailure::clone(&self) -> devlaunch_co
 impl core::cmp::Eq for devlaunch_core::domain::metadata::OsFailure
 impl core::cmp::PartialEq for devlaunch_core::domain::metadata::OsFailure
 pub fn devlaunch_core::domain::metadata::OsFailure::eq(&self, &devlaunch_core::domain::metadata::OsFailure) -> bool
-impl core::convert::From<core::io::error::Error> for devlaunch_core::domain::metadata::OsFailure
-pub fn devlaunch_core::domain::metadata::OsFailure::from(core::io::error::Error) -> Self
+impl core::convert::From<std::io::error::Error> for devlaunch_core::domain::metadata::OsFailure
+pub fn devlaunch_core::domain::metadata::OsFailure::from(std::io::error::Error) -> Self
 impl core::fmt::Debug for devlaunch_core::domain::metadata::OsFailure
 pub fn devlaunch_core::domain::metadata::OsFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for devlaunch_core::domain::metadata::OsFailure
@@ -640,9 +640,9 @@ pub fn devlaunch_core::domain::workspace_state::NonEmpty<T>::clone(&self) -> dev
 impl<T: core::cmp::Eq> core::cmp::Eq for devlaunch_core::domain::workspace_state::NonEmpty<T>
 impl<T: core::cmp::PartialEq> core::cmp::PartialEq for devlaunch_core::domain::workspace_state::NonEmpty<T>
 pub fn devlaunch_core::domain::workspace_state::NonEmpty<T>::eq(&self, &devlaunch_core::domain::workspace_state::NonEmpty<T>) -> bool
-impl<T: core::cmp::PartialEq> core::marker::StructuralPartialEq for devlaunch_core::domain::workspace_state::NonEmpty<T>
 impl<T: core::fmt::Debug> core::fmt::Debug for devlaunch_core::domain::workspace_state::NonEmpty<T>
 pub fn devlaunch_core::domain::workspace_state::NonEmpty<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::StructuralPartialEq for devlaunch_core::domain::workspace_state::NonEmpty<T>
 pub mod devlaunch_core::domain::xdg
 pub struct devlaunch_core::domain::xdg::NoHomeDirectory
 impl core::clone::Clone for devlaunch_core::domain::xdg::NoHomeDirectory
@@ -1173,23 +1173,23 @@ impl core::marker::StructuralPartialEq for devlaunch_core::flows::completion::Fi
 pub enum devlaunch_core::flows::completion::InstallError
 pub devlaunch_core::flows::completion::InstallError::CreateRcDirectory
 pub devlaunch_core::flows::completion::InstallError::CreateRcDirectory::path: std::path::PathBuf
-pub devlaunch_core::flows::completion::InstallError::CreateRcDirectory::source: core::io::error::Error
+pub devlaunch_core::flows::completion::InstallError::CreateRcDirectory::source: std::io::error::Error
 pub devlaunch_core::flows::completion::InstallError::CreateRcDirectory::written: devlaunch_core::flows::completion::WrittenScript
 pub devlaunch_core::flows::completion::InstallError::CreateScriptDirectory
 pub devlaunch_core::flows::completion::InstallError::CreateScriptDirectory::path: std::path::PathBuf
-pub devlaunch_core::flows::completion::InstallError::CreateScriptDirectory::source: core::io::error::Error
+pub devlaunch_core::flows::completion::InstallError::CreateScriptDirectory::source: std::io::error::Error
 pub devlaunch_core::flows::completion::InstallError::NoHomeDirectory
 pub devlaunch_core::flows::completion::InstallError::ReadRc
 pub devlaunch_core::flows::completion::InstallError::ReadRc::path: std::path::PathBuf
-pub devlaunch_core::flows::completion::InstallError::ReadRc::source: core::io::error::Error
+pub devlaunch_core::flows::completion::InstallError::ReadRc::source: std::io::error::Error
 pub devlaunch_core::flows::completion::InstallError::ReadRc::written: devlaunch_core::flows::completion::WrittenScript
 pub devlaunch_core::flows::completion::InstallError::WriteRc
 pub devlaunch_core::flows::completion::InstallError::WriteRc::path: std::path::PathBuf
-pub devlaunch_core::flows::completion::InstallError::WriteRc::source: core::io::error::Error
+pub devlaunch_core::flows::completion::InstallError::WriteRc::source: std::io::error::Error
 pub devlaunch_core::flows::completion::InstallError::WriteRc::written: devlaunch_core::flows::completion::WrittenScript
 pub devlaunch_core::flows::completion::InstallError::WriteScript
 pub devlaunch_core::flows::completion::InstallError::WriteScript::path: std::path::PathBuf
-pub devlaunch_core::flows::completion::InstallError::WriteScript::source: core::io::error::Error
+pub devlaunch_core::flows::completion::InstallError::WriteScript::source: std::io::error::Error
 impl devlaunch_core::flows::completion::InstallError
 pub fn devlaunch_core::flows::completion::InstallError::written_script(&self) -> core::option::Option<&devlaunch_core::flows::completion::WrittenScript>
 impl core::convert::From<devlaunch_core::domain::xdg::NoHomeDirectory> for devlaunch_core::flows::completion::InstallError

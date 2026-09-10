@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+#
+# A stand-in for rustup, existing for exactly one caller: `cargo public-api`.
+#
+# Why this is needed at all, not a workaround for something else: `cargo
+# public-api` 0.52.0 (`toolchain::is_probably_stable` in its `src/toolchain.rs`)
+# resolves to toolchain "nightly" whenever `cargo --version` does not itself say
+# "nightly" -- there is no flag to tell it to stay on whatever toolchain is
+# already active, and this repository's pinned toolchain is stable. Once a
+# toolchain is chosen, the `rustdoc-json` crate it depends on
+# (`rustdoc_json::builder::cargo_rustdoc_command`, in its `src/builder.rs`) never
+# runs `cargo` directly for it: it always shells out to
+# `rustup run <toolchain> cargo ...`, after first checking `rustup --version`
+# succeeds. On a stable pin with no real rustup on `PATH` that check fails and
+# the whole command errors out before anything is rendered -- there is no
+# environment variable that skips it either.
+#
+# So the missing piece is not a toolchain: `RUSTC_BOOTSTRAP=1` (set by
+# scripts/run-public-api.sh, which puts this directory on PATH ahead of
+# anything else) is what makes the *stable* rustc this repository already pins
+# accept the unstable rustdoc-JSON flags `cargo public-api` passes it. What is
+# missing is something answering to the name "rustup" at all. This answers
+# exactly the two calls above and nothing else:
+#
+#   rustup --version                    -- exit 0, so the check passes.
+#   rustup run <toolchain> <cmd> [args]  -- drop "run <toolchain>" and exec the
+#                                           rest directly, so "the nightly
+#                                           toolchain" is actually the same
+#                                           stable rustc/cargo already on PATH,
+#                                           running under RUSTC_BOOTSTRAP=1.
+#
+# `rustup show active-toolchain` is also handled, because `cargo public-api`
+# calls it (`toolchain::from_rustup`) to decide whether to print a warning
+# about switching toolchains -- not to decide which toolchain to actually use,
+# which main.rs always resolves to "nightly" on a stable `cargo --version`
+# regardless of this call's answer. Failing it just keeps that warning off.
+#
+# Re-check this file whenever the `cargo public-api` pin in
+# scripts/public-api-snapshots.sh moves: a version that adds a way to stay on
+# the active toolchain would make this shim unnecessary, and a version that
+# calls rustup a third way would need a third case here.
+set -euo pipefail
+
+case "${1:-}" in
+--version)
+  echo "public-api-rustup-shim 0.0.0 (not real rustup; see the comment at the top of this file)"
+  exit 0
+  ;;
+run)
+  # `rustup run <toolchain> <cmd> [args...]`: the toolchain argument names
+  # nothing this shim has, because there is only ever the one stable toolchain
+  # already on PATH, running under RUSTC_BOOTSTRAP=1.
+  shift 2
+  exec "$@"
+  ;;
+show)
+  # `rustup show active-toolchain`: failing is harmless, see the comment above.
+  exit 1
+  ;;
+*)
+  echo "public-api-rustup-shim: unsupported invocation: rustup $*" >&2
+  exit 1
+  ;;
+esac

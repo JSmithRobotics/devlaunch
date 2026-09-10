@@ -109,24 +109,39 @@ method moved nothing and passed. And core's one file mixed the two tiers, which 
 sounds. A change to the promised declarations arrives as one row inside two thousand of internal
 churn, and reads as routine.
 
-Regenerate all three with one command, from the repository root (or by absolute path from
-anywhere, since the script resolves the checkout from its own location):
+Regenerate all three with one command, from anywhere in the repository:
 
 ```bash
-scripts/public-api-snapshots.sh
+pixi run public-api
 ```
 
-That script is also what CI runs, into a scratch tree and then diffing the files it names via
-`--print-files`, so the filter that decides which row is a promise, the `-ss` flag, the pinned
-`cargo-public-api` version and the list of snapshots all exist in exactly one place. Two
-prerequisites, and this repository's devcontainer has neither, so it is a host command: a nightly
-toolchain (cargo-public-api's rustdoc-JSON backend is nightly-only; the crates themselves still
-build on the stable pin) and the pinned tool.
+That installs the pinned `cargo-public-api` the first time it is run (skipping the install once
+that exact pin is already there), assembles the environment described below, and then runs
+`scripts/public-api-snapshots.sh` -- which is also, by way of the same task, what CI runs, into a
+scratch tree and diffing the files it names via `--print-files`. So the filter that decides which
+row is a promise, the `-ss` flag, the pinned `cargo-public-api` version and the list of snapshots
+all exist in exactly one place, and what regenerates them locally and what checks them in CI are
+now the same command in the same environment.
 
-```bash
-rustup toolchain install nightly
-cargo install cargo-public-api --locked --version "$(scripts/public-api-snapshots.sh --print-pin)"
-```
+That environment is worth naming, because it is the answer to "why does this need a nightly
+toolchain if the container has none": it doesn't, on purpose. `cargo public-api`'s rustdoc-JSON
+backend wants a nightly toolchain, but what actually renders these three files is the pinned
+*stable* toolchain everything else here builds on, running with `RUSTC_BOOTSTRAP=1` (which lets
+stable rustc accept the unstable rustdoc-JSON flags) and a small `rustup` shim
+(`scripts/public-api-rustup-shim/`) standing in for the real thing, which `cargo public-api` shells
+out to unconditionally once it has decided it wants a nightly toolchain at all.
+`scripts/run-public-api.sh` is what assembles all of that; its header says exactly what each piece
+is doing and why.
+
+This is a deliberate, permanent choice, not a workaround pending a real nightly setup, and it is
+worth being blunt about the consequence: regenerating these snapshots under an actual nightly
+toolchain instead will **not** reproduce them, and will not report a clean diff. Measured once,
+switching toolchains moved a handful of rows with nothing added, removed, renamed or
+re-signatured -- a `core::io::error::Error` path rendering as `std::io::error::Error`, and a
+derived `StructuralPartialEq` impl's bound changing shape. That is rustdoc rendering drift between
+toolchains, the exact thing the `-ss` flag above exists to keep out of these files, and chasing it
+by re-diffing against a nightly is an afternoon spent on a diff that was never about the surface at
+all. Regenerate with `pixi run public-api`, on the pinned stable toolchain, every time.
 
 Committing a regenerated `public-api.api.txt` is committing a change to the promised contract, so
 say which one in the pull request. `rust/devlaunch-core/tests/public_api_snapshots.rs` holds the two
