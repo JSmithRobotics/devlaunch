@@ -905,22 +905,32 @@ impl ClaudeProfileMount {
 
     /// The `devpod up` flags that bind the profile and point Claude Code at it.
     ///
-    /// Two, and the second is not optional: a bind at a path Claude Code does not read
-    /// is a directory nothing opens. The mount lands only at creation and the env is
-    /// re-applied on every `up`, which is why the target is a constant — the source is
-    /// the only half that varies, so switching profiles is a `recreate` and never a
-    /// state where the two disagree.
+    /// At least two, and the first two are not optional: a bind at a path Claude Code
+    /// does not read is a directory nothing opens. The mount lands only at creation and
+    /// the env is re-applied on every `up`, which is why the target is a constant — the
+    /// source is the only half that varies, so switching profiles is a `recreate` and
+    /// never a state where the two disagree.
+    ///
+    /// Everything after those two is [`dangling_symlink_binds`] -- see there for what a
+    /// profile's top-level symlinks need and why. It has to come *after* the parent
+    /// mount: nested binds land in the order they are given, and a per-link mount is
+    /// only useful shadowing a link the parent bind already put in place. This is why
+    /// the guard below asserts order and not just membership.
     pub(crate) fn up_args(&self) -> Vec<String> {
         match self {
-            Self::Bound { source, .. } => vec![
-                "--mount".to_owned(),
-                format!(
-                    "type=bind,source={},target={CLAUDE_CONFIG_TARGET}",
-                    source.display()
-                ),
-                "--workspace-env".to_owned(),
-                format!("CLAUDE_CONFIG_DIR={CLAUDE_CONFIG_TARGET}"),
-            ],
+            Self::Bound { source, .. } => {
+                let mut args = vec![
+                    "--mount".to_owned(),
+                    format!(
+                        "type=bind,source={},target={CLAUDE_CONFIG_TARGET}",
+                        source.display()
+                    ),
+                    "--workspace-env".to_owned(),
+                    format!("CLAUDE_CONFIG_DIR={CLAUDE_CONFIG_TARGET}"),
+                ];
+                args.extend(dangling_symlink_binds(source));
+                args
+            }
             Self::NotAsked | Self::NotAName { .. } | Self::Missing { .. } => Vec::new(),
         }
     }
@@ -936,6 +946,100 @@ impl ClaudeProfileMount {
     pub(crate) fn is_bound(&self) -> bool {
         matches!(self, Self::Bound { .. })
     }
+}
+
+/// The extra `--mount` flags a profile's top-level symlinks need, one per link
+/// whose target resolves outside the profile.
+///
+/// A profile is mostly symlinks into the operator's real `~/.claude` --
+/// `CLAUDE.md`, `agents`, `skills`, `hooks`, and the rest -- and those targets
+/// are absolute paths into a home the container does not have. The parent bind
+/// above puts the *link* in the container, dangling; a bind of the link's
+/// resolved target at the same position shadows the link with a real directory
+/// and is never followed.
+///
+/// The alternative is one bind of the whole operator `~/.claude` at its own
+/// absolute path, which makes every link resolve for free and is wrong: that
+/// directory's `.credentials.json` is the *default* profile's login, so binding
+/// it in would smuggle a second account's credential into a container
+/// `--claude-profile` was asked to keep it out of. The guard against it is
+/// `the_credential_mount_is_never_readonly_and_the_whole_claude_directory_is_never_mounted`,
+/// which asserts on what must be absent from the argv rather than on what is
+/// present, because a set-membership test passes with both mounts in place.
+///
+/// Each of these is `readonly`. The per-profile credential is the one thing a
+/// container legitimately writes back (a refresh), and that file lives under
+/// the parent bind, never under one of these -- so making these read-only
+/// costs nothing a refresh needs and shrinks what a workspace can reach on the
+/// host to exactly the profile it was given.
+///
+/// Only the top level is walked, deliberately: a symlink nested inside `skills/`
+/// or similar still dangles, and that is a known, separate gap rather than a
+/// promise this covers every layout a profile could have.
+///
+/// Three things make a top-level entry emit nothing here, and each is silent
+/// rather than a warning, because a `dl` launch is not the place to relitigate
+/// how the operator built their `~/.claude`:
+/// - it is not a symlink (a real file or directory belongs to the profile
+///   itself and the parent bind already carries it);
+/// - it is a relative link that resolves to somewhere still inside the
+///   profile (again, the parent bind already carries it); or
+/// - its target does not exist on the host, because binding a missing source
+///   is how devpod fails the *entire* launch, and one stale link must not cost
+///   a workspace the ability to open at all.
+fn dangling_symlink_binds(profile: &Path) -> Vec<String> {
+    // The profile not resolving at all is a state `ensure` has already ruled out
+    // for `Bound` (it requires a directory holding a credential) -- but this
+    // walks a filesystem a moment after that check ran, so treating a surprise
+    // failure here as "nothing to add" rather than panicking costs nothing.
+    let (Ok(canonical_profile), Ok(entries)) =
+        (std::fs::canonicalize(profile), std::fs::read_dir(profile))
+    else {
+        return Vec::new();
+    };
+    // Sorted so the argv is deterministic: `read_dir`'s order is whatever the
+    // filesystem happens to hand back, and a test (or a bug report) comparing
+    // argv byte-for-byte should not depend on that.
+    let mut names: Vec<_> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .collect();
+    names.sort();
+
+    let mut args = Vec::new();
+    for name in names {
+        let link_path = profile.join(&name);
+        // `symlink_metadata` does not follow the link, unlike `metadata` --
+        // this is what lets a real directory or file be told apart from a
+        // symlink instead of being read as whatever it points at.
+        let Ok(meta) = std::fs::symlink_metadata(&link_path) else {
+            continue;
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        // `canonicalize` both resolves the link and confirms the target exists;
+        // a target missing on the host answers `Err` here and is skipped, per
+        // the doc comment above.
+        let Ok(resolved) = std::fs::canonicalize(&link_path) else {
+            continue;
+        };
+        // A link that stays inside the profile (a relative link to a sibling
+        // entry, most likely) needs nothing: the parent bind already carries it.
+        if resolved.starts_with(&canonical_profile) {
+            continue;
+        }
+        // The link's own position under the parent bind is the target, so the
+        // bind lands on top of the link rather than beside it, and the link is
+        // shadowed rather than followed.
+        args.push("--mount".to_owned());
+        args.push(format!(
+            "type=bind,source={},target={CLAUDE_CONFIG_TARGET}/{},readonly",
+            resolved.display(),
+            name.to_string_lossy(),
+        ));
+    }
+    args
 }
 
 /// Whether a container can be put on the host's shared pixi package cache.
@@ -7156,6 +7260,169 @@ mod tests {
                 format!("CLAUDE_CONFIG_DIR={CLAUDE_CONFIG_TARGET}"),
             ]
         );
+    }
+
+    /// A profile built to look like the real one the plan describes: three
+    /// top-level entries that dangle (an absolute symlink to a directory, one to
+    /// a file, and one whose target has been removed), one that does not (a
+    /// relative link staying inside the profile), and the credential itself,
+    /// which is a real file and never a link.
+    struct SymlinkedProfile {
+        _operator_home: tempfile::TempDir,
+        _profiles_root: tempfile::TempDir,
+        profile: PathBuf,
+        agents: PathBuf,
+    }
+
+    fn a_profile_with_dangling_symlinks() -> SymlinkedProfile {
+        let operator_home = tempfile::tempdir().expect("a fake operator home");
+        let dot_claude = operator_home.path().join(".claude");
+        let agents = dot_claude.join("agents");
+        std::fs::create_dir_all(&agents).expect("the operator's agents directory");
+        std::fs::write(dot_claude.join("CLAUDE.md"), "instructions").expect("the operator's file");
+
+        let profiles_root = tempfile::tempdir().expect("a scratch profiles root");
+        let profile = profiles_root.path().join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{}").expect("a credential");
+
+        // Dangles: an absolute link to a directory outside the profile.
+        std::os::unix::fs::symlink(&agents, profile.join("agents")).expect("the agents link");
+        // Dangles: an absolute link to a file outside the profile.
+        std::os::unix::fs::symlink(dot_claude.join("CLAUDE.md"), profile.join("CLAUDE.md"))
+            .expect("the CLAUDE.md link");
+        // Does not dangle: relative, and stays inside the profile.
+        std::os::unix::fs::symlink(".credentials.json", profile.join("local"))
+            .expect("a relative link inside the profile");
+        // Does not dangle because there is nothing to bind: the target was removed.
+        std::os::unix::fs::symlink(dot_claude.join("gone"), profile.join("gone"))
+            .expect("a dangling-target link");
+
+        SymlinkedProfile {
+            _operator_home: operator_home,
+            _profiles_root: profiles_root,
+            profile,
+            agents,
+        }
+    }
+
+    fn bound_mount_for(profile: &Path) -> ClaudeProfileMount {
+        ClaudeProfileMount::Bound {
+            name: "bear".to_owned(),
+            source: profile.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn a_dangling_top_level_symlink_gets_its_own_readonly_mount() {
+        let scene = a_profile_with_dangling_symlinks();
+        let args = bound_mount_for(&scene.profile).up_args();
+
+        let agents_target = format!("{CLAUDE_CONFIG_TARGET}/agents");
+        let expected = format!(
+            "type=bind,source={},target={agents_target},readonly",
+            scene.agents.display()
+        );
+        assert!(
+            args.contains(&expected),
+            "expected an agents mount in {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_relative_symlink_that_stays_inside_the_profile_emits_nothing() {
+        let scene = a_profile_with_dangling_symlinks();
+        let args = bound_mount_for(&scene.profile).up_args();
+
+        assert!(
+            !args.iter().any(|arg| arg.contains("/local,")),
+            "a relative in-profile link must not get its own mount: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_symlink_whose_target_is_missing_on_the_host_emits_nothing() {
+        let scene = a_profile_with_dangling_symlinks();
+        let args = bound_mount_for(&scene.profile).up_args();
+
+        assert!(
+            !args.iter().any(|arg| arg.contains("/gone,")),
+            "binding a missing source fails the whole devpod launch: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_real_file_in_the_profile_emits_nothing() {
+        let scene = a_profile_with_dangling_symlinks();
+        let args = bound_mount_for(&scene.profile).up_args();
+
+        assert!(
+            !args.iter().any(|arg| arg.contains(".credentials.json,")),
+            ".credentials.json is a real file the parent bind already carries: {args:?}"
+        );
+    }
+
+    #[test]
+    fn the_parent_profile_mount_lands_before_any_symlink_mount() {
+        // Order, not membership: nested binds apply in the order they are given,
+        // so a per-link mount only works landing after the parent mount that put
+        // the dangling link there in the first place.
+        let scene = a_profile_with_dangling_symlinks();
+        let args = bound_mount_for(&scene.profile).up_args();
+
+        let parent_index = args
+            .iter()
+            .position(|arg| arg == "--mount")
+            .expect("the parent mount flag");
+        let parent_value = &args[parent_index + 1];
+        assert!(
+            !parent_value.contains("readonly"),
+            "the parent bind must stay writable for credential refresh: {parent_value}"
+        );
+
+        let first_link_index = args
+            .iter()
+            .position(|arg| arg.contains("readonly"))
+            .expect("at least one dangling link in this fixture");
+        assert!(
+            first_link_index > parent_index,
+            "the parent mount ({parent_index}) must precede every link mount \
+             (first at {first_link_index}): {args:?}"
+        );
+    }
+
+    #[test]
+    fn the_credential_mount_is_never_readonly_and_the_whole_claude_directory_is_never_mounted() {
+        // The two things a membership test on the argv would miss: nothing here
+        // may say the credential mount is read-only, and nothing may name the
+        // operator's whole `~/.claude` as a mount source, which would put the
+        // *default* profile's login into a container launched as a different one.
+        let scene = a_profile_with_dangling_symlinks();
+        let args = bound_mount_for(&scene.profile).up_args();
+
+        let dot_claude = scene
+            .agents
+            .parent()
+            .expect("agents lives directly under .claude")
+            .to_path_buf();
+        // Exact-match the mount-source clause rather than substring-searching for
+        // the path, since every legitimate mount here (e.g. `.../.claude/agents`)
+        // has `.../.claude` as a *prefix* of its source and would otherwise trip
+        // a substring check that was never asking the right question.
+        let whole_claude_source = format!("source={},target=", dot_claude.display());
+        assert!(
+            !args.iter().any(|arg| arg.contains(&whole_claude_source)),
+            "the operator's whole .claude directory must never be a mount source: {args:?}"
+        );
+
+        for arg in &args {
+            if arg.contains(".credentials.json") {
+                assert!(
+                    !arg.contains("readonly"),
+                    "the credential mount must stay writable for refresh: {arg}"
+                );
+            }
+        }
     }
 
     #[test]
