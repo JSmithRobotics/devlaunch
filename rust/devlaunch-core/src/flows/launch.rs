@@ -247,6 +247,20 @@ pub struct Host {
     /// ([`crate::domain::xdg::claude_profiles_root`]): `--purge` deletes the cache
     /// entire, and a login is not a cache.
     pub(crate) claude_profiles_root: Option<PathBuf>,
+    /// The unnamed login's own configuration directory: `$CLAUDE_CONFIG_DIR`, else
+    /// `$HOME/.claude`, else nothing on a host that names neither.
+    ///
+    /// Carried for the reason [`Self::claude_profiles_root`] is: the decision that reads
+    /// it is then a function of this struct, so a test states the machine it means
+    /// instead of mutating an environment every other test in the binary shares.
+    ///
+    /// It exists because `--claude-profile default` binds this directory, exactly as a
+    /// named profile binds its own. Before, `default` bound nothing at all -- and the
+    /// consequence was quiet: `CLAUDE_CONFIG_DIR` went unset in the container, so Claude
+    /// Code looked for the user's `CLAUDE.md`, agents, skills, hooks and commands under
+    /// a container `$HOME` that has none of them, and found nothing. The credential was
+    /// forwarded and everything else was silently absent.
+    pub(crate) claude_config_dir: Option<PathBuf>,
     /// Everything devlaunch stores: the launch locks, the shared pixi cache and
     /// the context-options cache all hang off this.
     pub(crate) cache_dir: PathBuf,
@@ -289,6 +303,7 @@ impl Host {
             ssh_auth_sock: crate::osext::env_str(SSH_AUTH_SOCK_VAR),
             home: crate::osext::home_dir(),
             claude_profiles_root: crate::domain::xdg::claude_profiles_root().ok(),
+            claude_config_dir: claude::unnamed_config_dir_from_process(),
             cache_dir: cache_dir.into(),
             devpod_home: DevpodHome::locate(),
         }
@@ -871,13 +886,32 @@ impl ClaudeProfileMount {
         let Some(named) = host.claude.profile.as_deref() else {
             return Self::NotAsked;
         };
-        // `default` names the login this host uses anyway, and `resolve_token` answers
-        // it *without* consulting a directory -- so there is nothing here to bind, and
-        // `<root>/default/` is a directory the listing refuses to offer for the same
-        // reason. Not `NotAName`: the name is a real one and a launch naming it is
-        // ordinary, it simply asks for the forwarded ambient login rather than a mount.
+        // `default` names the login this host uses anyway, so what it binds is that
+        // login's own configuration directory -- `$CLAUDE_CONFIG_DIR`, else
+        // `$HOME/.claude` -- and never `<root>/default/`, which is a directory the
+        // listing refuses to offer and `resolve_token` answers without consulting.
+        //
+        // It used to bind nothing, on the reasoning that the forwarded token is the
+        // whole of what `default` means. That was true of the *credential* and false of
+        // everything beside it: with no bind there is no `CLAUDE_CONFIG_DIR` in the
+        // container, so Claude Code resolves the user's `CLAUDE.md`, agents, skills,
+        // hooks and commands under a container `$HOME` that holds none of them. A
+        // workspace opened on `default` therefore ran with no instructions at all, and
+        // said nothing about it. Binding here is what makes the two profiles agree.
         if named == crate::flows::claude_profiles::DEFAULT_PROFILE {
-            return Self::NotAsked;
+            // Falling back to the old behaviour rather than refusing is deliberate and
+            // is the whole of what keeps this change additive. A host whose unnamed
+            // login keeps its credential somewhere this cannot see -- an API key in the
+            // environment, a credential store -- still launches exactly as it did
+            // before, with the token forwarded and nothing mounted. Only a host that
+            // has a directory worth binding gets one.
+            return match host.claude_config_dir.as_deref() {
+                Some(source) if crate::clients::claude::has_credential(source) => Self::Bound {
+                    name: named.to_owned(),
+                    source: source.to_path_buf(),
+                },
+                _ => Self::NotAsked,
+            };
         }
         let Some(source) =
             crate::clients::claude::profile_dir(host.claude_profiles_root.as_deref(), named)
@@ -7214,17 +7248,61 @@ mod tests {
         assert!(!mount.is_bound());
     }
 
-    /// `--claude-profile default` binds nothing, and the directory it would have
-    /// joined is one no other component will touch.
+    /// `--claude-profile default` binds the unnamed login's own configuration
+    /// directory, exactly as a named profile binds its own.
+    ///
+    /// The point is that the two behave alike. Without a bind there is no
+    /// `CLAUDE_CONFIG_DIR` in the container, so Claude Code looks for the user's
+    /// `CLAUDE.md`, agents, skills, hooks and commands under a container `$HOME` that
+    /// has none of them: a workspace opened on `default` ran with no instructions at
+    /// all and said nothing about it.
+    #[test]
+    fn the_default_profile_binds_the_unnamed_config_directory() {
+        let config = tempfile::tempdir().expect("a scratch config dir");
+        std::fs::write(config.path().join(".credentials.json"), "{}").expect("a credential");
+        std::fs::write(config.path().join("CLAUDE.md"), "# instructions").expect("memory");
+
+        let scene = Scene::new();
+        let host = Host {
+            claude: crate::clients::claude::HostEnv {
+                profile: Some("default".to_owned()),
+                ..Default::default()
+            },
+            claude_config_dir: Some(config.path().to_path_buf()),
+            ..scene.host.clone()
+        };
+
+        let mount = ClaudeProfileMount::ensure(&host);
+        assert_eq!(
+            mount,
+            ClaudeProfileMount::Bound {
+                name: "default".to_owned(),
+                source: config.path().to_path_buf(),
+            },
+            "default must bind like any other profile"
+        );
+
+        // The half that actually reaches Claude Code: the same two flags a named
+        // profile produces, so `CLAUDE.md` and everything beside it is found.
+        let args = mount.up_args();
+        assert!(
+            args.windows(2).any(|pair| pair[0] == "--workspace-env"
+                && pair[1] == format!("CLAUDE_CONFIG_DIR={CLAUDE_CONFIG_TARGET}")),
+            "default must point CLAUDE_CONFIG_DIR at the bind: {args:?}"
+        );
+    }
+
+    /// `default` still never binds `<root>/default/`.
     ///
     /// Three components have to agree about what a profile is. `resolve_token` answers
     /// `default` without consulting a directory (`clients::claude::DEFAULT_PROFILE`),
     /// and `claude_profiles::summarise` refuses to offer a directory of that name via
-    /// `profile_name_is_offerable`. A mount that bound `<root>/default/` regardless
-    /// would be the only one of the three that disagreed -- and it would win, because a
-    /// credentials file beats the forwarded token.
+    /// `profile_name_is_offerable`. A mount that bound `<root>/default/` would be the
+    /// only one of the three that disagreed -- and it would win, because a credentials
+    /// file beats the forwarded token. What `default` binds is the *unnamed config
+    /// directory*, which is a different path entirely.
     #[test]
-    fn the_default_profile_names_the_ambient_login_and_binds_nothing() {
+    fn the_default_profile_never_binds_a_directory_of_that_name_under_the_root() {
         let root = tempfile::tempdir().expect("a scratch profiles root");
         let directory = root.path().join("default");
         std::fs::create_dir_all(&directory).expect("the directory");
@@ -7234,6 +7312,9 @@ mod tests {
         )
         .expect("a credential");
 
+        let config = tempfile::tempdir().expect("a scratch config dir");
+        std::fs::write(config.path().join(".credentials.json"), "{}").expect("a credential");
+
         let scene = Scene::new();
         let host = Host {
             claude: crate::clients::claude::HostEnv {
@@ -7241,17 +7322,62 @@ mod tests {
                 ..Default::default()
             },
             claude_profiles_root: Some(root.path().to_path_buf()),
+            claude_config_dir: Some(config.path().to_path_buf()),
             ..scene.host.clone()
         };
 
-        let mount = ClaudeProfileMount::ensure(&host);
-
+        let source = match ClaudeProfileMount::ensure(&host) {
+            ClaudeProfileMount::Bound { source, .. } => source,
+            other => panic!("expected a bind, got {other:?}"),
+        };
         assert_eq!(
-            mount,
-            ClaudeProfileMount::NotAsked,
-            "a credential sitting in <root>/default/ is still not a profile to bind"
+            source,
+            config.path(),
+            "a credential sitting in <root>/default/ is still not what default names"
         );
-        assert_eq!(mount.up_args(), Vec::<String>::new());
+    }
+
+    /// A host with nothing to bind for `default` launches exactly as it did before.
+    ///
+    /// What keeps the change additive. An unnamed login whose credential lives
+    /// somewhere this cannot see -- an API key in the environment, a credential store --
+    /// must not start refusing, or begin mounting a directory with no login in it.
+    #[test]
+    fn the_default_profile_falls_back_to_binding_nothing_when_there_is_nothing_to_bind() {
+        let scene = Scene::new();
+        let asked = crate::clients::claude::HostEnv {
+            profile: Some("default".to_owned()),
+            ..Default::default()
+        };
+
+        // No config directory at all.
+        let host = Host {
+            claude: asked.clone(),
+            claude_config_dir: None,
+            ..scene.host.clone()
+        };
+        assert_eq!(
+            ClaudeProfileMount::ensure(&host),
+            ClaudeProfileMount::NotAsked
+        );
+
+        // A directory, but no credential in it: binding it would hand the container a
+        // logged-out configuration and call it success.
+        let empty = tempfile::tempdir().expect("a scratch config dir");
+        let host = Host {
+            claude: asked,
+            claude_config_dir: Some(empty.path().to_path_buf()),
+            ..scene.host.clone()
+        };
+        assert_eq!(
+            ClaudeProfileMount::ensure(&host),
+            ClaudeProfileMount::NotAsked,
+            "a config directory with no login is not worth binding"
+        );
+        assert_eq!(
+            ClaudeProfileMount::ensure(&host).up_args(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
