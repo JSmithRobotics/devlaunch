@@ -387,10 +387,13 @@ config file does:
   original on last-key-wins, and before the closing brace it wins and takes every
   project you had with it.
 
-A container with no `python3` gets nothing and says nothing about it. The prompt
-appears, exactly as it did before, because installing an interpreter on every cold
-launch to spare one keypress is the wrong trade, and a stage that failed would warn
-on every launch of an image that is working correctly.
+A container with no `python3` gets nothing *from the merge* and says nothing about
+it. Where a `.claude.json` is already there, which is what a mount of the host's
+config is, the prompt appears exactly as it did before: installing an interpreter
+on every cold launch to spare one keypress is the wrong trade, and a stage that
+failed would warn on every launch of an image that is working correctly. The other
+half needs no interpreter, so a virgin config directory is still seeded with the
+workspace recorded in it and does not prompt.
 
 The path it records is the pass's own working directory, resolved, and never one
 composed from the workspace id. A `devpod ssh` given no `--workdir` lands in the

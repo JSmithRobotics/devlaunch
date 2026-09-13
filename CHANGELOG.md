@@ -33,10 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name. A path holding a quote or a backslash is left unrecorded rather than
   escaped.
 
-  A container with no `python3` gets nothing and says nothing about it: the prompt
-  appears as it did before. Installing an interpreter on every cold launch to
-  spare one keypress is the wrong trade, and a stage that failed would warn on
-  every launch of an image that is working correctly.
+  A container with no `python3` gets nothing from the merge and says nothing about
+  it, so where a `.claude.json` is already there the prompt appears as it did
+  before. Installing an interpreter on every cold launch to spare one keypress is
+  the wrong trade, and a stage that failed would warn on every launch of an image
+  that is working correctly. The seed needs no interpreter, so a virgin config
+  directory is recorded either way.
 
   This records a decision rather than only fixing a nuisance: **the container is
   the trust boundary.** A fresh clone of somebody else's repo is trusted because

@@ -1238,7 +1238,12 @@ try:
     fd, scratch = tempfile.mkstemp(dir=os.path.dirname(path) or ".")
     with os.fdopen(fd, "w", encoding="utf-8") as opened:
         opened.write(body)
-    os.chmod(scratch, os.stat(path).st_mode & 0o7777)
+    before = os.stat(path)
+    os.chmod(scratch, before.st_mode & 0o7777)
+    try:
+        os.chown(scratch, before.st_uid, before.st_gid)
+    except OSError:
+        pass
     os.replace(scratch, path)
 except OSError:
     if scratch is not None:
@@ -3440,7 +3445,12 @@ try:
     fd, scratch = tempfile.mkstemp(dir=os.path.dirname(path) or ".")
     with os.fdopen(fd, "w", encoding="utf-8") as opened:
         opened.write(body)
-    os.chmod(scratch, os.stat(path).st_mode & 0o7777)
+    before = os.stat(path)
+    os.chmod(scratch, before.st_mode & 0o7777)
+    try:
+        os.chown(scratch, before.st_uid, before.st_gid)
+    except OSError:
+        pass
     os.replace(scratch, path)
 except OSError:
     if scratch is not None:
@@ -8368,10 +8378,13 @@ fi
                 // The same default and the same reasoning, with a narrower cost: a
                 // merge that would not go in is one trust prompt on the first launch
                 // of this workspace, which is the state every launch was in before
-                // the stage existed. The cases that are *not* a failure — no
-                // `python3`, no file, nothing safe to key on — exit 0 and never
-                // reach this, which is what keeps a warning meaning "this container
-                // would not take the write".
+                // the stage existed. What can actually reach the level is narrower
+                // than that: no `python3`, no file, nothing safe to key on, a shape
+                // the merge will not write into, and — since the config directory
+                // it cannot write became an exit 0 — a replace that was refused, all
+                // return success. What is left is the interpreter itself dying, so
+                // a warning here reads as "python3 did not run", not as "this
+                // container would not take the write".
                 (TRUST_STAGE, FailureLevel::Warning),
             ]
         );
