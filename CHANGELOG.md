@@ -19,13 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pixi install --frozen -e <name>`, which restores 5507 of 5507 files in 0.52 s
   with every proxy variable pointed at a dead port.
 
-  A lockfile with no `pixi.toml` or `pyproject.toml` beside it is no longer read
-  as a recipe at all, for the same reason. `pixi install` in a directory holding a
-  lockfile alone exits with `could not find pixi.toml or pyproject.toml with
-  tool.pixi`, so the environment stands and is named with its bytes instead of
-  being offered a command nobody can carry out. Only the manifest's *presence* is
-  read, so a stale manifest changes nothing: derivability is still the lock's
-  answer.
+  A lockfile no pixi project owns is no longer read as a recipe at all, for the
+  same reason: the environment stands and is named with its bytes instead of
+  being offered a command nobody can carry out. The question asked is pixi's own
+  rather than a file name. `pixi install` in a directory holding a lockfile alone
+  exits with `could not find pixi.toml or pyproject.toml with tool.pixi`, and
+  beside a `pyproject.toml` carrying no `[tool.pixi]` table it exits with `found
+  pyproject.toml without tool.pixi section` -- the shape a repository leaves
+  behind when it migrates off pixi, which is exactly the abandoned environment
+  this path goes looking for. Whether that table is *there* is the whole of what
+  is read out of the manifest, so a stale manifest changes nothing: derivability
+  is still the lock's answer.
 
 ### Fixed
 

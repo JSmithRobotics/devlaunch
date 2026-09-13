@@ -108,9 +108,10 @@ const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
 /// it. See the module header for why `manifest_path` is not the other one.
 const PIXI_RECORD: [&str; 2] = ["conda-meta", "pixi"];
 const PIXI_LOCK: &str = "pixi.lock";
-/// The manifests pixi accepts beside a lockfile. Their **presence** is read and
-/// never their contents: see [`project_above`].
-const PIXI_MANIFESTS: [&str; 2] = ["pixi.toml", "pyproject.toml"];
+/// The two manifest names pixi looks for beside a lockfile. Which of them is
+/// enough on its own, and what the other one has to carry, is [`a_pixi_project`].
+const PIXI_TOML: &str = "pixi.toml";
+const PYPROJECT_TOML: &str = "pyproject.toml";
 
 /// Whether the program that created `directory` declared it regenerable.
 ///
@@ -183,11 +184,15 @@ pub enum NoRecipe {
     /// A reader recognised it and its lockfile is not there. Measured: with the
     /// lock absent, `pixi install --frozen --offline` restores 0 files.
     LockfileAbsent,
-    /// A lockfile is there and the manifest that goes with it is not, so the
-    /// command that would re-derive the directory cannot run at all. Measured:
-    /// `pixi install -e default` in a directory holding a `pixi.lock` and
-    /// nothing else exits with `could not find pixi.toml or pyproject.toml with
-    /// tool.pixi`. A recipe nobody can carry out is not a recipe.
+    /// A lockfile is there and no pixi project owns it, so the command that
+    /// would re-derive the directory cannot run at all. Two shapes reach this,
+    /// and pixi refuses both as totally: measured, `pixi install --frozen -e
+    /// default` in a directory holding a `pixi.lock` and nothing else exits with
+    /// `could not find pixi.toml or pyproject.toml with tool.pixi`, and beside a
+    /// `pyproject.toml` carrying no `[tool.pixi]` table it exits with `found
+    /// pyproject.toml without tool.pixi section`. A recipe nobody can carry out
+    /// is not a recipe. What separates the two shapes from a project is
+    /// [`a_pixi_project`].
     ManifestAbsent,
     /// The nearest lockfile is one an *ancestor* owns, and the environment it
     /// would install is a different directory from this one.
@@ -225,8 +230,9 @@ impl NoRecipe {
                 "there is no lockfile inside this worktree to re-derive it from".to_owned()
             }
             Self::ManifestAbsent => {
-                "the lockfile inside this worktree has no pixi.toml or pyproject.toml beside \
-                 it, so nothing here can carry out the install that would put it back"
+                "the lockfile inside this worktree has no pixi.toml or pyproject.toml with a \
+                 [tool.pixi] table beside it, so nothing here can carry out the install that \
+                 would put it back"
                     .to_owned()
             }
             Self::LockfileRebuildsAnotherDirectory { environment } => format!(
@@ -610,23 +616,24 @@ fn environment_name(record: &serde_json::Value) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
-/// The nearest `pixi.lock` **with a manifest beside it**, at or above `tag` and
-/// never above `site`.
+/// The nearest `pixi.lock` **a pixi project owns**, at or above `tag` and never
+/// above `site`.
 ///
-/// The manifest is required because the pointer the plan prints has to be a
-/// command that runs, and it is read for **existence only**: `pixi install`
-/// needs a `pixi.toml` or a `pyproject.toml` to know what project it is in, and
-/// a directory holding a lockfile alone fails with `could not find pixi.toml or
-/// pyproject.toml with tool.pixi`. Nothing is parsed out of it, which is what
-/// keeps the deliberate rule intact — derivability is decided by the lock, so a
-/// *stale* manifest still re-derives what is on disk.
+/// The project is required because the pointer the plan prints has to be a
+/// command that runs: `pixi install` needs a manifest to know what project it
+/// is in, and a directory holding a lockfile alone fails with `could not find
+/// pixi.toml or pyproject.toml with tool.pixi`. What counts as one is
+/// [`a_pixi_project`], which asks pixi's question rather than matching a file
+/// name, and reads nothing out of the manifest beyond that — so the deliberate
+/// rule holds: derivability is decided by the lock, and a *stale* manifest
+/// still re-derives what is on disk.
 ///
-/// A bare lockfile with no manifest does not stop the walk, because the real
-/// project may be a level up. It is remembered, so the refusal can say which of
-/// the two things is missing rather than reporting the wrong one. Finding a
-/// project above is not the same as that project re-deriving the tag, and this
-/// function does not decide that: [`pixi_recipe`] asks separately whether the
-/// lock it got back is the one that rebuilds *this* directory.
+/// A lockfile no project owns does not stop the walk, because the real project
+/// may be a level up. It is remembered, so the refusal can say which of the two
+/// things is missing rather than reporting the wrong one. Finding a project
+/// above is not the same as that project re-deriving the tag, and this function
+/// does not decide that: [`pixi_recipe`] asks separately whether the lock it got
+/// back is the one that rebuilds *this* directory.
 fn project_above(tag: &Path, site: &Path) -> Result<PathBuf, NoRecipe> {
     let mut at = tag;
     let mut saw_a_lock = false;
@@ -634,10 +641,7 @@ fn project_above(tag: &Path, site: &Path) -> Result<PathBuf, NoRecipe> {
         let candidate = at.join(PIXI_LOCK);
         if candidate.is_file() {
             saw_a_lock = true;
-            if PIXI_MANIFESTS
-                .iter()
-                .any(|manifest| at.join(manifest).is_file())
-            {
+            if a_pixi_project(at) {
                 return Ok(candidate);
             }
         }
@@ -653,6 +657,40 @@ fn project_above(tag: &Path, site: &Path) -> Result<PathBuf, NoRecipe> {
         NoRecipe::ManifestAbsent
     } else {
         NoRecipe::LockfileAbsent
+    })
+}
+
+/// Whether `directory` is a project `pixi install` will run in.
+///
+/// **Pixi's own question, and the file name is not it.** A `pixi.toml` is a pixi
+/// manifest by existing. A `pyproject.toml` is one only while it carries a
+/// `[tool.pixi]` table, and beside an orphaned lock it usually does not: that is
+/// the shape a repository leaves behind when it migrates off pixi, and it is
+/// exactly the abandoned environment this module goes looking for. Measured
+/// against pixi 0.77.0, `pixi install --frozen -e default` in such a directory
+/// exits with `found pyproject.toml without tool.pixi section` — a refusal as
+/// total as no manifest at all, which is why both land on the same arm.
+///
+/// The table's **presence** is the whole of what is read out of it, so the
+/// deliberate rule survives: derivability is the lock's answer, and a *stale*
+/// manifest still re-derives what is on disk. Asking whether the table is there
+/// is not deriving anything from it; it is asking whether pixi will recognise
+/// the directory as a project at all.
+///
+/// A `pyproject.toml` that will not parse answers no, because pixi would not
+/// read it either.
+fn a_pixi_project(directory: &Path) -> bool {
+    if directory.join(PIXI_TOML).is_file() {
+        return true;
+    }
+    let Ok(text) = std::fs::read_to_string(directory.join(PYPROJECT_TOML)) else {
+        return false;
+    };
+    text.parse::<toml::Table>().is_ok_and(|manifest| {
+        manifest
+            .get("tool")
+            .and_then(|tool| tool.get("pixi"))
+            .is_some()
     })
 }
 

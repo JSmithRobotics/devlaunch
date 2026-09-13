@@ -520,6 +520,68 @@ fn a_lockfile_with_no_manifest_beside_it_is_a_recipe_nobody_can_carry_out() {
 }
 
 #[test]
+fn a_pyproject_that_is_not_a_pixi_project_is_not_the_manifest_beside_the_lock() {
+    // The filename is not the question pixi asks. Measured against pixi 0.77.0:
+    // beside a `pixi.lock`, a `pyproject.toml` carrying no `[tool.pixi]` table
+    // exits with `found pyproject.toml without tool.pixi section` -- the same
+    // refusal as no manifest at all, worded differently. A setuptools or poetry
+    // project whose `pixi.toml` was deleted is exactly that shape, and taking
+    // the name alone for the answer would hand it the pointer this rule exists
+    // to withhold: the bytes gone and a command that cannot put them back.
+    let world = World::new();
+    let site = world.site("agent-one");
+    let env = tagged(&site.join(".pixi").join("envs").join("default"));
+    pixi_record(&env, "default");
+    std::fs::write(
+        site.join("pyproject.toml"),
+        "[project]\nname = \"a-project\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("a pyproject pixi does not own");
+    lock_alone(&site, &["default"]);
+
+    let found = world.walk(&site);
+
+    let [Tagged::CouldNotCost { why, .. }] = &found[..] else {
+        panic!("pixi will not install from this directory: {found:?}");
+    };
+    assert_eq!(why, &NoRecipe::ManifestAbsent);
+}
+
+#[test]
+fn a_pyproject_with_a_pixi_table_is_the_manifest_beside_the_lock() {
+    // The other side, so the row above is a reading of the table rather than a
+    // refusal of every `pyproject.toml`. This is the shape this repository
+    // itself ships, and the one the walk has to keep taking.
+    let world = World::new();
+    let site = world.site("agent-one");
+    let env = tagged(&site.join(".pixi").join("envs").join("default"));
+    pixi_record(&env, "default");
+    std::fs::write(
+        site.join("pyproject.toml"),
+        "[project]\nname = \"a-project\"\n\n[tool.pixi.workspace]\nchannels = []\n",
+    )
+    .expect("a pyproject pixi owns");
+    lock_alone(&site, &["default"]);
+
+    let found = world.walk(&site);
+
+    let [Tagged::Derivable(derivative)] = &found[..] else {
+        panic!("a pixi project written into a pyproject.toml re-derives it: {found:?}");
+    };
+    assert_eq!(
+        derivative.recipe(),
+        &Recipe::PixiEnvironment {
+            environment: "default".to_owned(),
+            lock: crate::flows::agent_worktrees::inside_the_clone(
+                &world.clone_root(),
+                &site.join("pixi.lock")
+            )
+            .expect("the lockfile's place"),
+        }
+    );
+}
+
+#[test]
 fn a_bare_lockfile_below_the_project_does_not_stop_the_walk() {
     // A `pixi.lock` somebody copied into a subdirectory has no manifest beside
     // it, and the walk does not take it and give up: it keeps going up and

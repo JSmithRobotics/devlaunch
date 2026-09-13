@@ -606,8 +606,8 @@ never a second line for the same bytes.
 **A tag says regenerable; it does not say by what.** So a tagged directory is
 reclaimed only when a reader on this side answers with the thing that re-derives
 it, and one reader is implemented. It reads pixi's own `conda-meta/pixi` for the
-environment name, then walks up inside the worktree for a `pixi.lock` with a
-manifest beside it whose `environments:` map names it. Measured: a lock that
+environment name, then walks up inside the worktree for a `pixi.lock` a pixi
+project owns whose `environments:` map names it. Measured: a lock that
 names the environment restores 5507 of 5507 files in 0.52 s with no network, and
 does it with every proxy variable pointed at a dead port; a *stale* lock still
 restores what was there, because the environment on disk came from that lock; a
@@ -619,12 +619,17 @@ reader recognises stands the same way.
 **The command the plan prints is the command every measurement was taken with**,
 `pixi install --frozen -e <name>`. Without `--frozen`, plain `pixi install`
 compares the lock's hash to the manifest and re-solves, which is network, and the
-stale-lock case above is exactly the one this reclaims. And a lockfile with no
-manifest beside it is not treated as a recipe at all, because the command would
-not run: `pixi install` in a directory holding a lockfile alone exits with `could
-not find pixi.toml or pyproject.toml with tool.pixi`. A pointer somebody reads
-*after* the bytes are gone has to be a command that works. The manifest's
-**presence** is the whole of what is read, so a stale manifest changes nothing:
+stale-lock case above is exactly the one this reclaims. And a lockfile no pixi
+project owns is not treated as a recipe at all, because the command would not
+run. Two shapes reach that, and the question asked is pixi's own rather than a
+file name: `pixi install` in a directory holding a lockfile alone exits with
+`could not find pixi.toml or pyproject.toml with tool.pixi`, and beside a
+`pyproject.toml` carrying no `[tool.pixi]` table it exits with `found
+pyproject.toml without tool.pixi section`. The second is the shape a repository
+leaves behind when it migrates off pixi, which is the abandoned environment this
+whole path goes looking for. A pointer somebody reads *after* the bytes are gone
+has to be a command that works. Whether that table is **there** is the whole of
+what is read out of the manifest, so a stale manifest changes nothing:
 derivability is the lock's answer.
 
 **A claim reaches the subtree; an account of content does not.** A
