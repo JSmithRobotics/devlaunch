@@ -651,9 +651,10 @@ record and the lockfile again under the lock before anything goes.
 What goes is the tagged directory alone. Never `.pixi`, which carries no tag of
 its own and holds `config.toml`, the one file `.pixi/.gitignore` un-ignores, and
 that is structural rather than lucky: nothing in `dl` spells `.pixi` to achieve
-it. A lockfile re-derives the one directory `pixi install -e <name>` beside it
-would write, which is `<the lockfile's own directory>/.pixi/envs/<name>`, so the
-reader claims a tagged directory only when that path and this one are the same.
+it. A lockfile re-derives the one directory `pixi install --frozen -e <name>`
+beside it would write, which is `<the lockfile's own directory>/.pixi/envs/
+<name>`, so the reader claims a tagged directory only when that path and this one
+are the same.
 A tag planted at the top of a `.pixi` with an environment's record under it fails
 that comparison, because `.pixi` is not `.pixi/envs/default`, and stands. No
 directory name is matched anywhere: what is compared is where pixi would put the
