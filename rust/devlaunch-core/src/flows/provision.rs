@@ -1221,7 +1221,7 @@ if entry.get("hasTrustDialogAccepted") is True:
 entry["hasTrustDialogAccepted"] = True
 projects[key] = entry
 config["projects"] = projects
-body = json.dumps(config)
+body = json.dumps(config, indent=2, ensure_ascii=False)
 scratch = None
 try:
     fd, scratch = tempfile.mkstemp(dir=os.path.dirname(path) or ".")
@@ -3417,7 +3417,7 @@ if entry.get("hasTrustDialogAccepted") is True:
 entry["hasTrustDialogAccepted"] = True
 projects[key] = entry
 config["projects"] = projects
-body = json.dumps(config)
+body = json.dumps(config, indent=2, ensure_ascii=False)
 scratch = None
 try:
     fd, scratch = tempfile.mkstemp(dir=os.path.dirname(path) or ".")
@@ -5749,6 +5749,31 @@ fi
             parsed.pointer("/projects/~1workspaces~1devlaunch-nb98-btvv/allowedTools"),
             Some(&serde_json::json!(["Bash"])),
             "and keeps the rest of its entry"
+        );
+    }
+
+    #[test]
+    fn the_trust_stage_keeps_the_shape_of_the_config_it_merges_into() {
+        // The host's real `.claude.json` is pretty-printed and holds non-ASCII: 283 KB
+        // over 7,984 lines on the machine this was written on. Re-serialising it
+        // compactly rewrites all 7,984 to add one key -- which is the claim the test
+        // above makes and does not check, since it reads values back rather than the
+        // file -- and hands Claude Code a document it rewrites again on next launch.
+        let world = TrustWorld::new(Some(
+            "{\n  \"themeMode\": \"dark\",\n  \"tipsHistory\": {\n    \"caf\u{e9}\": 1\n  }\n}",
+        ));
+
+        world.run();
+
+        assert_eq!(world.trusts(&world.keyed), Some(true.into()));
+        let after = world.read();
+        assert!(
+            after.contains("\n  \""),
+            "the indent the host's file is written with survives: {after}"
+        );
+        assert!(
+            after.contains('\u{e9}'),
+            "and a non-ASCII key is not escaped on the way through: {after}"
         );
     }
 
