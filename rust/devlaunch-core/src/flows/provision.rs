@@ -1115,6 +1115,13 @@ fn workspace_path_lines() -> Vec<String> {
         "home=$(readlink -f \"${HOME:-}\" 2>/dev/null || true)".to_owned(),
         "if [ \"$ws\" = / ] || { [ -n \"$home\" ] && [ \"$ws\" = \"$home\" ]; }; then ws=; fi"
             .to_owned(),
+        // And the floor itself, rather than two of the places its absence was
+        // noticed. `/` and `$HOME` are where a `cd`-ing profile was seen to land,
+        // but nothing stops one landing in `/srv` or a projects folder, and the
+        // entry claims as much from there. A workspace is a clone -- the premise the
+        // stage rests on -- so the git root the walk stops at is the thing to
+        // require. `-e` rather than `-d`: a linked worktree spells it as a file.
+        "if [ ! -e \"$ws/.git\" ]; then ws=; fi".to_owned(),
     ]
 }
 
@@ -3366,6 +3373,7 @@ case "$ws" in /*) ;; *) ws= ;; esac
 case "$ws" in *[!-a-zA-Z0-9_/.@+]*) ws= ;; esac
 home=$(readlink -f "${HOME:-}" 2>/dev/null || true)
 if [ "$ws" = / ] || { [ -n "$home" ] && [ "$ws" = "$home" ]; }; then ws=; fi
+if [ ! -e "$ws/.git" ]; then ws=; fi
 set -C
 if [ -n "$ws" ]; then
   printf '"'"'{"hasCompletedOnboarding":true,"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n'"'"' "$ws" > "$dir/.claude.json"
@@ -3396,6 +3404,7 @@ case "$ws" in /*) ;; *) ws= ;; esac
 case "$ws" in *[!-a-zA-Z0-9_/.@+]*) ws= ;; esac
 home=$(readlink -f "${HOME:-}" 2>/dev/null || true)
 if [ "$ws" = / ] || { [ -n "$home" ] && [ "$ws" = "$home" ]; }; then ws=; fi
+if [ ! -e "$ws/.git" ]; then ws=; fi
 if [ -z "$ws" ]; then exit 0; fi
 prog='"'"'import json, os, sys, tempfile
 path, key = os.path.realpath(sys.argv[1]), sys.argv[2]
@@ -5443,7 +5452,9 @@ fi
         // in, and in a test it is whatever cargo was run from unless it is said.
         let scratch = tempfile::tempdir().expect("a scratch dir");
         let workspace = scratch.path().join("workspaces/devlaunch-main-3j1t");
-        std::fs::create_dir_all(&workspace).expect("a workspace folder");
+        // A clone, because that is what a workspace is and what the trust write now
+        // requires: the git root is the floor the recorded entry stops the walk at.
+        std::fs::create_dir_all(workspace.join(".git")).expect("a workspace folder");
         let run = |home: &Path, config_dir: Option<&Path>| {
             let mut command = std::process::Command::new("bash");
             command
@@ -5648,7 +5659,7 @@ fi
             let home = scratch.path().join("home");
             let workspace = scratch.path().join("workspaces/devlaunch-nb99-hicj");
             std::fs::create_dir_all(&home).expect("a home");
-            std::fs::create_dir_all(&workspace).expect("a workspace folder");
+            std::fs::create_dir_all(workspace.join(".git")).expect("a workspace folder");
             if let Some(config) = config {
                 std::fs::write(home.join(".claude.json"), config).expect("their config");
             }
@@ -5958,6 +5969,43 @@ fi
                 standing.display()
             );
         }
+    }
+
+    #[test]
+    fn a_profile_that_cd_s_outside_a_clone_records_no_trust_either() {
+        // The test above pins the two directories a `cd`-ing login profile was seen
+        // to land in, but the reason it gives is not about those two: the walk up the
+        // tree is floored at the git root, so anywhere outside a repository an entry
+        // claims every directory under it. `/srv`, `/workspaces`, a projects folder
+        // -- a profile can `cd` to any of them and none is on a list of two.
+        //
+        // The workspace is a clone, which is the premise the whole stage rests on, so
+        // the floor the entry needs is the thing to require rather than the two
+        // places its absence was noticed.
+        let world = TrustWorld::new(Some(r#"{"themeMode":"dark"}"#));
+        let elsewhere = world.scratch.path().join("srv");
+        std::fs::create_dir_all(&elsewhere).expect("somewhere for a profile to land");
+        let stood = std::fs::canonicalize(&elsewhere).expect("a resolved directory");
+
+        let answered = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(trust_script())
+            .current_dir(&elsewhere)
+            .env("HOME", &world.home)
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .output()
+            .expect("bash ran");
+        assert!(
+            answered.status.success(),
+            "{}",
+            String::from_utf8_lossy(&answered.stderr)
+        );
+
+        assert_eq!(
+            world.trusts(stood.to_str().expect("a path bash can spell")),
+            None,
+            "a directory with no git root under it has no floor to stop the walk"
+        );
     }
 
     #[test]

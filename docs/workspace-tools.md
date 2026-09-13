@@ -400,13 +400,17 @@ a session will start in, and a repo that sets `workspaceFolder` puts that somewh
 unrecorded rather than escaped: the prompt appears there, and the config file stays
 readable.
 
-Two directories are never recorded, whatever the pass is standing in: `$HOME` and
-`/`. The pass runs under `bash -lc`, so a container's login profile is sourced
-before either stage is given a working directory, and a profile that `cd`s leaves
-it standing somewhere that is not the workspace. An entry on either of those claims
-far more than a workspace: the walk is floored at the git root, so outside a
-repository there is no floor, and trusting `$HOME` trusts every directory under it
-that is not itself a clone.
+Only a git root is recorded, whatever the pass is standing in. The pass runs under
+`bash -lc`, so a container's login profile is sourced before either stage is given
+a working directory, and a profile that `cd`s leaves it standing somewhere that is
+not the workspace. What makes an entry safe to write is the floor the walk stops
+at: outside a repository there is no floor, so an entry there trusts every
+directory under it that is not itself a clone, which is what trusting `$HOME` or
+`/` would do. A workspace is a clone, so requiring the floor and recording the
+workspace are the same requirement, and `/srv` or a projects folder is refused for
+the same reason as those two rather than by not being on a list. `$HOME` and `/`
+are still refused by name, because a machine whose home directory is itself a
+repository would otherwise clear the floor test.
 
 **This says the container is the trust boundary,** which is a policy choice rather
 than only a convenience. A fresh clone of somebody else's repository is trusted
