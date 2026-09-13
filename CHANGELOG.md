@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-09-13
+
 ### Fixed
 
 - **A herdr upgraded in place no longer takes the tab names down with it.**
