@@ -194,15 +194,18 @@ pub enum NoRecipe {
     /// is not a recipe. What separates the two shapes from a project is
     /// [`a_pixi_project`].
     ManifestAbsent,
-    /// The nearest lockfile is one an *ancestor* owns, and the environment it
-    /// would install is a different directory from this one.
+    /// The nearest lockfile a pixi project owns is one an *ancestor* owns, and
+    /// the environment it would install is a different directory from this one.
     ///
     /// `pixi install -e <name>` writes `<the lock's own directory>/.pixi/envs/
     /// <name>`, so a lockfile only re-derives the environment that sits at that
     /// exact place. A vendored project with no lock of its own reaches this by
     /// borrowing the site's, and so does a copied or renamed environment whose
     /// record still names the original: in both, the recipe would rebuild
-    /// somewhere else and leave this directory gone.
+    /// somewhere else and leave this directory gone. A nearer lockfile no
+    /// project owns reaches it too, which is why the sentence says *a pixi
+    /// project owns* rather than simply *the nearest*: [`a_pixi_project`] is
+    /// what the walk stops on, and something nearer may well be sitting there.
     LockfileRebuildsAnotherDirectory { environment: String },
     /// The lockfile is there and does not name this environment. Measured as a
     /// real population — add an environment, install it, drop it from the
@@ -236,9 +239,9 @@ impl NoRecipe {
                     .to_owned()
             }
             Self::LockfileRebuildsAnotherDirectory { environment } => format!(
-                "the nearest lockfile belongs to a directory above it, and its \
-                 `pixi install -e {environment}` would rebuild that one's environment \
-                 rather than this one"
+                "the nearest lockfile a pixi project owns belongs to a directory above it, \
+                 and its `pixi install --frozen -e {environment}` would rebuild that one's \
+                 environment rather than this one"
             ),
             Self::LockfileDoesNotNameIt { environment } => format!(
                 "the lockfile no longer names the environment {environment}, so nothing on \

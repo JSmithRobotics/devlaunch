@@ -609,6 +609,12 @@ fn a_bare_lockfile_below_the_project_does_not_stop_the_walk() {
         },
         "a walk that had stopped at the bare lock would have said the manifest was missing"
     );
+    assert!(
+        why.describe().contains("a pixi project owns"),
+        "the nearest lockfile is `vendor`'s and it is not above anything; what is above \
+         is the nearest one a project owns, and the sentence has to say which: {}",
+        why.describe()
+    );
 }
 
 #[test]
