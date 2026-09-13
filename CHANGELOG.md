@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-09-13
+
 ### Changed
 
 - **The command `dl --prune` prints beside a reclaimable environment is now one
