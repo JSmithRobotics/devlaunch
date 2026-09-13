@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-09-13
+
 ### Added
 
 - **A new workspace no longer asks whether you trust it.** Claude Code keys "Do
