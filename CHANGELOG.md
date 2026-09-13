@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A herdr upgraded in place no longer takes the tab names down with it.**
+  `HERDR_BIN_PATH` is herdr's own export and herdr computes it from
+  `/proc/self/exe` -- once, at start, and never again. `pixi global update herdr`
+  relinks the environment rather than editing the file in place, so a server that
+  was already running holds an unlinked inode from then on, and the kernel spells
+  that `readlink` target `<path> (deleted)`. Those eleven bytes are `readlink`
+  narrating, not a path, and every pane the server goes on to spawn carries them.
+
+  All three readers of the variable then fail, and all three fail quietly. The
+  tab rename spawns a program that is not there and ignores the 127, because a
+  tab label is decoration and may not cost a launch anything -- so the tab keeps
+  herdr's fallback label, which is its *number*, and the launch says nothing about
+  why. The lend refuses with `HERDR_BIN_PATH names X, which this host cannot read`
+  about a binary sitting unharmed at a path eleven bytes shorter, and an agent
+  inside that container is never seen again. Worst of the three, a new pane opened
+  in a workspace's tab asks that binary which panes the tab holds, gets no answer,
+  and cannot tell that from a tab whose session has exited -- so it drops the user
+  on a host shell while the workspace is up and running.
+
+  The suffix is taken back off now, and only on evidence: the stripped path is
+  used when the raw one will not run and the stripped one will. A file genuinely
+  named `foo (deleted)` keeps its name, and an unrunnable path this cannot explain
+  is handed on unchanged so the lend still refuses it *by name*. Falling back to a
+  bare `PATH` lookup is deliberately not the repair -- `HERDR_BIN_PATH` exists
+  because a per-environment herdr need not be the `herdr` on `PATH`, or on `PATH`
+  at all, and the stripped path is that same environment's.
+
 ## [0.47.0] - 2026-09-13
 
 ### Changed

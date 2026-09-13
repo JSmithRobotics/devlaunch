@@ -227,6 +227,77 @@ mod tests {
         assert_eq!(extended.env, base.env);
     }
 
+    // -------------------------------------------------- which herdr to ask
+
+    /// The bug this repair exists for, in the spelling the kernel produces.
+    ///
+    /// `pixi global update herdr` relinks the environment, so the running server's
+    /// `/proc/self/exe` -- read once at start and cached into every pane it spawns
+    /// afterwards -- becomes `<path> (deleted)`. Both readers of the variable then
+    /// hold a path that cannot be executed while the binary sits unharmed at the
+    /// path eleven bytes shorter. Observed on herdr 0.9.0 after an in-place update
+    /// three minutes into a server's life; the tab renames stopped and said
+    /// nothing, because a rename that fails is ignored on purpose.
+    #[test]
+    fn a_binary_the_kernel_called_deleted_is_asked_where_it_actually_is() {
+        let real = "/home/a/.pixi/envs/herdr/bin/herdr";
+        assert_eq!(
+            runnable_binary(Some(&format!("{real} (deleted)")), |path| path == real),
+            Some(real.to_owned())
+        );
+    }
+
+    /// The suffix is only a suffix. A file that genuinely carries those bytes in
+    /// its name runs, and a path that runs is never second-guessed.
+    #[test]
+    fn a_path_that_runs_is_taken_exactly_as_herdr_spelled_it() {
+        let odd = "/opt/herdr (deleted)";
+        assert_eq!(
+            runnable_binary(Some(odd), |path| path == odd),
+            Some(odd.to_owned()),
+            "a real file was renamed out from under itself"
+        );
+        assert_eq!(
+            runnable_binary(Some("/usr/bin/herdr"), |_| true),
+            Some("/usr/bin/herdr".to_owned())
+        );
+    }
+
+    /// Repaired on evidence or not at all: the stripped path has to run too.
+    ///
+    /// Handed on unchanged rather than dropped, so [`Reporting::resolve`] still
+    /// produces a `Reporting` and the lend still refuses by *name* -- "`{BIN_VAR}`
+    /// names X, which this host cannot read" is a better answer than a launch that
+    /// silently decides it was never in a pane.
+    #[test]
+    fn an_unrunnable_path_the_suffix_does_not_explain_is_handed_on_unchanged() {
+        assert_eq!(
+            runnable_binary(Some("/gone/herdr (deleted)"), |_| false),
+            Some("/gone/herdr (deleted)".to_owned())
+        );
+        assert_eq!(
+            runnable_binary(Some("/gone/herdr"), |_| false),
+            Some("/gone/herdr".to_owned())
+        );
+        // The suffix with nothing in front of it. `non_empty` trims first, so what
+        // arrives here is `(deleted)` -- no longer the suffix, and a non-blank
+        // answer this cannot explain, which is the unchanged case and not the
+        // absent one.
+        assert_eq!(
+            runnable_binary(Some(" (deleted)"), |_| false),
+            Some("(deleted)".to_owned())
+        );
+    }
+
+    /// Absent stays absent, and so does a variable exported empty -- the shell's
+    /// way of saying an upstream `command -v` found nothing.
+    #[test]
+    fn no_answer_is_not_repaired_into_one() {
+        assert_eq!(runnable_binary(None, |_| true), None);
+        assert_eq!(runnable_binary(Some(""), |_| true), None);
+        assert_eq!(runnable_binary(Some("   "), |_| true), None);
+    }
+
     // ------------------------------------------------- reporting from inside
 
     fn in_a_pane() -> HostEnv {
@@ -777,6 +848,62 @@ pub(crate) const PANE_VAR: &str = "HERDR_PANE_ID";
 pub(crate) const SOCKET_VAR: &str = "HERDR_SOCKET_PATH";
 pub(crate) const BIN_VAR: &str = "HERDR_BIN_PATH";
 
+/// What the kernel appends to a `/proc/<pid>/exe` target whose binary has since
+/// been unlinked.
+///
+/// Load-bearing spelling, and it is the kernel's: a space, then the word in
+/// parentheses. herdr computes [`BIN_VAR`] from its own `/proc/self/exe` once, at
+/// start, and never reads it again -- so an in-place upgrade under a running
+/// server (`pixi global update herdr`, which relinks the env rather than editing
+/// the file) leaves every pane that server goes on to spawn holding a path with
+/// these eleven bytes glued to the end of it.
+const DELETED_SUFFIX: &str = " (deleted)";
+
+/// [`BIN_VAR`] with the kernel's `(deleted)` note taken back off, where taking it
+/// off names a herdr that is actually there.
+///
+/// The suffix is not a path and never was: it is `readlink` narrating. Left on,
+/// it costs two things that both fail quietly -- [`Reporting`] refuses the lend
+/// because the host "cannot read" a binary that is sitting right there, and the
+/// tab rename in [`crate::flows::launch::HerdrTabRename`] spawns a program that
+/// does not exist and, being decoration, ignores the 127 it gets back. The tab
+/// then keeps herdr's fallback label, which is its *number*, and nothing anywhere
+/// says why.
+///
+/// **Repaired rather than discarded, and only on evidence.** The stripped path is
+/// taken only when the raw one will not run and the stripped one will, so a file
+/// genuinely named `foo (deleted)` keeps its name and an unrunnable path that this
+/// cannot explain is handed on unchanged -- [`Reporting`]'s refusal still names it
+/// and still says what was wrong with it. Falling back to a bare `PATH` lookup
+/// instead is the repair *not* made here: [`BIN_VAR`] exists precisely because a
+/// per-environment herdr (pixi's, here) need not be the `herdr` on `PATH` or on
+/// `PATH` at all, and the stripped path is that same environment's.
+pub(crate) fn runnable_binary(
+    value: Option<&str>,
+    runnable: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let value = non_empty(value)?;
+    if runnable(&value) {
+        return Some(value);
+    }
+    let stripped = value.strip_suffix(DELETED_SUFFIX).filter(|it| runnable(it));
+    Some(stripped.map_or(value.clone(), str::to_owned))
+}
+
+/// [`runnable_binary`] against the filesystem, for the two reads of [`BIN_VAR`].
+///
+/// Split the way [`crate::clients::git::lfs_is_installed`] is: the decision is a
+/// function of its inputs and is asserted as one, and this is the thin call that
+/// supplies the real probe.
+pub(crate) fn binary_from_process() -> Option<String> {
+    runnable_binary(crate::osext::env_str(BIN_VAR).as_deref(), |path| {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path)
+            .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    })
+}
+
 /// Where the lent binary lands, and where the hook looks for it.
 ///
 /// `/usr/local/bin` rather than `~/.local/bin`, where the `gh` and `claude` lends
@@ -820,7 +947,7 @@ impl HostEnv {
             in_pane: crate::osext::env_str(IN_PANE_VAR),
             pane_id: crate::osext::env_str(PANE_VAR),
             socket: crate::osext::env_str(SOCKET_VAR),
-            binary: crate::osext::env_str(BIN_VAR),
+            binary: binary_from_process(),
         }
     }
 }

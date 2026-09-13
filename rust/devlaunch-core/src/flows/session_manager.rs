@@ -362,6 +362,13 @@ pub enum PaneDestination {
 /// from `flows::launch`, where the tab rename put it, and the binary from
 /// `clients::herdr` beside herdr's other exports. Neither is spelled again here.
 ///
+/// The binary goes through [`herdr::binary_from_process`] rather than being read
+/// raw, for the reason every other read of it does: a herdr upgraded under its own
+/// running server exports a path with the kernel's `(deleted)` glued to the end,
+/// and an `ask` against that answers nothing. Nothing here distinguishes that from
+/// a tab whose session has exited, so the pane would quietly open a host shell
+/// while the workspace it belongs to is up.
+///
 /// Nothing is remembered between launches and nothing is written down, which is
 /// the property the whole design turns on. A tab whose session has exited answers
 /// [`PaneDestination::HostShell`] the moment it has, and a tab reused for
@@ -369,7 +376,7 @@ pub enum PaneDestination {
 /// against a tab id would go on naming a workspace nobody in that tab is in.
 pub fn pane_destination(runner: &dyn Runner) -> PaneDestination {
     let tab_id = crate::osext::env_str(launch::HERDR_TAB_VAR);
-    let binary = crate::osext::env_str(herdr::BIN_VAR);
+    let binary = herdr::binary_from_process();
     destination_for(
         runner,
         PaneEnv {
