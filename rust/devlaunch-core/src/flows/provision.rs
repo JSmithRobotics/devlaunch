@@ -1218,11 +1218,15 @@ except Exception:
 if not isinstance(config, dict):
     sys.exit(0)
 projects = config.get("projects")
-if not isinstance(projects, dict):
+if projects is None:
     projects = {}
+if not isinstance(projects, dict):
+    sys.exit(0)
 entry = projects.get(key)
-if not isinstance(entry, dict):
+if entry is None:
     entry = {}
+if not isinstance(entry, dict):
+    sys.exit(0)
 if entry.get("hasTrustDialogAccepted") is True:
     sys.exit(0)
 entry["hasTrustDialogAccepted"] = True
@@ -3416,11 +3420,15 @@ except Exception:
 if not isinstance(config, dict):
     sys.exit(0)
 projects = config.get("projects")
-if not isinstance(projects, dict):
+if projects is None:
     projects = {}
+if not isinstance(projects, dict):
+    sys.exit(0)
 entry = projects.get(key)
-if not isinstance(entry, dict):
+if entry is None:
     entry = {}
+if not isinstance(entry, dict):
+    sys.exit(0)
 if entry.get("hasTrustDialogAccepted") is True:
     sys.exit(0)
 entry["hasTrustDialogAccepted"] = True
@@ -5822,15 +5830,7 @@ fi
         ] {
             let world = TrustWorld::new(Some(shape));
             world.run();
-            match shape {
-                // The one that *is* readable: `projects` is replaced because a string
-                // there is not a map of projects and nothing can be merged into it.
-                // The other keys of the document survive, which is what matters.
-                r#"{"projects": "not an object either"}"# => {
-                    assert_eq!(world.trusts(&world.keyed), Some(true.into()));
-                }
-                _ => assert_eq!(world.read(), shape, "{shape}"),
-            }
+            assert_eq!(world.read(), shape, "{shape}");
         }
     }
 
