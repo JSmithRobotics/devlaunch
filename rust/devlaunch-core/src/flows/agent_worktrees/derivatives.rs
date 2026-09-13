@@ -806,8 +806,12 @@ impl NotDerivableNow {
                 "it could not be shown to be derivable a second time".to_owned()
             }),
             Self::NotWeighedHere => {
-                "its cache tag is still there and the worktree holding it is no longer one \
-                 this run weighs on its own, so these bytes are not this run's to reclaim"
+                // Two causes reach this arm and the sentence may only say what
+                // is true of both: under an outer tag the worktree is weighed
+                // exactly as it was, and naming it would be the same defect
+                // this arm exists to fix.
+                "its cache tag is still there and this run no longer weighs that directory \
+                 on its own account, so these bytes are not this run's to reclaim"
                     .to_owned()
             }
         }

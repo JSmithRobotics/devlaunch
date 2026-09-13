@@ -2048,3 +2048,49 @@ fn content_written_into_a_tag_after_the_plan_goes_with_it_and_that_is_the_decisi
     );
     assert!(!env.exists(), "everything under the tag went, named or not");
 }
+
+#[test]
+fn a_tag_that_gained_an_outer_tag_is_not_told_its_worktree_stopped_being_weighed() {
+    // `NotWeighedHere` has two causes and its sentence may only say what is true
+    // of both. The site going collectable is one; the other is an outer tag
+    // appearing above the derivative, which the walk stops at because the
+    // outermost declaration is the unit -- and the worktree is then weighed
+    // exactly as it was, standing, untouched, with the derivative simply billed
+    // one directory up. A sentence that blames the worktree is false here, which
+    // is the same defect one layer down from the one this arm was added to fix:
+    // a report stating something about a directory that is not so.
+    let world = Clone::new();
+    let worktree = world.worktree("agent-one");
+    let env = installed_env(&worktree, "default");
+    commit_the_project(&world, &worktree, "agent-one");
+    std::fs::write(worktree.join("NOTES.md"), "unsaved\n").expect("the human's own file");
+    world.containerise();
+
+    let plan = world.plan();
+    assert_eq!(reclaiming(&plan).len(), 1);
+
+    // A tag arrives at the top of `.pixi`, so the walk's unit is now `.pixi` and
+    // nothing weighs `.pixi/envs/default` on its own account any more.
+    let pixi = worktree.join(".pixi");
+    std::fs::write(
+        pixi.join("CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .expect("an outer cache tag");
+
+    let (report, _) = world.act(&plan);
+
+    let [withheld] = &report.withheld_derivatives[..] else {
+        panic!("one withheld: {report:?}");
+    };
+    assert_eq!(withheld.because, NotDerivableNow::NotWeighedHere);
+    assert!(
+        worktree.is_dir() && env.is_dir(),
+        "and both are still there"
+    );
+    assert!(
+        !withheld.because.describe().contains("worktree"),
+        "the worktree is weighed and standing, so the refusal may not blame it: {}",
+        withheld.because.describe()
+    );
+}
