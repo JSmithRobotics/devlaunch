@@ -291,7 +291,7 @@ impl Host {
             no_tty: crate::osext::env_str(ssh::DISABLE_VAR),
             no_title: crate::osext::env_str(TITLE_DISABLE_VAR),
             herdr_tab_id: crate::osext::env_str(HERDR_TAB_VAR),
-            herdr_bin: crate::osext::env_str(herdr::BIN_VAR),
+            herdr_bin: herdr::binary_from_process(),
             stdin_tty: is_a_terminal(libc::STDIN_FILENO),
             stdout_tty: is_a_terminal(libc::STDOUT_FILENO),
             stderr_tty: is_a_terminal(libc::STDERR_FILENO),
