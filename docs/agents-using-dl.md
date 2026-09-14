@@ -44,6 +44,16 @@ the container dying of one.
 line, every "already running, attaching...", every echoed ssh invocation is on stderr,
 which is what makes `output=$(dl ws -- cat some.json)` safe to parse.
 
+Including when the workspace was **stopped** and the call had to start it. That is worth
+saying separately because it is the half that was broken until devlaunch#621: devpod's
+logger sends its `info` lines to stdout, `dl` echoed each line of a watched `devpod up`
+back to the stream it arrived on, and a cold call therefore put the whole build
+transcript on stdout ahead of the command's own output. It measured 26KB against a
+prebuilt image. Every test of this clause asked a warm workspace, which runs no `up` at
+all, so the guard and the page agreed with each other and not with the binary. A caller
+that parsed `dl ws -- cat some.json` worked until the first time somebody stopped the
+workspace.
+
 **stdin is the command's.** `echo input | dl ws -- cat` reaches the command inside the
 container.
 

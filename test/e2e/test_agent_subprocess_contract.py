@@ -274,3 +274,43 @@ def test_the_launch_narration_is_on_stderr_where_a_caller_can_ignore_it(piped):
         "dl narrated nothing at all; the contract is that its output is on stderr, "
         f"not that there is none{_shows(result)}"
     )
+
+
+@pytest.mark.e2e
+@pytest.mark.creates_workspace
+def test_stdout_is_still_the_commands_when_the_workspace_was_cold(piped):
+    """Clause two again, against the case every other test in this file skips.
+
+    The fixture leaves the workspace running, so each test above asks a **warm**
+    one, and a warm call runs no `devpod up` at all. That is the hole the clause
+    fell through: devpod's logger sends `info` to stdout, dl echoed each watched
+    line back to the stream it came from, and a launch that had to start the
+    workspace therefore wrote its whole build transcript to stdout in front of the
+    command's output. Measured at 26KB against a prebuilt image, so a caller
+    reading JSON off a cold workspace got 26KB of log and a parse error, and every
+    test here passed.
+
+    The stop is the whole fixture: it costs one start to make the call cold. `dl`
+    starts it again on the way past, so the workspace is left as this test found
+    it and the ones after it pay nothing.
+    """
+    stopped = subprocess.run(
+        [*dl_command(), piped.workspace_id, "stop"],
+        env=piped.env(),
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert stopped.returncode == 0, f"could not stop the workspace{_shows(stopped)}"
+
+    result = piped.run("sh", "-c", f"echo {MARKER}")
+    assert result.returncode == 0, _shows(result)
+    assert result.stdout == f"{MARKER}\n", (
+        f"a cold start wrote to stdout, where only the command's output belongs{_shows(result)}"
+    )
+    # And the narration still happened, so this cannot pass by dl having gone
+    # silent: a cold start says more than a warm one, not less.
+    assert result.stderr.strip(), (
+        f"dl narrated nothing while starting a stopped workspace{_shows(result)}"
+    )

@@ -171,6 +171,7 @@ pub struct devlaunch_runner::SpawnSpec
 pub devlaunch_runner::SpawnSpec::invocation: devlaunch_runner::Invocation
 pub devlaunch_runner::SpawnSpec::own_group: bool
 pub devlaunch_runner::SpawnSpec::stdin: devlaunch_runner::StdinPlan
+pub devlaunch_runner::SpawnSpec::stdout_is_log: bool
 pub devlaunch_runner::SpawnSpec::timeout: core::option::Option<core::time::Duration>
 impl devlaunch_runner::SpawnSpec
 pub fn devlaunch_runner::SpawnSpec::args(&self) -> &[alloc::string::String]
@@ -179,6 +180,7 @@ pub fn devlaunch_runner::SpawnSpec::new(devlaunch_runner::Invocation) -> Self
 pub fn devlaunch_runner::SpawnSpec::program(&self) -> &str
 pub fn devlaunch_runner::SpawnSpec::with_stdin_file(self, impl core::convert::Into<std::path::PathBuf>) -> Self
 pub fn devlaunch_runner::SpawnSpec::with_stdin_null(self) -> Self
+pub fn devlaunch_runner::SpawnSpec::with_stdout_as_log(self) -> Self
 pub fn devlaunch_runner::SpawnSpec::with_timeout(self, core::time::Duration) -> Self
 impl core::clone::Clone for devlaunch_runner::SpawnSpec
 pub fn devlaunch_runner::SpawnSpec::clone(&self) -> devlaunch_runner::SpawnSpec
