@@ -274,6 +274,8 @@ def test_the_launch_narration_is_on_stderr_where_a_caller_can_ignore_it(piped):
         "dl narrated nothing at all; the contract is that its output is on stderr, "
         f"not that there is none{_shows(result)}"
     )
+
+
 @pytest.mark.e2e
 @pytest.mark.creates_workspace
 def test_stdout_is_still_the_commands_when_the_workspace_was_cold(piped):
@@ -305,8 +307,7 @@ def test_stdout_is_still_the_commands_when_the_workspace_was_cold(piped):
     result = piped.run("sh", "-c", f"echo {MARKER}")
     assert result.returncode == 0, _shows(result)
     assert result.stdout == f"{MARKER}\n", (
-        "a cold start wrote to stdout, where only the command's output belongs"
-        f"{_shows(result)}"
+        f"a cold start wrote to stdout, where only the command's output belongs{_shows(result)}"
     )
     # And the narration still happened, so this cannot pass by dl having gone
     # silent: a cold start says more than a warm one, not less.
