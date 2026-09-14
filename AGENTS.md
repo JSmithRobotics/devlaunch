@@ -208,6 +208,48 @@ public repository that published it — so there is nothing to do, but it is wor
 checking rather than trusting, because a private package fails at nothing. See
 "The prebuilt dev container image" in docs/development.md for the check.
 
+## Driving `dl` from a script
+
+Sometimes the work is in another repository and `dl` is the transport. Four
+commands do it:
+
+```bash
+dl --ls --json                  # discovery: id, repo, branch, state, unsaved
+dl <owner/repo>@<branch>        # create or start, once
+dl <ws> -- <cmd>                # run: stdout and exit status are the command's
+dl <ws> rm                      # teardown; refuses on unpushed work
+```
+
+[docs/agents-using-dl.md](docs/agents-using-dl.md) is the contract behind those:
+what each `--ls --json` field means, why `unsaved` is not a boolean, how a
+signalled command reports, which cleanup verb to reach for, and what a workspace
+is not. Read it once. None of it is repeated here.
+
+Four things about the loop itself:
+
+- **Start once, then run many.** `dl <ws> -- true` against an already-running
+  workspace measures about 4.8s on this host, and that is paid per call. Launch
+  the workspace in its own call and keep the loop inside it.
+- **A hot inner loop can skip the transport.** The same `true` through
+  `docker exec` measures about 0.04s. When one suite is run over and over, take
+  the id from `--ls --json`, find its container with
+  `docker ps --filter name=<id>`, and `docker exec` from then on. `dl` still owns
+  the clone, the launch and the teardown. The container name is the
+  devcontainer's to choose and only *ends* with the id, so match, do not build
+  it, and expect one row per service from a compose project.
+- **Merge stderr inside the container:** `dl <ws> -- sh -c 'make test 2>&1'`. A
+  command's stderr still comes back wrapped in devpod's stream logger, and
+  redirecting on the host merges the wrapped version. This is the belt-and-braces
+  form for any call whose stderr you parse.
+- **`--` is what asks for a command.** Without it the line is the session form,
+  which feeds stdin to the remote shell instead. Ordinary ssh semantics, but a
+  script that drops the `--` runs nothing and says so quietly.
+
+Argv after `--` is passed through verbatim: no second round of word splitting,
+globbing or expansion. And until [#621](https://github.com/blooop/devlaunch/pull/621)
+lands, a *cold* run writes devpod's build log to stdout, which is the other
+reason to start the workspace in a call of its own.
+
 ## Documentation Maintenance
 
 - **Keep README up to date**: When modifying CLI commands, flags, or usage patterns, update the README.md to reflect the current tool behavior. Run `pixi run dl --help` to see the current help output and ensure the README matches.
