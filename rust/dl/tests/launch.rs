@@ -514,13 +514,13 @@ fn a_command_travels_as_one_quoted_bash_lc_payload() {
     run.exited(0);
     assert_eq!(
         run.stderr_lines()[1],
-        format!("SSH command: devpod ssh {MAIN} --command bash -lc 'echo hi'")
+        format!("SSH command: devpod ssh {MAIN} --log-output json --command bash -lc 'echo hi'")
     );
     assert_eq!(
         world.calls().exact(&world.root),
         [
             format!("devpod status {MAIN} --output json"),
-            format!("devpod ssh {MAIN} --command bash -lc 'echo hi'"),
+            format!("devpod ssh {MAIN} --log-output json --command bash -lc 'echo hi'"),
         ]
     );
 }
@@ -544,7 +544,7 @@ fn a_quoted_prompt_reaches_the_agent_intact() {
     assert_eq!(
         world.calls().exact(&world.root).last(),
         Some(&format!(
-            "devpod ssh {MAIN} --command bash -lc \
+            "devpod ssh {MAIN} --log-output json --command bash -lc \
              'claude '\"'\"'it'\"'\"'\"'\"'\"'\"'\"'\"'s here'\"'\"''"
         ))
     );
@@ -563,7 +563,7 @@ fn the_zellij_opt_in_puts_a_session_beside_the_command() {
     assert_eq!(
         run.stderr_lines()[1],
         format!(
-            "SSH command: devpod ssh {MAIN} --command bash -lc 'zellij attach -b devlaunch \
+            "SSH command: devpod ssh {MAIN} --log-output json --command bash -lc 'zellij attach -b devlaunch \
              >/dev/null 2>&1 || true; claude '\"'\"'fix it'\"'\"''"
         )
     );
@@ -628,7 +628,7 @@ fn a_warm_triple_launch_writes_nothing_to_the_cache() {
         world.calls().exact(&world.root),
         [
             format!("devpod status {MAIN} --output json"),
-            format!("devpod ssh {MAIN} --command bash -lc 'echo hi'"),
+            format!("devpod ssh {MAIN} --log-output json --command bash -lc 'echo hi'"),
         ]
     );
 }
@@ -703,7 +703,7 @@ fn the_dotfiles_opt_in_refreshes_in_front_of_an_interactive_shell() {
             // command in its own process group, so the git or pixi process actually
             // waiting dies with the shell that started it rather than holding the
             // session open.
-            format!("devpod ssh {MAIN} --command bash -lc 'timeout 60 bas…"),
+            format!("devpod ssh {MAIN} --log-output json --command bash -lc 'timeout 60 bas…"),
             format!("devpod ssh {MAIN}"),
         ]
     );
@@ -725,7 +725,7 @@ fn a_one_shot_command_is_not_worth_a_dotfiles_refresh() {
         world.calls().exact(&world.root),
         [
             format!("devpod status {MAIN} --output json"),
-            format!("devpod ssh {MAIN} --command bash -lc 'echo hi'"),
+            format!("devpod ssh {MAIN} --log-output json --command bash -lc 'echo hi'"),
         ]
     );
 }
@@ -1153,7 +1153,7 @@ fn dotfiles_refreshes_a_running_workspace_without_bringing_anything_up() {
             // Then the context options the refresh's fallback clone URL comes from,
             // and one session carrying the refresh.
             "devpod context options --output json".to_owned(),
-            format!("devpod ssh {MAIN} --command bash -lc 'if command -v …"),
+            format!("devpod ssh {MAIN} --log-output json --command bash -lc 'if command -v …"),
         ]
     );
     // Unbounded, unlike the refresh nobody asked for: this one is typed, in the
@@ -1186,7 +1186,7 @@ fn dotfiles_starts_a_stopped_workspace_first_and_says_so() {
     assert!(
         calls.iter().any(|call| {
             call.starts_with(&format!(
-                "devpod ssh {MAIN} --command bash -lc 'if command -v "
+                "devpod ssh {MAIN} --log-output json --command bash -lc 'if command -v "
             ))
         }),
         "the dotfiles refresh did not run: {calls:?}"
@@ -1268,7 +1268,7 @@ fn a_path_spec_dotfiles_asks_once_and_brings_nothing_up() {
         [
             format!("devpod status {MAIN} --output json"),
             "devpod context options --output json".to_owned(),
-            format!("devpod ssh {MAIN} --command bash -lc 'if command -v …"),
+            format!("devpod ssh {MAIN} --log-output json --command bash -lc 'if command -v …"),
         ]
     );
 }
@@ -1309,7 +1309,7 @@ fn a_path_spec_attach_asks_nothing_and_ups() {
                 .to_owned(),
             format!("devpod ssh {MAIN} --command bash -lc 'if sudo hostna…"),
             format!("devpod ssh {MAIN} --command bash -lc 'set -u…"),
-            format!("devpod ssh {MAIN} --command bash -lc true"),
+            format!("devpod ssh {MAIN} --log-output json --command bash -lc true"),
         ]
     );
     assert_eq!(
@@ -1347,7 +1347,7 @@ fn a_cold_triple_dotfiles_denies_the_same_id_twice() {
                 .to_owned(),
             format!("devpod ssh {COLD} --command bash -lc 'if sudo hostna…"),
             format!("devpod ssh {COLD} --command bash -lc 'set -u…"),
-            format!("devpod ssh {COLD} --command bash -lc 'if command -v …"),
+            format!("devpod ssh {COLD} --log-output json --command bash -lc 'if command -v …"),
         ]
     );
 }
@@ -1389,7 +1389,7 @@ fn a_path_spec_dotfiles_on_a_stopped_workspace_ups_it_by_id() {
                 .to_owned(),
             format!("devpod ssh {MAIN} --command bash -lc 'if sudo hostna…"),
             format!("devpod ssh {MAIN} --command bash -lc 'set -u…"),
-            format!("devpod ssh {MAIN} --command bash -lc 'if command -v …"),
+            format!("devpod ssh {MAIN} --log-output json --command bash -lc 'if command -v …"),
         ]
     );
     // Byte-exact, because the summary above clips the two flags this row exists for.
@@ -1985,7 +1985,7 @@ fn rm_on_exit_runs_the_command_first_and_removes_the_workspace_after_it() {
         world.calls().exact(&world.root),
         [
             format!("devpod status {MAIN} --output json"),
-            format!("devpod ssh {MAIN} --command bash -lc 'echo hi'"),
+            format!("devpod ssh {MAIN} --log-output json --command bash -lc 'echo hi'"),
             format!("devpod status {MAIN} --output json"),
             format!("devpod delete {MAIN}"),
         ]

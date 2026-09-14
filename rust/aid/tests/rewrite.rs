@@ -289,7 +289,7 @@ fn a_prompt_reaches_the_agent_as_one_argument_through_dls_own_launch() {
              IS_SANDBOX=1 claude --dangerously-skip-permissions \
              --remote-control=devlaunch-main-3j1t 'fix the bug'",
             "Workspace devlaunch-main-3j1t is already running, attaching...",
-            "SSH command: devpod ssh devlaunch-main-3j1t --command bash -lc \
+            "SSH command: devpod ssh devlaunch-main-3j1t --log-output json --command bash -lc \
              'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
              --dangerously-skip-permissions --remote-control=devlaunch-main-3j1t \
              '\"'\"'fix the bug'\"'\"''",
@@ -300,7 +300,7 @@ fn a_prompt_reaches_the_agent_as_one_argument_through_dls_own_launch() {
         [
             format!("devpod status {MAIN} --output json"),
             format!(
-                "devpod ssh {MAIN} --command bash -lc \
+                "devpod ssh {MAIN} --log-output json --command bash -lc \
                  'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
                  --dangerously-skip-permissions --remote-control={MAIN} \
                  '\"'\"'fix the bug'\"'\"''"
@@ -321,7 +321,7 @@ fn no_remote_control_is_the_one_way_back_to_a_purely_local_session() {
         assert_eq!(
             world.devpod_calls().last().expect("a session"),
             &format!(
-                "devpod ssh {MAIN} --command bash -lc \
+                "devpod ssh {MAIN} --log-output json --command bash -lc \
                  'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
                  --dangerously-skip-permissions hi'"
             ),
@@ -361,7 +361,7 @@ fn an_appended_off_switch_is_observed_from_outside_to_turn_it_off() {
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc \
+            "devpod ssh {MAIN} --log-output json --command bash -lc \
              'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
              --dangerously-skip-permissions '\"'\"'fix the bug'\"'\"''"
         )
@@ -401,7 +401,7 @@ fn no_prompt_starts_the_agents_plain_session() {
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc \
+            "devpod ssh {MAIN} --log-output json --command bash -lc \
              'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
              --dangerously-skip-permissions --remote-control={MAIN}'"
         )
@@ -445,7 +445,7 @@ fn each_agent_is_started_the_way_its_own_cli_takes_a_prompt() {
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc 'gemini --yolo --prompt-interactive '\"'\"'explain this'\"'\"''"
+            "devpod ssh {MAIN} --log-output json --command bash -lc 'gemini --yolo --prompt-interactive '\"'\"'explain this'\"'\"''"
         )
     );
 
@@ -453,7 +453,7 @@ fn each_agent_is_started_the_way_its_own_cli_takes_a_prompt() {
     bare.aid(&["--gemini", MAIN]).exited(0);
     assert_eq!(
         bare.devpod_calls().last().expect("a session"),
-        &format!("devpod ssh {MAIN} --command bash -lc 'gemini --yolo'")
+        &format!("devpod ssh {MAIN} --log-output json --command bash -lc 'gemini --yolo'")
     );
 
     // codex is the one agent whose payload carries a prefix, because it is the one
@@ -487,7 +487,7 @@ fn remote_control_reaches_claude_as_one_named_flag_and_dl_never_sees_it() {
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
         &format!(
-            "devpod ssh {MAIN} --command bash -lc \
+            "devpod ssh {MAIN} --log-output json --command bash -lc \
              'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
              --dangerously-skip-permissions --remote-control={MAIN} '\"'\"'fix the bug'\"'\"''"
         )

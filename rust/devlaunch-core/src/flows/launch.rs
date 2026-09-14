@@ -2967,6 +2967,25 @@ fn devpod_session(
         args.push(workdir.to_owned());
     }
     if let Some(payload) = payload {
+        // A command, so devpod asks for no pty, so the *container's* stderr comes
+        // back on devpod's stderr with devpod's stream logger wrapped around it.
+        // json is how it comes back off again: [`devpod::JSON_LOG_ARGS`] carries
+        // the measurement and why `raw` is a trap.
+        //
+        // Scoped to this arm deliberately. A bare attach (no payload) gets a pty,
+        // and under one the container's stderr never touches this stream -- the
+        // only thing json would change there is the look of devpod's own warnings
+        // to the person sitting in front of them, trading a coloured `warn` tag
+        // for nothing. So an interactive `dl <ws>` logs exactly as it did, and the
+        // flag goes only where there is something to unwrap.
+        //
+        // After the workspace id, never before it: `flows::session_manager`'s
+        // `workspace_named_by` reads an id out of `devpod ssh <id>` by position,
+        // and a flag in front of it would make every session anonymous to the
+        // manager. `both_transports_name_the_workspace_they_were_built_for` runs
+        // this builder and would catch it, which is the test to look at if this
+        // argv is ever reordered.
+        args.extend(devpod::JSON_LOG_ARGS.iter().map(|arg| (*arg).to_owned()));
         args.push("--command".to_owned());
         args.push(payload.as_str().to_owned());
     }
@@ -9262,6 +9281,33 @@ mod tests {
     }
 
     #[test]
+    fn a_command_asks_devpod_to_log_in_json_and_an_attach_does_not() {
+        // The two halves of the scoping decision, side by side, because the
+        // difference between them is the whole of it. A command gets no pty, so
+        // the container's stderr comes back through devpod's stream logger and
+        // json is what lets `clients::devpod`'s filter unwrap it. An attach gets
+        // one, the container's stderr never touches that stream, and the only
+        // thing json would change is the look of devpod's own warnings to the
+        // person reading them.
+        let scene = Scene::new().with_running("myws");
+
+        let (_, _, _) = a_session(&scene, Some(&RemoteCommand::argv(&["echo", "hi"])));
+        assert!(
+            scene.devpod_commands()[0].contains(&"--log-output".to_owned()),
+            "{:?}",
+            scene.devpod_commands()
+        );
+
+        let attaching = Scene::new().with_running("myws");
+        let (_, _, _) = a_session(&attaching, None);
+        assert_eq!(
+            attaching.devpod_commands(),
+            vec![vec!["ssh".to_owned(), "myws".to_owned()]],
+            "an interactive attach logs exactly as it did"
+        );
+    }
+
+    #[test]
     fn a_one_shot_command_travels_as_the_shlex_quoted_payload() {
         let scene = Scene::new().with_running("myws");
 
@@ -9273,6 +9319,8 @@ mod tests {
             vec![vec![
                 "ssh".to_owned(),
                 "myws".to_owned(),
+                "--log-output".to_owned(),
+                "json".to_owned(),
                 "--command".to_owned(),
                 "bash -lc 'echo hi'".to_owned(),
             ]]
@@ -9461,6 +9509,8 @@ mod tests {
                 "devpod".to_owned(),
                 "ssh".to_owned(),
                 "myws".to_owned(),
+                "--log-output".to_owned(),
+                "json".to_owned(),
                 "--command".to_owned(),
                 "bash -lc 'echo hi'".to_owned(),
             ]
@@ -9963,7 +10013,10 @@ mod tests {
                 vec!["ssh".to_owned(), "myws".to_owned()],
             ]
         );
-        assert!(commands[1][3].contains("chezmoi update"), "{commands:?}");
+        // `ssh myws --log-output json --command <payload>`: the payload is the
+        // sixth word, and the json flag is on the refresh because it is a command
+        // and not the attach below it.
+        assert!(commands[1][5].contains("chezmoi update"), "{commands:?}");
         assert_eq!(commands[2], vec!["ssh".to_owned(), "myws".to_owned()]);
     }
 
@@ -9989,6 +10042,8 @@ mod tests {
             vec![vec![
                 "ssh".to_owned(),
                 "myws".to_owned(),
+                "--log-output".to_owned(),
+                "json".to_owned(),
                 "--command".to_owned(),
                 "bash -lc 'echo hi'".to_owned(),
             ]]
@@ -11244,6 +11299,8 @@ mod tests {
                 vec![
                     "ssh".to_owned(),
                     workspace.value().to_owned(),
+                    "--log-output".to_owned(),
+                    "json".to_owned(),
                     "--command".to_owned(),
                     "bash -lc 'echo hi'".to_owned(),
                 ],
