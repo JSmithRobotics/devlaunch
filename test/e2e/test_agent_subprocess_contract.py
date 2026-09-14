@@ -14,7 +14,8 @@ gives and what an agent harness gives, and each test is one clause of the publis
 contract. `test/test_agent_contract_doc.py` is the other half of the pairing: it holds
 the page to still making the claims these tests are the evidence for.
 
-The stderr clause is the interesting one and it is an `xfail`. See
+The stderr clause was the interesting one, and until devlaunch passed
+`--log-output json` to `devpod ssh` it was a strict `xfail`. See
 `test_stderr_is_the_commands_output_verbatim`.
 """
 
@@ -219,12 +220,13 @@ def test_no_terminal_is_required(piped):
 
 @pytest.mark.e2e
 def test_merging_inside_the_container_is_a_working_recipe(piped):
-    """The workaround `docs/agents-using-dl.md` tells a caller to use.
+    """The merge `docs/agents-using-dl.md` still shows, no longer as a workaround.
 
-    It is documented, so it is tested: both lines arrive on stdout, in the right
-    order, with nothing between them, and the exit status still belongs to the
-    command. If this breaks, the page is telling callers to do something that does
-    not work, which is worse than the mangling it routes around.
+    It was the route around the mangled stderr and it outlived the mangling: a
+    caller who wants one interleaved stream rather than two streams still wants
+    this, so the page keeps it and this keeps the page honest. Both lines arrive on
+    stdout, in the right order, with nothing between them, and the exit status
+    still belongs to the command.
     """
     result = piped.run("sh", "-c", f"{{ echo {MARKER}-out; echo {MARKER}-err >&2; }} 2>&1; exit 3")
     assert result.returncode == 3, _shows(result)
@@ -234,28 +236,46 @@ def test_merging_inside_the_container_is_a_working_recipe(piped):
 
 
 @pytest.mark.e2e
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "devpod's stream logger reformats the command's stderr on the way out: it "
-        "arrives timestamped, level-prefixed, ANSI-coloured and with a Go source "
-        "location appended. docs/agents-using-dl.md documents the `2>&1` workaround "
-        "instead. This xfail is strict so that fixing the transport turns the suite "
-        "red and the page's workaround section gets removed in the same change."
-    ),
-)
 def test_stderr_is_the_commands_output_verbatim(piped):
-    """The clause the contract does not yet keep, written as the contract wants it.
+    """Clause five, which was a strict xfail until the transport kept it.
 
-    Deliberately not written as an assertion that the mangling happens. A test that
-    pins current behaviour makes the bug part of the spec and quietly outlives the
-    fix; a strict xfail of the *desired* behaviour fails the day it starts working,
-    which is the day the documentation has to change.
+    It was written as the contract wanted rather than as the mangling behaved,
+    deliberately: a test that pins current behaviour makes the bug part of the spec
+    and quietly outlives the fix, where a strict xfail of the *desired* behaviour
+    fails the day it starts working. That day was `--log-output json` on the
+    `devpod ssh` invocation (`clients/devpod.rs`'s `JSON_LOG_ARGS`), which turns
+    devpod's stream logger into records dl can unwrap instead of decoration dl
+    would have to regex.
+
+    `endswith` rather than equality because dl's own narration is on this stream
+    too, ahead of the command. That it is only ahead is what
+    `test_the_launch_narration_is_on_stderr_where_a_caller_can_ignore_it` and the
+    stdout clause between them pin.
     """
     result = piped.run("sh", "-c", f"echo {MARKER} >&2")
     assert result.returncode == 0, _shows(result)
     assert result.stderr.endswith(f"{MARKER}\n"), (
         f"stderr should be the command's, verbatim{_shows(result)}"
+    )
+
+
+@pytest.mark.e2e
+def test_a_commands_stderr_carries_no_log_decoration_at_all(piped):
+    """The other half of clause five: not just the tail, the whole of it.
+
+    `endswith` above passes on a line devpod prefixed with a timestamp and a level,
+    which is exactly the mangling this clause is about, so the shape of the wrapper
+    is asserted absent by name. `stream_logger.go` is the Go source location the
+    plain formatter appended; `\x1b[` is the colour it wrapped the tag in; and
+    a bare `\n` before the marker is what says nothing was glued to its front.
+    """
+    result = piped.run("sh", "-c", f"echo {MARKER} >&2")
+    assert result.returncode == 0, _shows(result)
+    assert "stream_logger.go" not in result.stderr, (
+        f"devpod's stream logger is still decorating stderr{_shows(result)}"
+    )
+    assert f"\n{MARKER}\n" in result.stderr or result.stderr == f"{MARKER}\n", (
+        f"something was prefixed to the command's stderr line{_shows(result)}"
     )
 
 

@@ -13,7 +13,7 @@ that matter most to a caller are exactly the parts a refactor cannot see it is b
 
 ## The subprocess contract
 
-`dl <workspace> -- <command>` is an ordinary subprocess, and four things about it are
+`dl <workspace> -- <command>` is an ordinary subprocess, and five things about it are
 promised rather than incidental.
 
 **The exit status is the command's.** `dl ws -- sh -c 'exit 42'` exits 42. `dl`'s own
@@ -54,6 +54,31 @@ all, so the guard and the page agreed with each other and not with the binary. A
 that parsed `dl ws -- cat some.json` worked until the first time somebody stopped the
 workspace.
 
+**stderr is the command's too.** `dl ws -- sh -c 'echo boom >&2'` puts `boom` on stderr
+and nothing else around it, so a compiler's diagnostics and a test runner's traceback
+arrive parseable. `dl`'s own narration shares that stream, and it all comes before the
+command starts, so the command's output is the tail of it.
+
+Two caveats worth knowing before you match on it. The command's stderr is still read a
+line at a time on the way out, so a partial last line arrives with a newline appended
+that the command did not write. And devpod's transport strips ANSI escapes from it, so
+a tool that colours its errors arrives uncoloured; since the command sees a pipe rather
+than a terminal, most tools emit no colour there anyway.
+
+This clause used to be the one the transport did not keep, and callers were told to
+merge the streams inside the container instead. That merge still works and is still the
+right call when you want one interleaved stream rather than two:
+
+```bash
+dl ws -- sh -c 'make test 2>&1'
+```
+
+Note where the redirection is. Inside the command `dl` is asked to run, both streams
+arrive on stdout in the order the command wrote them. `dl ws -- make test 2>&1` merges
+on the host instead, and folds `dl`'s own narration in with the output. It is no longer
+a workaround for anything, though, so reach for it only when you actually want the
+interleaving.
+
 **stdin is the command's.** `echo input | dl ws -- cat` reaches the command inside the
 container.
 
@@ -66,37 +91,9 @@ folder is the devcontainer's own choice and not something `dl` imposes, so read 
 rather than assuming a path: `pwd` in the container is the honest answer, and it is
 `/workspaces/<workspace-id>` only for devcontainers that do not say otherwise.
 
-These four are pinned by `test/e2e/test_agent_subprocess_contract.py`, which builds one
+These five are pinned by `test/e2e/test_agent_subprocess_contract.py`, which builds one
 real workspace and asks each of them of it. They are e2e and skipped by default, because
 they need a Docker daemon.
-
-## stderr is not yours yet
-
-The one place the contract does not hold. A command's stderr comes back through devpod's
-stream logger rather than as itself:
-
-```
-$ dl ws -- sh -c 'echo boom >&2'
-11:18:55 info boom stream_logger.go:492
-```
-
-Timestamped, level-prefixed, ANSI-coloured and with a Go source location appended. For a
-caller that is reading a compiler's diagnostics or a test runner's traceback off stderr,
-this is the difference between output it can parse and output it cannot.
-
-Until that is fixed, merge the streams inside the container rather than outside it:
-
-```bash
-dl ws -- sh -c 'make test 2>&1'
-```
-
-The merge happens before devpod sees the output, so both streams arrive on stdout
-verbatim and the exit status is still the command's. This is the recommended form for
-any programmatic call whose stderr matters, which is most of them.
-
-Note what the workaround is not. `dl ws -- make test 2>&1` merges on the *host*, after
-the mangling has already happened, and gives you the logger's version of stderr mixed
-into good stdout. The redirection has to be inside the command `dl` is asked to run.
 
 ## The unit of isolation is the branch
 

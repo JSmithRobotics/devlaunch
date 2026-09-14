@@ -1,12 +1,18 @@
 """The contract `docs/agents-using-dl.md` publishes, and the `--help` line that sends
 a reader to it.
 
-The page states four properties of `dl <ws> -- <command>` that a caller writes code
-against: the exit status is the command's, stdout is the command's, stdin reaches it,
-and none of that needs a terminal. All four held before the page existed, which is
-exactly why they needed writing down and then guarding. A promise nothing states is a
-promise a refactor cannot see it is breaking, and the caller who finds out is a script
-somewhere else that now reads `dl`'s progress chatter as its JSON.
+The page states five properties of `dl <ws> -- <command>` that a caller writes code
+against: the exit status is the command's, stdout is the command's, stderr is the
+command's, stdin reaches it, and none of that needs a terminal. Four of them held
+before the page existed, which is exactly why they needed writing down and then
+guarding. A promise nothing states is a promise a refactor cannot see it is breaking,
+and the caller who finds out is a script somewhere else that now reads `dl`'s progress
+chatter as its JSON.
+
+The fifth is the one the page had to wait for. stderr came back through devpod's stream
+logger, timestamped and level-tagged and coloured, and the page carried a section saying
+so next to a `2>&1` workaround. `--log-output json` on the `devpod ssh` invocation is
+what closed it; the phrase below is what stops the clause quietly going back out again.
 
 The behaviour itself is pinned in `test/e2e/test_agent_subprocess_contract.py`, which
 needs a Docker daemon and is skipped by default. What is guarded *here* is everything
@@ -69,6 +75,7 @@ CONTRACT_HEADING = "## The subprocess contract"
 PROMISES = {
     "exit status": "exit status is the command's",
     "stdout": "stdout is the command's, verbatim",
+    "stderr": "stderr is the command's too",
     "stdin": "stdin is the command's",
     "no terminal": "No terminal is required",
 }

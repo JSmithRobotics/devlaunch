@@ -390,7 +390,82 @@ const REMOTE_EXIT_MARKER: &str = "ssh session: Process exited with status ";
 /// devpod's own level tag, which the report has to be anchored on as well: a
 /// remote program printing the same sentence on its own stderr (which reaches
 /// devlaunch only when there is no pty) must not be mistaken for devpod's report.
+///
+/// The same word is devpod's `level` field in json, which is why one constant
+/// serves both readings in [`StderrFilter::push`].
 const FATAL_TAG: &str = "fatal";
+
+/// Ask devpod's logger for json instead of its decorated plain lines.
+///
+/// A global flag of devpod's, taking `plain` (the default), `raw` or `json`, and
+/// it belongs *here* rather than at the call site because the flag and
+/// [`StderrFilter`]'s parsing are one fact: devpod's stderr is in the shape this
+/// asked for, and the reader is two screens away from the ask.
+///
+/// Why this exists at all: without a pty, the command's own stderr comes back
+/// through devpod's stream logger rather than as itself. Measured against
+/// devpod 0.26.1, `echo ERR >&2` in a container arrives as
+///
+/// ```text
+/// <esc>[0;1;37m19:54:56<esc>[0m <esc>[0;1;36minfo<esc>[0m ERR <esc>[0;90mstream_logger.go:492<esc>[0m
+/// ```
+///
+/// -- timestamped, level-tagged, coloured, with a Go source location appended.
+/// That is unparsable as a compiler's or a test runner's diagnostics, which is
+/// what `docs/agents-using-dl.md` promises a caller gets. In json the same line
+/// is `{"time":"...","message":"ERR","level":"info"}`, and the message is the
+/// command's bytes, so the decoration can be taken back off.
+///
+/// **`raw` was measured and rejected**, though it is the obvious choice: it emits
+/// the bare message and nothing else, including no level. devpod's report of a
+/// remote exit status is then
+/// `tunnel to container: run in container: ssh session: Process exited with
+/// status 42` with no `fatal` in it, [`recovered_status`] returns `None`, and
+/// `dl ws -- 'exit 42'` stops exiting 42 -- the *first* clause of the same
+/// contract, silently traded for the last one. json keeps the level as a field,
+/// which is both a stronger anchor than a coloured tag and a thing the remote
+/// program cannot forge: devpod wraps whatever the container writes in a record
+/// of its own at `info`, escaping it, so a container printing a whole fatal
+/// record verbatim arrives as that record's `message` (measured).
+///
+/// `--silent` is the other neighbour and is wrong for a different reason: it
+/// suppresses everything below a fatal, which includes the command's stderr.
+pub(crate) const JSON_LOG_ARGS: [&str; 2] = ["--log-output", "json"];
+
+/// One line of devpod's stderr under [`JSON_LOG_ARGS`].
+///
+/// Both fields are required, which is the whole of what keeps a JSON *document*
+/// on the stream from being read as a log record: a container running
+/// `cat report.json 1>&2` under a devpod too old to know `--log-output` would
+/// otherwise have its lines silently relabelled. `time` is devpod's third field
+/// and is dropped -- nothing here has a use for it, and the line's arrival is
+/// already the only timing this filter reports on.
+#[derive(serde::Deserialize)]
+struct LogRecord {
+    /// devpod's own level word: `debug`, `info`, `warn`, `error`, `fatal`.
+    level: String,
+    /// What the plain formatter would have printed between the level and the Go
+    /// source location, with none of that decoration on it.
+    message: String,
+}
+
+impl LogRecord {
+    /// Read `line` as a record, or `None` if it is not one.
+    ///
+    /// A miss is the ordinary case, not a failure: it is every line from a devpod
+    /// that does not know `--log-output`, from the pty route where the flag is not
+    /// passed at all, and from the attach route's plain log. The caller falls back
+    /// to the plain-text predicates, which is the behaviour this module had before
+    /// json was asked for.
+    fn parse(line: &str) -> Option<Self> {
+        // Cheap enough to skip for a line that cannot be an object, and it keeps
+        // serde_json off every line of an ordinary plain-mode session.
+        if !line.trim_start().starts_with('{') {
+            return None;
+        }
+        serde_json::from_str(line).ok()
+    }
+}
 
 /// Forward devpod's stderr, holding back its report of a remote exit status.
 ///
@@ -410,24 +485,48 @@ impl StderrFilter {
 
     /// Feed one line, forwarding whatever the user should see.
     ///
-    /// Lines arrive without their newline — the runner strips it — and are
-    /// forwarded exactly as they came, because everything devpod says for its own
-    /// sake must read as it does today.
+    /// Lines arrive without their newline — the runner strips it.
+    ///
+    /// Two readings, tried in that order. Under [`JSON_LOG_ARGS`] the line is a
+    /// record, and then the level is devpod's own field rather than a coloured
+    /// tag to be regexed, and what gets forwarded is the bare `message` — which
+    /// for a command's stderr is the command's bytes and nothing else, and for
+    /// devpod's own warnings is the sentence without its timestamp and Go source
+    /// location. A line that is not a record is read exactly as this module read
+    /// every line before json was asked for, so a devpod too old to know the flag,
+    /// the pty route that is not given it, and anything on the stream that is not
+    /// a log line at all all behave as they did.
     pub(crate) fn push(&mut self, line: &str, forward: &mut dyn FnMut(&str)) {
-        if let Some(status) = recovered_status(line) {
+        let record = LogRecord::parse(line);
+        // What the user should see of this line: the message alone when devpod
+        // told us which part of it that is.
+        let text = record
+            .as_ref()
+            .map_or(line, |record| record.message.as_str());
+        let status = match &record {
+            // No word-boundary dance on this path: `level` is a field devpod
+            // filled in, and the container's own stderr arrives as the `message`
+            // of a record at `info`, so it cannot reach here claiming `fatal`.
+            Some(record) if record.level == FATAL_TAG => remote_status_in(text),
+            Some(_) => None,
+            None => recovered_status(line),
+        };
+        if let Some(status) = status {
             self.remote_status = Some(status);
             // The hint introduced this fatal, so it goes with it.
             self.held_hint = None;
             return;
         }
-        if line.contains(DEBUG_HINT) {
-            self.held_hint = Some(line.to_owned());
+        // Matched against `text` rather than the raw line so the hold-back keeps
+        // working in json, where the hint is a record like any other.
+        if text.contains(DEBUG_HINT) {
+            self.held_hint = Some(text.to_owned());
             return;
         }
         if let Some(hint) = self.held_hint.take() {
             forward(&hint);
         }
-        forward(line);
+        forward(text);
     }
 
     /// The stream ended: release a hint nothing followed, and report the status
@@ -453,20 +552,32 @@ fn recovered_status(line: &str) -> Option<i32> {
         if !boundary_before(&line[after_tag..]) {
             continue;
         }
-        let rest = &line[after_tag..];
-        for (marker_at, _) in rest.match_indices(REMOTE_EXIT_MARKER) {
-            if !boundary_after(&rest[..marker_at]) {
-                continue;
-            }
-            let digits: String = rest[marker_at + REMOTE_EXIT_MARKER.len()..]
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect();
-            // A count too large for an exit status is not a status anything
-            // could have exited with, so it is not devpod reporting one.
-            if let Ok(status) = digits.parse::<i32>() {
-                return Some(status);
-            }
+        if let Some(status) = remote_status_in(&line[after_tag..]) {
+            return Some(status);
+        }
+    }
+    None
+}
+
+/// The remote exit status the x/crypto sentence reports somewhere in `text`.
+///
+/// Split out of [`recovered_status`] because json needs this half and not the
+/// other: the `fatal` the plain reading has to find in the text is a field there,
+/// already read, and searching the message for the word again would let a command
+/// whose own stderr says "fatal" back into a decision devpod had already made.
+fn remote_status_in(text: &str) -> Option<i32> {
+    for (marker_at, _) in text.match_indices(REMOTE_EXIT_MARKER) {
+        if !boundary_after(&text[..marker_at]) {
+            continue;
+        }
+        let digits: String = text[marker_at + REMOTE_EXIT_MARKER.len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        // A count too large for an exit status is not a status anything
+        // could have exited with, so it is not devpod reporting one.
+        if let Ok(status) = digits.parse::<i32>() {
+            return Some(status);
         }
     }
     None
@@ -508,9 +619,14 @@ pub(crate) fn interpret(devpod_exit: Exit, remote_status: Option<i32>) -> SshOut
 ///
 /// stdin and stdout are inherited untouched — devpod puts the real terminal into
 /// raw mode through them and requests a pty on that basis, so a pipe on either
-/// changes what devpod does. Only stderr is read, which under a pty carries
-/// devpod's own warnings and nothing else, so its report of how the session
-/// ended can be interpreted rather than dumped on the user.
+/// changes what devpod does. Only stderr is read, so devpod's report of how the
+/// session ended can be interpreted rather than dumped on the user.
+///
+/// What else is on that stream depends on the pty. Under one, devpod's own
+/// warnings and nothing else: the container's stderr goes down the pty with
+/// everything else. Without one — `devpod ssh --command`, which is every
+/// scripted call — the container's stderr is on it too, wrapped by devpod's
+/// logger, and [`JSON_LOG_ARGS`] is what lets [`StderrFilter`] unwrap it.
 ///
 /// `forward` is where the lines that *should* be seen go. Python writes them to
 /// `sys.stderr` from inside the filter; core writes to nobody's stream, so the
@@ -1604,6 +1720,119 @@ mod tests {
                 exit: Exit::Signal(15)
             }
         );
+    }
+
+    // ------------------------------------ the same stream under --log-output json
+
+    /// The records devpod 0.26.1 emits under [`JSON_LOG_ARGS`], verbatim from the
+    /// measurement: `dl <ws> -- sh -c 'echo ERR >&2'` and `-- sh -c 'exit 42'`.
+    /// Field order is devpod's, and nothing here depends on it.
+    const JSON_COMMAND_STDERR: &str =
+        r#"{"time":"2026-09-14T20:22:21.813127762+01:00","message":"ERR","level":"info"}"#;
+    const JSON_REMOTE_EXIT: &str = concat!(
+        r#"{"time":"2026-09-14T20:22:37.481720628+01:00","message":"tunnel to container: "#,
+        r#"run in container: ssh session: Process exited with status 42","level":"fatal"}"#,
+    );
+
+    #[test]
+    fn a_commands_stderr_arrives_as_the_command_wrote_it() {
+        // The whole point of the flag. Under plain this line is the timestamp, the
+        // `info` tag, the text, and `stream_logger.go:492`, none of which a caller
+        // parsing a compiler can see past.
+        let (status, shown) = filter(&[JSON_COMMAND_STDERR]);
+
+        assert_eq!(status, None);
+        assert_eq!(shown, vec!["ERR".to_owned()]);
+    }
+
+    #[test]
+    fn the_buried_status_is_read_off_the_level_field() {
+        let (status, shown) = filter(&[JSON_REMOTE_EXIT]);
+
+        assert_eq!(status, Some(42));
+        assert!(shown.is_empty(), "nothing has gone wrong: {shown:?}");
+        assert_eq!(
+            interpret(Exit::Code(1), status),
+            SshOutcome::RemoteExit { status: 42 }
+        );
+    }
+
+    #[test]
+    fn a_command_printing_a_fatal_record_of_its_own_is_not_devpods_report() {
+        // The attack the plain reading has to work for with word boundaries, and
+        // which json answers structurally: devpod escapes the container's line into
+        // the `message` of a record at `info` (measured), so the level the filter
+        // reads is devpod's own and the sentence inside is just text.
+        let line = concat!(
+            r#"{"time":"2026-09-14T20:23:45.31230689+01:00","message":"#,
+            r#""{\"level\":\"fatal\",\"message\":\"ssh session: Process exited with "#,
+            r#"status 7\"}","level":"info"}"#,
+        );
+
+        let (status, shown) = filter(&[line]);
+
+        assert_eq!(status, None, "a container cannot forge devpod's level");
+        assert_eq!(
+            shown,
+            vec![
+                r#"{"level":"fatal","message":"ssh session: Process exited with status 7"}"#
+                    .to_owned()
+            ],
+            "and its line still comes back as it wrote it"
+        );
+    }
+
+    #[test]
+    fn devpods_own_warnings_lose_their_decoration_and_nothing_else() {
+        let line = r#"{"time":"2026-09-14T20:22:21Z","message":"workspace is already running","level":"warn"}"#;
+
+        let (status, shown) = filter(&[line]);
+
+        assert_eq!(status, None);
+        assert_eq!(shown, vec!["workspace is already running".to_owned()]);
+    }
+
+    #[test]
+    fn the_debug_hint_is_still_held_back_when_it_arrives_as_a_record() {
+        // The hold-back is matched against the message, not the raw line, or the
+        // hint would be forwarded on the json path and then the fatal it
+        // introduces would be swallowed -- a hint with nothing under it.
+        let hint = format!(
+            r#"{{"time":"2026-09-14T20:22:37Z","message":"{DEBUG_HINT}","level":"error"}}"#
+        );
+
+        let (status, shown) = filter(&[&hint, JSON_REMOTE_EXIT]);
+
+        assert_eq!(status, Some(42));
+        assert!(shown.is_empty(), "{shown:?}");
+    }
+
+    #[test]
+    fn a_json_document_on_the_stream_is_not_read_as_a_log_record() {
+        // `dl ws -- cat report.json 1>&2` against a devpod that does not know
+        // `--log-output`. Both of devpod's fields are required, so an object
+        // holding neither is forwarded whole rather than silently relabelled.
+        let lines = [
+            r#"{"level":"fatal"}"#,
+            r#"{"message":"hello"}"#,
+            r#"{"kind":"summary","failures":0}"#,
+            "{ not json at all",
+        ];
+
+        let (status, shown) = filter(&lines);
+
+        assert_eq!(status, None);
+        assert_eq!(shown, lines.map(str::to_owned).to_vec());
+    }
+
+    #[test]
+    fn a_plain_devpod_is_read_exactly_as_it_was_before() {
+        // The fallback, asked of the two lines that matter: a devpod too old to
+        // know the flag, and the attach route, which is not given it.
+        let (status, shown) = filter(&[DEBUG_HINT_LINE, REMOTE_EXIT_LINE]);
+
+        assert_eq!(status, Some(130));
+        assert!(shown.is_empty(), "{shown:?}");
     }
 
     #[test]

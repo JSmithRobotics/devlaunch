@@ -32,6 +32,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach a terminal either way, so a person watching a build sees exactly what they
   saw before.
 
+- **A command's stderr now comes back as the command wrote it.** `dl <ws> -- <cmd>`
+  reaches the container through `devpod ssh --command`, which asks for no pty, and
+  without a pty the container's stderr is folded into devpod's own -- through
+  devpod's stream logger, which reformats every line it carries. Measured against
+  devpod 0.26.1, `dl ws -- sh -c 'echo ERR >&2'` gave back a timestamp, a coloured
+  `info` tag, the text, and `stream_logger.go:492`. stdout was already clean and
+  had been for as long as anyone had looked, so a caller could parse a command's
+  JSON and not its compiler's diagnostics, and `docs/agents-using-dl.md` carried a
+  whole section saying so beside a `2>&1` workaround. That section is gone; stderr
+  is the fifth clause of the published contract now, and
+  `test_stderr_is_the_commands_output_verbatim` has stopped being a strict xfail.
+
+  The fix is devpod's own `--log-output json`, on the `devpod ssh` invocation and
+  nowhere else. Its neighbour `raw` is the obvious choice and is a trap worth
+  naming, because taking it would have broken the *first* clause of the same
+  contract while fixing the last. devpod means to pass a remote exit status
+  through and cannot: its top-level handler type-asserts on `*ssh.ExitError` after
+  wrapping it three times with `%w`, so every nonzero remote exit lands on the
+  generic failure path and exits 1 with the real status buried in a `fatal` line.
+  dl recovers the number by reading that line, and it anchors on the word `fatal`
+  to be sure the sentence is devpod's report and not a remote program printing the
+  same words. Under `raw` the report is `tunnel to container: run in container:
+  ssh session: Process exited with status 42` with no tag at all, the recovery
+  returns nothing, and `dl ws -- 'exit 42'` quietly stops exiting 42. `--silent`
+  fails the other way and swallows the command's stderr outright.
+
+  json keeps the level as a field. So the fatal is now read off `"level":"fatal"`
+  rather than off a coloured tag in the text, which is both a stronger anchor and
+  one a remote program cannot forge: devpod wraps whatever the container writes in
+  a record of its own at `info`, escaping it, so a container printing an entire
+  fatal record verbatim arrives as that record's `message` and is forwarded as the
+  text it is. Everything else is forwarded as the bare `message`, which for the
+  command's stderr is the command's bytes. A line that is not a record at all --
+  an older devpod, the plain log of the attach route, anything on the stream that
+  is not a log line -- falls through to the predicates that were already there, so
+  nothing about a devpod that does not know the flag changes.
+
+  Deliberately not passed on a bare `dl <ws>` attach. That route gets a pty, and
+  under one the container's stderr never touches this stream: the only thing json
+  would change is the look of devpod's own warnings to the person sitting in front
+  of them, trading a coloured `warn` tag for nothing. So an interactive session
+  logs exactly as it did, and the flag goes only where there is something to
+  unwrap.
+
+  Two things the clause does not promise, both now written on the page. Lines are
+  still read one at a time, so a command's unterminated last line arrives with a
+  newline it did not write; and devpod's logger strips ANSI escapes from what it
+  carries, so a tool that colours its errors arrives uncoloured -- which, since
+  the command is looking at a pipe rather than a terminal, most tools would have
+  done for themselves.
+
 ## [0.48.0] - 2026-09-13
 
 ### Fixed
