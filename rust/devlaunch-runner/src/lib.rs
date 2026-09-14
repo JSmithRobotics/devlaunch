@@ -252,6 +252,14 @@ pub struct SpawnSpec {
     /// original did. `passthrough`, `session` and `watched` read this field;
     /// `capture`'s children never lead a group, and `detach`'s lead a session.
     pub own_group: bool,
+    /// Whether this child's stdout is a progress log rather than anybody's
+    /// payload, in which case [`Runner::watched`] puts it on **stderr**.
+    ///
+    /// Read by `watched` alone, and `false` by default, so a child says this
+    /// about itself rather than having it assumed. `devpod up` is what says it:
+    /// see [`Runner::watched`] for the measurement that made this a field rather
+    /// than the whole method's behaviour.
+    pub stdout_is_log: bool,
 }
 
 impl From<Invocation> for SpawnSpec {
@@ -293,6 +301,14 @@ impl SpawnSpec {
     #[must_use]
     pub fn leading_its_own_group(mut self) -> Self {
         self.own_group = true;
+        self
+    }
+
+    /// Everything this child writes is progress, so a [`Runner::watched`] run of
+    /// it puts both streams on stderr. See [`SpawnSpec::stdout_is_log`].
+    #[must_use]
+    pub fn with_stdout_as_log(mut self) -> Self {
+        self.stdout_is_log = true;
         self
     }
 
@@ -482,6 +498,29 @@ pub trait Runner: Sync {
     /// splits by *level* (`info` to stdout, `fatal` to stderr), so a watch that
     /// read one stream would be a watch on a guess about severity.
     ///
+    /// # Unless the child says its stdout is a log
+    ///
+    /// [`SpawnSpec::stdout_is_log`] moves the stdout half onto stderr as well,
+    /// and the launch's `devpod up` is the child that sets it. devpod's logger
+    /// sends `info` to **stdout**, so a launch that echoed each line back where
+    /// it came from put the build's whole transcript there: measured at 26KB for
+    /// one cold `dl <ws> -- <command>` against a prebuilt image, ahead of the
+    /// command's own twelve bytes and indistinguishable from them by stream.
+    ///
+    /// That falsified the promise `docs/agents-using-dl.md` publishes and
+    /// `test/e2e/test_agent_subprocess_contract.py` pins -- stdout is the
+    /// command's, verbatim -- for exactly the callers the page is addressed to.
+    /// It was invisible to that guard because the guard only ever asked a
+    /// **warm** workspace, which runs no `up` at all, so a caller reading JSON
+    /// off `dl ws -- cat some.json` met devpod's log in front of it the first
+    /// time the workspace happened to be stopped.
+    ///
+    /// Per child rather than for the method, because the other `watched` caller
+    /// is `dl <ws> rm`, whose stdout is devpod's own "Successfully deleted"
+    /// report and is pinned as such by `dl/tests/grammar.rs`. Nothing is lost by
+    /// moving the launch's: a person watching a build reads it on the terminal
+    /// either way, since both streams land there.
+    ///
     /// Lines arrive without their newline. Order is kept within a stream and
     /// only approximately across the two, which is one pipe read after another
     /// and no worse than the terminal would have shown.
@@ -630,18 +669,21 @@ impl Runner for ProcessRunner {
     fn watched(&self, spec: &SpawnSpec, on_line: &mut dyn FnMut(&str)) -> Outcome {
         // Both streams read, and each line put straight back where it came from
         // before the caller sees it, so from the outside this is a passthrough
-        // that happened to be read. `writeln!` on the locked handle rather than
-        // `println!`, which panics on a closed stdout -- `dl ... | head` is an
-        // ordinary thing to type -- where a build that goes on printing into a
-        // pipe nobody reads should lose the line and not the launch.
+        // that happened to be read -- except for a child whose stdout is a log,
+        // which leaves on stderr with the rest of it. `writeln!` on the locked
+        // handle rather than `println!`, which panics on a closed stdout --
+        // `dl ... | head` is an ordinary thing to type -- where a build that goes
+        // on printing into a pipe nobody reads should lose the line and not the
+        // launch.
+        let stdout_is_log = spec.stdout_is_log;
         streamed(spec, Stdio::piped(), &mut |stream, line| {
             use std::io::Write as _;
             match stream {
-                Stream::Stdout => {
+                Stream::Stdout if !stdout_is_log => {
                     let mut out = std::io::stdout().lock();
                     let _ = writeln!(out, "{line}");
                 }
-                Stream::Stderr => {
+                Stream::Stdout | Stream::Stderr => {
                     let mut err = std::io::stderr().lock();
                     let _ = writeln!(err, "{line}");
                 }

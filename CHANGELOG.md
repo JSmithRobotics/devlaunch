@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A cold `dl <ws> -- <command>` no longer writes devpod's build log to stdout.**
+  `docs/agents-using-dl.md` promises a caller that stdout is the command's output
+  and nothing else, which is what makes `output=$(dl ws -- cat some.json)` safe to
+  parse. devpod's logger sends `info` to stdout and only `error` and `fatal` to
+  stderr; the launch watches its `devpod up` and echoed every line back to the
+  stream it arrived on; so a call against a *stopped* workspace put the whole
+  start transcript on stdout in front of the command's own output. Measured at
+  26KB against a prebuilt image, ahead of an 18-byte answer.
+
+  Every test of that clause asked a **warm** workspace, which runs no `up` at all,
+  so the page and its guard agreed with each other and not with the binary. The
+  new `test_stdout_is_still_the_commands_when_the_workspace_was_cold` stops the
+  workspace first, which is the entire difference and costs one start.
+
+  The launch's `up` now says that its output is progress
+  (`Call::whose_output_is_progress`, reaching `SpawnSpec::stdout_is_log`) and both
+  of devpod's streams leave on stderr. Per call rather than for every watched
+  child, because the other one is `dl <ws> rm`, whose stdout is devpod's own
+  "Successfully deleted workspace" report and is pinned as such by
+  `dl/tests/grammar.rs`. Nothing is lost by moving the launch's: both streams
+  reach a terminal either way, so a person watching a build sees exactly what they
+  saw before.
+
 ## [0.48.0] - 2026-09-13
 
 ### Fixed

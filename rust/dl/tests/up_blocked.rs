@@ -11,11 +11,22 @@
 //!
 //! The fake `devpod` below has `up` print devpod's line and then block, which is
 //! what holding the flock by hand would produce and needs no sibling process to
-//! do it. It prints on **stdout**, because that is where devpod puts it: its
-//! logger sends `info` to stdout and only `error` and `fatal` to stderr, and a
-//! watch on stderr alone was measured against the real orphan from devlaunch#600
-//! and said nothing. An ordinary build line goes to stderr as well, so the test
-//! also holds that both streams are forwarded, each to the stream it came from.
+//! do it. It prints the lock line on **stdout**, because that is where devpod
+//! puts it: its logger sends `info` to stdout and only `error` and `fatal` to
+//! stderr, and a watch on stderr alone was measured against the real orphan from
+//! devlaunch#600 and said nothing. An ordinary build line goes to stderr as well,
+//! so the test drives both of devpod's streams.
+//!
+//! Where they come back out is the other thing this holds, and it is not where
+//! they went in: **both arrive on dl's stderr**, and dl's stdout stays empty for
+//! the whole launch. devpod's log is progress and not payload, and leaving the
+//! `info` half on stdout broke the promise `docs/agents-using-dl.md` makes to a
+//! caller parsing `dl ws -- <command>` the first time that command's workspace
+//! was cold. Reading the lock line off stdout is what this test used to assert;
+//! reading it off stderr is what it asserts now, and the empty-stdout assertion
+//! at the end of the first test is the half that would have caught the
+//! regression on its own.
+//!
 //! `dl`'s streams go to files so they can be read while
 //! `dl` is still blocked, which is the only time the notice is worth anything; a
 //! Ctrl-C then ends the run the way the person reading the notice would, and the
@@ -328,9 +339,10 @@ fn a_launch_blocked_on_the_workspace_lock_says_so_once_while_it_is_blocked() {
     let stderr_so_far = || std::fs::read_to_string(&err_path).unwrap_or_default();
     // devpod's lines first: they prove the `up` is the one blocking, and that dl
     // forwarded them, so the watch cost the user none of devpod's own output.
+    // Both on stderr, whichever of devpod's streams they arrived on.
     assert!(
-        wait_for(|| stdout_so_far().contains(DEVPOD_LINE) && stderr_so_far().contains(BUILD_LINE)),
-        "devpod's lines never reached dl's streams; stdout so far:\n{}\nstderr so far:\n{}",
+        wait_for(|| stderr_so_far().contains(DEVPOD_LINE) && stderr_so_far().contains(BUILD_LINE)),
+        "devpod's lines never reached dl's stderr; stdout so far:\n{}\nstderr so far:\n{}",
         stdout_so_far(),
         stderr_so_far()
     );
@@ -397,12 +409,11 @@ fn a_launch_blocked_on_the_workspace_lock_says_so_once_while_it_is_blocked() {
         "dl never reported what its sweep found:\n{stderr}"
     );
     // Once, however many times devpod said it: two lock lines in, one notice out,
-    // and every line back on the stream it came from.
-    let stdout = stdout_so_far();
+    // and every line of devpod's on stderr.
     assert_eq!(
-        stdout.matches(DEVPOD_LINE).count(),
+        stderr.matches(DEVPOD_LINE).count(),
         2,
-        "devpod's stdout lines were forwarded to stdout:\n{stdout}"
+        "devpod's stdout lines were forwarded to stderr:\n{stderr}"
     );
     assert_eq!(
         stderr.matches(BUILD_LINE).count(),
@@ -410,14 +421,18 @@ fn a_launch_blocked_on_the_workspace_lock_says_so_once_while_it_is_blocked() {
         "devpod's stderr line was forwarded to stderr:\n{stderr}"
     );
     assert_eq!(
-        stderr.matches(DEVPOD_LINE).count(),
-        0,
-        "nothing moved devpod's stdout lines onto stderr:\n{stderr}"
-    );
-    assert_eq!(
         stderr.matches(NOTICE).count(),
         1,
         "the notice was said exactly once:\n{stderr}"
+    );
+    // And the half that is the point: a launch that built, blocked, swept and was
+    // interrupted put not one byte on stdout. `dl <ws> -- <command>` gives stdout
+    // to the command, and a cold workspace runs all of the above before the
+    // command starts.
+    let stdout = stdout_so_far();
+    assert!(
+        stdout.is_empty(),
+        "dl wrote to stdout during a launch, where a command's output belongs:\n{stdout}"
     );
 }
 
