@@ -237,18 +237,17 @@ Four things about the loop itself:
   the clone, the launch and the teardown. The container name is the
   devcontainer's to choose and only *ends* with the id, so match, do not build
   it, and expect one row per service from a compose project.
-- **Merge stderr inside the container:** `dl <ws> -- sh -c 'make test 2>&1'`. A
-  command's stderr still comes back wrapped in devpod's stream logger, and
-  redirecting on the host merges the wrapped version. This is the belt-and-braces
-  form for any call whose stderr you parse.
+- **Merge stderr inside the container** for any call whose stderr you parse:
+  `dl <ws> -- sh -c 'make test 2>&1'`. The merge happens before the output leaves
+  the container, so one stream comes back in the order the command wrote it and
+  the exit status is still the command's. Redirecting on the host is a different
+  operation and not a substitute for it.
 - **`--` is what asks for a command.** Without it the line is the session form,
   which feeds stdin to the remote shell instead. Ordinary ssh semantics, but a
   script that drops the `--` runs nothing and says so quietly.
 
 Argv after `--` is passed through verbatim: no second round of word splitting,
-globbing or expansion. And until [#621](https://github.com/blooop/devlaunch/pull/621)
-lands, a *cold* run writes devpod's build log to stdout, which is the other
-reason to start the workspace in a call of its own.
+globbing or expansion.
 
 ## Documentation Maintenance
 
