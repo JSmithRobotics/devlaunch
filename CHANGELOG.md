@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-09-14
+
 ### Fixed
 
 - **A cold `dl <ws> -- <command>` no longer writes devpod's build log to stdout.**
