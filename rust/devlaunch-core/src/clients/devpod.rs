@@ -395,7 +395,7 @@ const FATAL_TAG: &str = "fatal";
 /// ```
 ///
 /// -- timestamped, level-tagged, coloured, with a Go source location appended.
-/// That is unparseable as a compiler's or a test runner's diagnostics, which is
+/// That is unparsable as a compiler's or a test runner's diagnostics, which is
 /// what `docs/agents-using-dl.md` promises a caller gets. In json the same line
 /// is `{"time":"...","message":"ERR","level":"info"}`, and the message is the
 /// command's bytes, so the decoration can be taken back off.
