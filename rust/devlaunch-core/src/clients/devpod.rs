@@ -109,6 +109,10 @@ pub(crate) struct Call {
     /// `dl`'s interrupt handler can tear it down independently. Only `devpod up`
     /// sets it, and it runs through [`run_watching`]; see [`SpawnSpec::own_group`].
     own_group: bool,
+    /// Whether everything this call writes is progress rather than a payload, so
+    /// that a [`run_watching`] of it leaves on stderr. Only the launch's
+    /// `devpod up` sets it; see [`SpawnSpec::stdout_is_log`].
+    stdout_is_log: bool,
 }
 
 impl Call {
@@ -160,6 +164,16 @@ impl Call {
         self
     }
 
+    /// Everything this call writes is devpod's own progress log, so a
+    /// [`run_watching`] of it puts both streams on stderr and leaves stdout to
+    /// whatever the caller asked `dl` for. The launch's `up` is the one call that
+    /// says so: `dl <ws> rm`'s report is its own stdout and stays there.
+    #[must_use]
+    pub(crate) fn whose_output_is_progress(mut self) -> Self {
+        self.stdout_is_log = true;
+        self
+    }
+
     /// The whole argv, `devpod` included — what a recorded call compares against.
     pub(crate) fn argv(&self) -> Vec<String> {
         self.spec().invocation.argv()
@@ -187,6 +201,7 @@ impl Call {
             stdin: self.stdin.clone(),
             timeout: self.timeout,
             own_group: self.own_group,
+            stdout_is_log: self.stdout_is_log,
         }
     }
 }
@@ -228,10 +243,11 @@ pub(crate) fn run(runner: &dyn Runner, call: &Call) -> Result<Exit, NotRun> {
 
 /// The same call, with every line devpod prints read on its way past.
 ///
-/// stdin is still this process's, and every line is written back to the stream
-/// it arrived on before `on_line` sees it, so a caller that was a passthrough
-/// stays one from the outside: the only thing that changed is that dl has seen
-/// each line.
+/// stdin is still this process's, and every line is written back out on
+/// **stderr** before `on_line` sees it. devpod's log is never anybody's payload,
+/// and echoing its `info` lines to stdout put a whole build transcript in front
+/// of the output of the command a caller asked for; [`Runner::watched`] carries
+/// the measurement and the reasoning.
 ///
 /// For the calls where a line devpod prints is worth *acting* on rather than only
 /// showing. That is a narrow set and deliberately so: it is the lines that mean

@@ -782,8 +782,16 @@ fn a_cold_triple_prepares_a_clone_creates_the_workspace_and_attaches() {
     let world = World::with(&[]);
     let run = world.dl(&["blooop/devlaunch@cold"]);
     run.exited(0);
-    // devpod's own line, on stdout because the `up` inherits this process's streams.
-    assert_eq!(run.out, format!("Workspace {COLD} is ready\n"));
+    // devpod's own line, on **stderr**: the `up` is watched rather than inherited
+    // and its log is progress, not this run's payload. stdout belongs to whatever
+    // command the caller asked for, and a launch that was handed none writes
+    // nothing there at all.
+    assert_eq!(run.out, "");
+    assert!(
+        run.err.contains(&format!("Workspace {COLD} is ready")),
+        "devpod's line reaches the user, on stderr: {}",
+        run.err
+    );
     // The host's own work first, said as it happens: the one targeted fetch, what the
     // branch step found, and the clone about to be cut. Then what the `up` asked
     // devpod for, and then the setup stages, which report nothing because the fake
@@ -807,6 +815,9 @@ fn a_cold_triple_prepares_a_clone_creates_the_workspace_and_attaches() {
             "ssh-agent: none on this host (SSH_AUTH_SOCK is unset), so this workspace has no \
              SSH key to push with. GitHub still works over HTTPS with the forwarded gh token. \
              Start an agent and export SSH_AUTH_SOCK to change that.",
+            // devpod's own, in the order it said it: the `up`'s log joins dl's
+            // notices on one stream rather than splitting across two.
+            &format!("Workspace {COLD} is ready"),
             &format!("{COLD}: the hostname setup stage did not report; it may not have run."),
             &format!("{COLD}: the title setup stage did not report; it may not have run."),
             &format!("{COLD}: the onboarding setup stage did not report; it may not have run."),
@@ -881,7 +892,12 @@ fn a_path_spec_is_named_lexically_symlinks_and_all() {
     let world = World::with(&["--symlinked-path"]);
     let run = world.dl(&["{ROOT}/foreign/link"]);
     run.exited(0);
-    assert_eq!(run.out, "Workspace link is ready\n");
+    assert_eq!(run.out, "");
+    assert!(
+        run.err.contains("Workspace link is ready"),
+        "devpod's line reaches the user, on stderr: {}",
+        run.err
+    );
     // Nothing is asked of devpod before the `up`: everything creatable goes through
     // `up`, which is idempotent for a workspace devpod already has.
     assert_eq!(
@@ -978,7 +994,14 @@ fn up_on_a_stopped_workspace_brings_it_up_and_hands_over_no_session() {
     let world = World::with(&["--stopped"]);
     let run = world.dl(&[MAIN, "up"]);
     run.exited(0);
-    assert_eq!(run.out, format!("Workspace {MAIN} is ready\n"));
+    // `up` hands over no session, so nothing at all is owed to stdout: devpod's
+    // readiness line is progress and goes out with the rest of its log.
+    assert_eq!(run.out, "");
+    assert!(
+        run.err.contains(&format!("Workspace {MAIN} is ready")),
+        "devpod's line reaches the user, on stderr: {}",
+        run.err
+    );
     let calls = world.calls().summarised(&world.root);
     assert_eq!(
         calls[..2],

@@ -1864,7 +1864,10 @@ fn up_under_stage(
     let mut said = false;
     let exit = devpod::run_watching(
         runner,
-        &Call::new(args).leading_its_own_group().with_env(env),
+        &Call::new(args)
+            .leading_its_own_group()
+            .whose_output_is_progress()
+            .with_env(env),
         &mut |line| {
             // Before the lock arm, and not behind `said`: these are the failure
             // being watched for, where the lock line is a wait that may resolve.
