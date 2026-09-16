@@ -251,6 +251,21 @@ coverage-report = "coverage report -m"
 coverage-rust = { cmd = "cargo llvm-cov --workspace --locked --summary-only -- --test-threads=1", cwd = "rust" }
 # The lcov file CI uploads, for anything that reads one locally.
 coverage-rust-lcov = { cmd = "cargo llvm-cov --workspace --locked --lcov --output-path lcov.info -- --test-threads=1", cwd = "rust" }
+# Regenerates rust/devlaunch-core/public-api.{api,rest}.txt and
+# rust/devlaunch-runner/public-api.txt (no argument: run
+# scripts/public-api-snapshots.sh --print-files to see the exact list), or
+# checks/diffs them against a DEST passed as an extra argument, the same way
+# scripts/public-api-snapshots.sh itself does -- CI's `public-api` job passes
+# one.
+#
+# A task rather than the script named directly, because the script alone needs
+# a nightly toolchain and a pinned `cargo-public-api` this environment has
+# neither of by default. scripts/run-public-api.sh is what installs the pin
+# (skipping the install once it is already there) and assembles the one
+# environment -- a rustup shim on PATH, and `RUSTC_BOOTSTRAP=1` -- that lets
+# the *stable* toolchain this repository already pins render them instead.
+# See that script's header for why each piece is there.
+public-api = "bash scripts/run-public-api.sh"
 update-lock = "pixi update && git commit -a -m'update pixi.lock' || true"
 push = "git push"
 update-lock-push = { depends-on = ["update-lock", "push"] }
