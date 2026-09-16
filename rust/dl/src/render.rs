@@ -3041,6 +3041,19 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
              holds. A workspace that predates the check picks it up after one `up`.",
             python_repr(name)
         ),
+        LaunchNotice::ClaudeProfileBound { name, source } => format!(
+            "Claude profile {}: {} is now the container's Claude configuration, so `claude` \
+             there runs as that account and refreshes its own login in place. Changing \
+             profile is a `recreate`, since a mount lands only when the container is created.",
+            python_repr(name),
+            source.display()
+        ),
+        LaunchNotice::ClaudeProfileMountUnappliable { name } => format!(
+            "--claude-profile {} was not bound: this container already exists, and a `--mount` \
+             only lands when devpod creates one. Its Claude configuration is unchanged from \
+             before this launch; a `recreate` is what binds it.",
+            python_repr(name)
+        ),
 
         LaunchNotice::CodexStageMissing { workspace_id } => format!(
             "Workspace {workspace_id} was set up without codex, so this launch installs it \

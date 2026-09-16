@@ -532,6 +532,27 @@ pub enum LaunchNotice {
     /// inside the session. `dl <ws> stop` already prints the same courtesy for the
     /// same flag.
     ClaudeProfileNotForwarded { name: String },
+    /// A named profile was bound in as the container's Claude configuration.
+    ///
+    /// Said because attribution is the failure profiles exist to prevent: this is
+    /// the account the agent in there will run as, and the operator asked for it
+    /// by name several steps earlier. Said only when `request.naming` says this
+    /// call is a create (see `up_under_stage`), because that is the one fact
+    /// that tells whether the bind actually lands: devpod re-applies
+    /// `--workspace-env` on every `up`, but a `--mount` lands only at creation,
+    /// and `ClaudeProfileMount::ensure` alone cannot tell a create from a
+    /// restart of a container that already exists.
+    ClaudeProfileBound { name: String, source: PathBuf },
+    /// A named profile resolved to a real, credentialed directory, but this call
+    /// is not creating the container -- a restart or an attach against one devpod
+    /// already knows -- so the mount cannot land.
+    ///
+    /// Says only what is true regardless of what is already bound: this call did
+    /// not bind `name`. It does not say whether the running container already
+    /// holds this profile or a different one, because [`ClaudeProfileMount::Bound`]
+    /// carries no fact about what is currently mounted -- reporting the bound
+    /// source path is step 5's job. Switching profiles is a `recreate`.
+    ClaudeProfileMountUnappliable { name: String },
 
     /// This workspace was provisioned before, but without the codex stage, and this
     /// launch wants codex.
@@ -996,6 +1017,159 @@ impl PixiCache {
 }
 
 // ===========================================================================
+// binding a named Claude profile in as the container's configuration
+// ===========================================================================
+
+/// Whether this launch binds a Claude profile in as the container's configuration.
+///
+/// # Why a mount and not only the forwarded token
+///
+/// [`SessionContext::forwarded_claude`] sends a profile's access token by value,
+/// and that token cannot refresh: there is nothing to refresh with and nowhere to
+/// persist the result, so a session outliving its expiry asks the operator to log
+/// in again. Binding the profile *directory* instead gives Claude Code the same
+/// files it has on the host -- the credential, but also `CLAUDE.md`, `agents/`,
+/// `skills/`, `hooks/`, `commands/` -- so it refreshes exactly as it does there
+/// and the refreshed credential lands back in the profile. Not `.mcp.json`: that
+/// lives at a project's root rather than under `CLAUDE_CONFIG_DIR`, so binding a
+/// profile does not touch it either way.
+///
+/// The directory and not `.credentials.json` alone: a refresh rewrites that file,
+/// writes like that are ordinarily atomic, and a bind of a file does not survive
+/// its source being replaced by rename. A bind of the directory follows the
+/// rename.
+///
+/// # Only when asked
+///
+/// [`Self::NotAsked`] is the whole of a launch that named no profile, and it
+/// emits nothing. Redirecting `CLAUDE_CONFIG_DIR` unconditionally would take a
+/// devcontainer's own deliberately-mounted configuration away from it, and break
+/// instruction sharing it had set up, for launches that never asked for a
+/// profile.
+///
+/// A sum rather than an `Option<PathBuf>` for [`PixiCache`]'s reason: each way of
+/// not binding names a different state, and both a missing directory and an
+/// unparseable name are worth reporting through [`crate::clients::claude::resolve_token`]'s
+/// own refusals rather than through this type -- this type only decides what
+/// `up` can bind, and a launch that cannot bind still has to survive.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ClaudeProfileMount {
+    /// No `--claude-profile`, so nothing to bind and nothing to redirect. Also
+    /// what `--claude-profile default` resolves to: [`claude::DEFAULT_PROFILE`]
+    /// is the login this host uses anyway, exactly as
+    /// [`claude::resolve_token`] treats it, so a directory named `default` is
+    /// never consulted here either -- see the constant's own doc for why, and
+    /// devlaunch's step 4 for the fuller symmetry this stands in for today.
+    NotAsked,
+    /// A name [`crate::clients::claude::ProfileName::parse`] rejects.
+    NotAName { name: String },
+    /// The name is one, but this host resolved no profiles root at all -- no
+    /// home directory and no override. Distinct from [`Self::NotAName`]: the
+    /// name was never the problem, and saying so would send someone re-typing a
+    /// name that was fine.
+    NoRoot { name: String },
+    /// The name is one and the directory holds no credential -- either it does
+    /// not exist, or it exists with nobody having logged in yet.
+    Missing { name: String, source: PathBuf },
+    /// Bound, and `CLAUDE_CONFIG_DIR` points at it.
+    Bound { name: String, source: PathBuf },
+}
+
+impl ClaudeProfileMount {
+    /// Decide, from the host, what this launch can bind.
+    ///
+    /// The credential and not just the directory decides [`Self::Bound`]: binding
+    /// a profile directory that holds no login would hand the container a
+    /// logged-out configuration and call it success, where falling through to
+    /// [`Self::Missing`] reaches the refusals
+    /// [`crate::clients::claude::resolve_token`] already builds for exactly that.
+    pub(crate) fn ensure(host: &Host) -> Self {
+        let Some(named) = host
+            .claude
+            .profile
+            .as_deref()
+            .filter(|named| *named != claude::DEFAULT_PROFILE)
+        else {
+            return Self::NotAsked;
+        };
+        let source = match claude::profile_dir(host.claude_profiles_root.as_deref(), named) {
+            Ok(source) => source,
+            Err(claude::ProfileDirProblem::NotAName) => {
+                return Self::NotAName {
+                    name: named.to_owned(),
+                };
+            }
+            Err(claude::ProfileDirProblem::NoRoot) => {
+                return Self::NoRoot {
+                    name: named.to_owned(),
+                };
+            }
+        };
+        if !claude::has_credential(&source) {
+            return Self::Missing {
+                name: named.to_owned(),
+                source,
+            };
+        }
+        Self::Bound {
+            name: named.to_owned(),
+            source,
+        }
+    }
+
+    /// The `devpod up` flags that bind the profile and point Claude Code at it.
+    ///
+    /// Two, and the second is not optional: a bind at a path Claude Code does not
+    /// read is a directory nothing opens. The mount lands only at creation, so
+    /// `creating_container` gates *both* flags together: emitting the env half
+    /// without the mount is worse than emitting neither, since it silently
+    /// repoints `CLAUDE_CONFIG_DIR` at a directory nothing bound anything into.
+    /// The target ([`provision::CLAUDE_CONFIG_TARGET`]) is a constant and the
+    /// source is the only half that varies, so switching profiles is a
+    /// `recreate`.
+    ///
+    /// `creating_container` is *implied by* this `up` creating or rebuilding the
+    /// container, not equivalent to it: its caller derives it from
+    /// `request.naming` and `request.rebuild` alone, which cannot see devpod's
+    /// own state. A [`Placement::Known`] with [`ContainerState::NotFound`]
+    /// (devpod has a record but no container) under [`Rebuild::Reuse`] is the
+    /// known gap -- the following `up` *does* create a container, but the bool
+    /// reads `false`, so both flags are withheld and the operator is told
+    /// [`LaunchNotice::ClaudeProfileMountUnappliable`] rather than
+    /// [`LaunchNotice::ClaudeProfileBound`]. Recoverable with `recreate`, and
+    /// identical to the behaviour the old gate had here, so not a regression --
+    /// but the next flag gated on this bool would inherit the same gap.
+    ///
+    /// The opposite mismatch exists too, on the no-profile [`Plan::Creatable`]
+    /// route [`Launch::place_creatable`] only asks devpod about when a profile
+    /// is requested: `dl /tmp/proj` against a container the first call already
+    /// created still yields [`Placement::Creating`], so `creating_container`
+    /// reads `true` while nothing is actually created. Harmless today because
+    /// `self` is [`Self::NotAsked`] on that route, but the parameter now carries
+    /// a general-purpose name and the next thing gated on it would inherit this
+    /// same defect rather than only the one above.
+    pub(crate) fn up_args(&self, creating_container: bool) -> Vec<String> {
+        match self {
+            Self::Bound { source, .. } if creating_container => vec![
+                "--mount".to_owned(),
+                format!(
+                    "type=bind,source={},target={}",
+                    source.display(),
+                    provision::CLAUDE_CONFIG_TARGET
+                ),
+                "--workspace-env".to_owned(),
+                format!("CLAUDE_CONFIG_DIR={}", provision::CLAUDE_CONFIG_TARGET),
+            ],
+            Self::Bound { .. }
+            | Self::NotAsked
+            | Self::NotAName { .. }
+            | Self::NoRoot { .. }
+            | Self::Missing { .. } => Vec::new(),
+        }
+    }
+}
+
+// ===========================================================================
 // the host's GitHub token, asked for once per launch
 // ===========================================================================
 
@@ -1245,6 +1419,8 @@ pub(crate) fn up_args(
     request: &UpRequest<'_>,
     options: &ContextOptions,
     pixi: &PixiCache,
+    claude: &ClaudeProfileMount,
+    creating_container: bool,
     token: &[String],
 ) -> Vec<String> {
     let mut args = vec!["up".to_owned(), request.source.to_owned()];
@@ -1267,6 +1443,7 @@ pub(crate) fn up_args(
     }
     args.extend(options.up_args());
     args.extend(pixi.up_args());
+    args.extend(claude.up_args(creating_container));
     args.extend(token.iter().cloned());
     args
 }
@@ -1722,6 +1899,7 @@ fn up_under_stage(
     );
     let pixi = PixiCache::ensure(host.pixi_cache_source());
     notices.say_all(pixi.notice());
+    let claude_mount = ClaudeProfileMount::ensure(host);
 
     // Taken here, so the lock covers the state re-check, the `up` and the tools:
     // a launch waiting on a prewarm must not attach before the tools land.
@@ -1796,7 +1974,41 @@ fn up_under_stage(
         .as_ref()
         .map(StagedToken::up_args)
         .unwrap_or_default();
-    let args = up_args(request, &options, &pixi, &token_args);
+    // Said here and not in `ClaudeProfileMount::ensure`, because this is the path
+    // that creates a container: it is the only place that knows whether the
+    // mount actually lands. `ensure` only answers what the host *could* bind --
+    // a `--mount` lands only at container creation or a rebuild (devpod offers no
+    // way to add one to a container it is merely reusing), so the fact that
+    // decides which notice is true -- and, below, which flags are even emitted --
+    // is `request.naming` together with `request.rebuild`, not `claude_mount`
+    // alone. `Naming::Create` alone used to gate this and missed `recreate`/
+    // `reset` against a `Naming::Known` workspace, where the container is rebuilt
+    // (and the mount lands) despite carrying no `--id`.
+    let creating_container = matches!(request.naming, Naming::Create { .. })
+        || !matches!(request.rebuild, Rebuild::Reuse);
+    match &claude_mount {
+        ClaudeProfileMount::Bound { name, source } if creating_container => {
+            notices.say(LaunchNotice::ClaudeProfileBound {
+                name: name.clone(),
+                source: source.clone(),
+            });
+        }
+        ClaudeProfileMount::Bound { name, .. } => {
+            notices.say(LaunchNotice::ClaudeProfileMountUnappliable { name: name.clone() });
+        }
+        ClaudeProfileMount::NotAsked
+        | ClaudeProfileMount::NotAName { .. }
+        | ClaudeProfileMount::NoRoot { .. }
+        | ClaudeProfileMount::Missing { .. } => {}
+    }
+    let args = up_args(
+        request,
+        &options,
+        &pixi,
+        &claude_mount,
+        creating_container,
+        &token_args,
+    );
     // Said here rather than where the options are read, so the line and the argv
     // cannot disagree: this is the one production site that turns those options
     // into flags, and it is on the far side of every arm that returns without
@@ -3667,6 +3879,13 @@ pub enum Plan {
     /// `--id workspace_id`, and **nothing is asked of devpod about it** — that is
     /// Python's behaviour rather than an oversight: everything creatable goes
     /// through `up`, which is idempotent for a workspace devpod already has.
+    ///
+    /// One narrow exception: [`Launch::place_creatable`] asks devpod `status` for
+    /// this route's guessed `workspace_id`, but only when `--claude-profile` was
+    /// actually given. That call exists to settle exactly one fact `up`'s
+    /// idempotence does not make true on its own -- whether a `--mount` this
+    /// launch is about to ask for can land -- and it is skipped for every launch
+    /// that named no profile, so the claim above still holds for them.
     Creatable {
         source: String,
         workspace_id: String,
@@ -4640,11 +4859,7 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
             Plan::Creatable {
                 source,
                 workspace_id,
-            } => Ok(Ok(Placement::Creating {
-                title: workspace_id.clone(),
-                workspace_id,
-                source,
-            })),
+            } => Ok(Ok(self.place_creatable(source, workspace_id))),
             Plan::Existing { name } => self.place_existing(name),
             Plan::Triple {
                 owner,
@@ -4652,6 +4867,64 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
                 branch,
                 remote_url,
             } => self.place_triple(owner, repo, branch, remote_url),
+        }
+    }
+
+    /// A path or a git source: [`Plan::Creatable`]'s placement, with the one
+    /// exception its own doc names.
+    ///
+    /// Devpod is asked `status` for the guessed `workspace_id` -- exactly the call
+    /// [`Self::place_existing`] already pays for a bare name -- but only when
+    /// `--claude-profile` was actually requested. Unscoped, this would cost every
+    /// launch down this route a round trip devpod's idempotent `up` never needed;
+    /// scoped to the one case a wrong guess here is actually dangerous (D2-A: a
+    /// second `dl ./path --claude-profile x` against a container the first call
+    /// already created, where `Naming::Create` alone would claim a `--mount` is
+    /// about to land into a container that is not being created at all), it costs
+    /// nothing on every other launch.
+    ///
+    /// A devpod that recognises the id is addressed exactly as
+    /// [`Self::place_existing`] addresses a bare name: [`Placement::Known`], no
+    /// `--id`, and the mount gate this exists for reads it correctly. A devpod
+    /// that does not -- including one this call could not reach at all -- falls
+    /// through to [`Placement::Creating`] unchanged: that failure means only
+    /// "nothing to correct," since a workspace `up` cannot create is refused by
+    /// `up` itself, on the same path this had before.
+    ///
+    /// The promotion is not free of side effects elsewhere: [`Placement::is_running`]
+    /// answers hard-`false` for [`Placement::Creating`] but reads the real state
+    /// for [`Placement::Known`], so promoting an already-running container onto
+    /// this route takes the fast-attach path and runs no `devpod up` at all. On
+    /// that path `claude_seen` is never set, so `forwarded_claude` finds `None`
+    /// and emits [`LaunchNotice::ClaudeProfileNotForwarded`] rather than
+    /// forwarding the profile's token, where the pre-promotion route would have
+    /// provisioned and forwarded it. Accepted: it is byte-for-byte what
+    /// `place_existing` already does for a bare name, and the operator is told
+    /// rather than left silent.
+    fn place_creatable(&mut self, source: String, workspace_id: String) -> Placement {
+        let profile_requested = self
+            .host
+            .claude
+            .profile
+            .as_deref()
+            .is_some_and(|named| named != claude::DEFAULT_PROFILE);
+        if profile_requested
+            && let Ok(state) = lifecycle::workspace_state(
+                self.context.runner(),
+                &workspace_id,
+                Patience::AsLongAsItTakes,
+            )
+        {
+            return Placement::Known {
+                title: workspace_id.clone(),
+                workspace_id,
+                state,
+            };
+        }
+        Placement::Creating {
+            title: workspace_id.clone(),
+            workspace_id,
+            source,
         }
     }
 
@@ -4995,6 +5268,15 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
     /// Kept as it is: this is the one caller shape [`Naming::Anonymous`] exists
     /// for, and changing it here would be a behaviour change wearing a port's
     /// clothes.
+    ///
+    /// The `Placement::Creating` -> `Naming::Create` versus `Placement::Known` /
+    /// `Placement::Listed` -> `Naming::Anonymous` split below carries the same
+    /// caveat [`Self::place_creatable`]'s doc names for its own promotion: a
+    /// `Placement::Known` reached here (whether devpod always knew it, or
+    /// `place_creatable` promoted it because a profile was requested) asks
+    /// devpod nothing about `--id` and, once the container is already running,
+    /// needs no `up` at all -- so the mount can never land on this path either,
+    /// and a requested profile is reported unforwarded rather than bound.
     fn run_dotfiles(&mut self, placement: &Placement) -> Result<Launched, LaunchAborted> {
         let running = lifecycle::workspace_state(
             self.context.runner(),
@@ -7519,7 +7801,14 @@ mod tests {
             },
         );
 
-        let args = up_args(&request, &ContextOptions::default(), &pixi, &[]);
+        let args = up_args(
+            &request,
+            &ContextOptions::default(),
+            &pixi,
+            &ClaudeProfileMount::NotAsked,
+            true,
+            &[],
+        );
 
         assert_eq!(
             args,
@@ -7562,6 +7851,8 @@ mod tests {
             &PixiCache::NotADirectory {
                 source: PathBuf::from("/nope"),
             },
+            &ClaudeProfileMount::NotAsked,
+            true,
             &[],
         );
 
@@ -7590,6 +7881,8 @@ mod tests {
             &PixiCache::NotADirectory {
                 source: PathBuf::from("/nope"),
             },
+            &ClaudeProfileMount::NotAsked,
+            true,
             &[],
         );
 
@@ -7627,6 +7920,8 @@ mod tests {
                 &UpRequest::new("myws", Naming::Anonymous).with_rebuild(rebuild),
                 &ContextOptions::default(),
                 &nothing,
+                &ClaudeProfileMount::NotAsked,
+                true,
                 &[],
             )
         };
@@ -7657,6 +7952,8 @@ mod tests {
             &PixiCache::NotADirectory {
                 source: PathBuf::from("/nope"),
             },
+            &ClaudeProfileMount::NotAsked,
+            true,
             &[],
         );
 
@@ -7695,6 +7992,8 @@ mod tests {
             &PixiCache::NotADirectory {
                 source: PathBuf::from("/nope"),
             },
+            &ClaudeProfileMount::NotAsked,
+            true,
             &[],
         );
 
@@ -7719,6 +8018,8 @@ mod tests {
             &PixiCache::NotADirectory {
                 source: PathBuf::from("/nope"),
             },
+            &ClaudeProfileMount::NotAsked,
+            true,
             &[],
         );
 
@@ -7770,6 +8071,443 @@ mod tests {
         // created by the runtime as root, so pointing this into `~/.cache` handed
         // containers a root-owned home cache.
         assert_eq!(PIXI_CACHE_TARGET, "/var/tmp/devlaunch-pixi");
+    }
+
+    // --------------------------------------- binding a named Claude profile
+
+    #[test]
+    fn a_launch_that_names_no_profile_binds_nothing() {
+        // The whole of the conservative default. Redirecting `CLAUDE_CONFIG_DIR`
+        // for a launch that asked for no profile would take a devcontainer's own
+        // mounted configuration away from it, and break instruction sharing it
+        // had set up, for nothing anyone requested.
+        let scene = Scene::new();
+        let mount = ClaudeProfileMount::ensure(&scene.host);
+        assert_eq!(mount, ClaudeProfileMount::NotAsked);
+        assert_eq!(mount.up_args(true), Vec::<String>::new());
+    }
+
+    #[test]
+    fn claude_profile_default_binds_nothing_even_when_a_directory_of_that_name_exists() {
+        // devlaunch's D1: `--claude-profile default` used to pass `ProfileName::parse`
+        // unfiltered, so on a host with `~/.claude-profiles/default/.credentials.json`
+        // it bound that directory and the container ran as whatever account was in
+        // it -- silently, since `ClaudeConfig::Bound` forwards no token and warns of
+        // nothing. `default` means the login this host uses anyway
+        // (`claude::resolve_token`'s own filter), and this pins `ensure` to the same
+        // rule `profile_name_is_offerable` already applies.
+        let mut scene = Scene::new();
+        scene.host.claude_profiles_root = Some(scene.dir.path().join("claude-profiles"));
+        let trap = scene.dir.path().join("claude-profiles").join("default");
+        std::fs::create_dir_all(&trap).expect("the trap directory");
+        std::fs::write(trap.join(".credentials.json"), "{}").expect("a credential");
+        scene.host.claude.profile = Some("default".to_owned());
+
+        let mount = ClaudeProfileMount::ensure(&scene.host);
+
+        assert_eq!(mount, ClaudeProfileMount::NotAsked);
+        assert_eq!(mount.up_args(true), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_valid_name_on_a_host_with_no_profiles_root_is_not_reported_as_a_bad_name() {
+        // The mislabelled arm: `ensure` used to answer `NotAName` both for a name
+        // `ProfileName::parse` rejects and for a host that resolved no profiles root
+        // at all, which tells someone with a perfectly good name that their name was
+        // the problem. `NoRoot` is the honest answer for the second cause.
+        let mut scene = Scene::new();
+        scene.host.claude_profiles_root = None;
+        scene.host.claude.profile = Some("bear".to_owned());
+
+        let mount = ClaudeProfileMount::ensure(&scene.host);
+
+        assert_eq!(
+            mount,
+            ClaudeProfileMount::NoRoot {
+                name: "bear".to_owned(),
+            }
+        );
+        assert_eq!(mount.up_args(true), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_named_profile_with_a_credential_is_bound_and_the_config_dir_points_at_it() {
+        let mut scene = Scene::new();
+        scene.host.claude_profiles_root = Some(scene.dir.path().join("claude-profiles"));
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{}").expect("a credential");
+
+        let mut host = scene.host.clone();
+        host.claude.profile = Some("bear".to_owned());
+
+        let mount = ClaudeProfileMount::ensure(&host);
+        assert!(
+            matches!(mount, ClaudeProfileMount::Bound { .. }),
+            "{mount:?}"
+        );
+        // Both flags, and the second is the load-bearing one: a bind at a path
+        // Claude Code does not read is a directory nothing opens.
+        assert_eq!(
+            mount.up_args(true),
+            vec![
+                "--mount".to_owned(),
+                format!(
+                    "type=bind,source={},target={}",
+                    profile.display(),
+                    provision::CLAUDE_CONFIG_TARGET
+                ),
+                "--workspace-env".to_owned(),
+                format!("CLAUDE_CONFIG_DIR={}", provision::CLAUDE_CONFIG_TARGET),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_profile_directory_with_no_credential_binds_nothing() {
+        // The launch survives, as it does for a pixi cache that could not be
+        // made: a missing login costs the binding, and `resolve_token`'s own
+        // refusal is what reports the name to the operator -- this type does not
+        // get to fail a launch on its own.
+        let mut scene = Scene::new();
+        scene.host.claude_profiles_root = Some(scene.dir.path().join("claude-profiles"));
+        let profile = scene.dir.path().join("claude-profiles").join("absent");
+
+        let mut host = scene.host.clone();
+        host.claude.profile = Some("absent".to_owned());
+
+        let mount = ClaudeProfileMount::ensure(&host);
+        assert_eq!(
+            mount,
+            ClaudeProfileMount::Missing {
+                name: "absent".to_owned(),
+                source: profile,
+            }
+        );
+        assert_eq!(mount.up_args(true), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_name_that_could_not_be_a_directory_binds_nothing() {
+        // `ProfileName::parse` is the one gate on what a profile may be called,
+        // and a path traversal reaching a `--mount` source is the reason it
+        // exists. Refused here by asking it rather than by a second rule.
+        let mut scene = Scene::new();
+        scene.host.claude_profiles_root = Some(scene.dir.path().join("claude-profiles"));
+
+        let mut host = scene.host.clone();
+        host.claude.profile = Some("../../etc".to_owned());
+
+        let mount = ClaudeProfileMount::ensure(&host);
+        assert_eq!(
+            mount,
+            ClaudeProfileMount::NotAName {
+                name: "../../etc".to_owned(),
+            }
+        );
+        assert_eq!(mount.up_args(true), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_bound_profile_reaches_the_up_argv_and_is_announced() {
+        // Pinned end to end, the way the shared pixi cache is above: a flag added
+        // at the `up_args` seam has to be added here too. Full equality, not
+        // `contains`: membership cannot catch two flags emitted in the wrong
+        // order or a flag whose value was lost, and the test's own name promised
+        // "and is announced" while the body asked the notice nothing -- which is
+        // how D2 (the notice fired on every `up`, not only on a create) got
+        // through. The second half of this test is the "announced" it names.
+        let mut scene = Scene::new();
+        scene.host.claude_profiles_root = Some(scene.dir.path().join("claude-profiles"));
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{}").expect("a credential");
+        scene.host.claude.profile = Some("bear".to_owned());
+
+        let mount = ClaudeProfileMount::ensure(&scene.host);
+        let args = up_args(
+            &UpRequest::new("myws", Naming::Anonymous),
+            &ContextOptions::default(),
+            &PixiCache::NotADirectory {
+                source: PathBuf::from("/nope"),
+            },
+            &mount,
+            true,
+            &[],
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "up".to_owned(),
+                "myws".to_owned(),
+                "--ide".to_owned(),
+                "none".to_owned(),
+                "--mount".to_owned(),
+                format!(
+                    "type=bind,source={},target={}",
+                    profile.display(),
+                    provision::CLAUDE_CONFIG_TARGET
+                ),
+                "--workspace-env".to_owned(),
+                format!("CLAUDE_CONFIG_DIR={}", provision::CLAUDE_CONFIG_TARGET),
+            ]
+        );
+
+        // And the notice: only when this `up` is the one that creates the
+        // container, which `Naming::Create` is what says.
+        scene.runner.script(["devpod", "up"], Response::exited(0));
+        let mut context = CommandContext::new(&scene.runner);
+        let token = HostToken::new();
+        let request = UpRequest::new(
+            "owner/repo",
+            Naming::Create {
+                workspace_id: "myws",
+            },
+        );
+        let mut notices = Vec::new();
+
+        let outcome = workspace_up(
+            &mut context,
+            &scene.host,
+            &token,
+            &ClaudeSeen::new(),
+            &NoProvisioning,
+            &request,
+            None,
+            &mut notices,
+        );
+
+        assert_eq!(outcome, Ok(UpOutcome::Started));
+        assert!(
+            notices.contains(&LaunchNotice::ClaudeProfileBound {
+                name: "bear".to_owned(),
+                source: profile,
+            }),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn a_bound_profile_is_not_announced_bound_against_a_container_that_already_exists() {
+        // devlaunch's D2: `devpod up` against a workspace it already knows never
+        // creates anything, so a `--mount` cannot land -- `ClaudeProfileMount::ensure`
+        // alone cannot see that, only `Naming::Known` here can. The claim
+        // "is now the container's Claude configuration" must not be made.
+        let scene = Scene::new().naming_a_claude_profile("bear", true);
+        scene.runner.script(["devpod", "up"], Response::exited(0));
+
+        let mut context = CommandContext::new(&scene.runner);
+        let token = HostToken::new();
+        let request = UpRequest::new(
+            "myws",
+            Naming::Known {
+                workspace_id: "myws",
+            },
+        );
+        let mut notices = Vec::new();
+
+        let outcome = workspace_up(
+            &mut context,
+            &scene.host,
+            &token,
+            &ClaudeSeen::new(),
+            &NoProvisioning,
+            &request,
+            None,
+            &mut notices,
+        );
+
+        assert_eq!(outcome, Ok(UpOutcome::Started));
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| matches!(notice, LaunchNotice::ClaudeProfileBound { .. })),
+            "{notices:?}"
+        );
+        assert!(
+            notices.contains(&LaunchNotice::ClaudeProfileMountUnappliable {
+                name: "bear".to_owned(),
+            }),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn a_known_workspace_up_with_reuse_emits_neither_claude_flag() {
+        // devlaunch's D3: the env half used to be composed independently of
+        // `Naming`/`Rebuild`, so a `Naming::Known` `up` -- the everyday `dl <ws>`
+        // against a container that already exists -- still passed
+        // `--workspace-env CLAUDE_CONFIG_DIR=...` even though the sibling
+        // `--mount` could not land. That silently repointed Claude Code's
+        // configuration directory at nothing devpod bound. The governing
+        // invariant this pins: the two flags land together or not at all.
+        let mut scene = Scene::new();
+        scene.host.claude_profiles_root = Some(scene.dir.path().join("claude-profiles"));
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{}").expect("a credential");
+        scene.host.claude.profile = Some("bear".to_owned());
+        scene.runner.script(["devpod", "up"], Response::exited(0));
+
+        let mut context = CommandContext::new(&scene.runner);
+        let token = HostToken::new();
+        let request = UpRequest::new(
+            "myws",
+            Naming::Known {
+                workspace_id: "myws",
+            },
+        );
+        let mut notices = Vec::new();
+
+        let outcome = workspace_up(
+            &mut context,
+            &scene.host,
+            &token,
+            &ClaudeSeen::new(),
+            &NoProvisioning,
+            &request,
+            None,
+            &mut notices,
+        );
+
+        assert_eq!(outcome, Ok(UpOutcome::Started));
+        let up = scene
+            .devpod_commands()
+            .into_iter()
+            .find(|argv| argv.first().map(String::as_str) == Some("up"))
+            .expect("an up");
+        assert!(
+            !up.iter()
+                .any(|arg| arg.contains(&profile.display().to_string())),
+            "no --mount for the profile: {up:?}"
+        );
+        assert!(
+            !up.iter().any(|arg| arg.contains(&format!(
+                "CLAUDE_CONFIG_DIR={}",
+                provision::CLAUDE_CONFIG_TARGET
+            ))),
+            "the env half must not land without the mount half: {up:?}"
+        );
+    }
+
+    #[test]
+    fn a_recreate_binds_the_profile_even_though_naming_carries_no_id() {
+        // devlaunch's D2-B: `--recreate`/`--reset` rebuild the container even
+        // against a `Naming::Known` workspace (no `--id`, because devpod already
+        // knows it) -- so the mount *does* land, but the old gate read only
+        // `Naming::Create` and missed `request.rebuild` entirely. That told the
+        // operator `ClaudeProfileMountUnappliable`, whose own text says "a
+        // `recreate` is what binds it", on the very call that just recreated it
+        // -- and never said `ClaudeProfileBound` for a recreate at all.
+        let scene = Scene::new().naming_a_claude_profile("bear", true);
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        scene.runner.script(["devpod", "up"], Response::exited(0));
+
+        let mut context = CommandContext::new(&scene.runner);
+        let token = HostToken::new();
+        let request = UpRequest::new(
+            "myws",
+            Naming::Known {
+                workspace_id: "myws",
+            },
+        )
+        .with_rebuild(Rebuild::Recreate);
+        let mut notices = Vec::new();
+
+        let outcome = workspace_up(
+            &mut context,
+            &scene.host,
+            &token,
+            &ClaudeSeen::new(),
+            &NoProvisioning,
+            &request,
+            None,
+            &mut notices,
+        );
+
+        assert_eq!(outcome, Ok(UpOutcome::Started));
+        assert!(
+            notices.contains(&LaunchNotice::ClaudeProfileBound {
+                name: "bear".to_owned(),
+                source: profile.clone(),
+            }),
+            "{notices:?}"
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| matches!(notice, LaunchNotice::ClaudeProfileMountUnappliable { .. })),
+            "{notices:?}"
+        );
+        let up = scene
+            .devpod_commands()
+            .into_iter()
+            .find(|argv| argv.first().map(String::as_str) == Some("up"))
+            .expect("an up");
+        assert!(
+            up.iter()
+                .any(|arg| arg.contains(&format!("type=bind,source={}", profile.display()))),
+            "no --mount for the profile's source path: {up:?}"
+        );
+        assert!(
+            up.iter().any(|arg| arg
+                == &format!("CLAUDE_CONFIG_DIR={}", provision::CLAUDE_CONFIG_TARGET)),
+            "no CLAUDE_CONFIG_DIR pointed at the mount target: {up:?}"
+        );
+    }
+
+    #[test]
+    fn a_second_creatable_launch_does_not_claim_a_mount_landed_against_an_existing_container() {
+        // devlaunch's D2-A: `Plan::Creatable` used to become `Placement::Creating`
+        // unconditionally, asking devpod nothing -- so a *second*
+        // `dl <path> --claude-profile x` against a container the first call
+        // already created still carried `Naming::Create`, and the notice claimed
+        // a bind that could not land into a container that already exists.
+        // `Launch::place_creatable` asks devpod `status` for this route's guessed
+        // id now, but only because a profile was actually requested here.
+        let workspace_id = "a-project";
+        let scene = Scene::new()
+            .with_stopped(workspace_id)
+            .naming_a_claude_profile("bear", true);
+        scene.runner.script(["devpod", "up"], Response::exited(0));
+
+        let updater = SelfInvocation::new("dl");
+        let completion = scene.cache_dir().join("completion.json");
+        let mut parts = launching(&scene.runner, &updater, &completion);
+        let mut cold = NeverCold;
+        let mut launch = Launch::new(
+            &mut parts.context,
+            &mut parts.refresh,
+            &mut cold,
+            &parts.provision,
+            &scene.host,
+            &mut parts.chatter,
+            &mut parts.said,
+        );
+
+        let path = format!("/tmp/{workspace_id}");
+        let launched = launch.run(&path, &LaunchVerb::Attach { command: None }, None);
+
+        assert!(launched.is_ok(), "{launched:?}");
+        drop(launch);
+        assert!(
+            !parts
+                .said
+                .iter()
+                .any(|notice| matches!(notice, LaunchNotice::ClaudeProfileBound { .. })),
+            "{:?}",
+            parts.said
+        );
+        assert!(
+            parts
+                .said
+                .contains(&LaunchNotice::ClaudeProfileMountUnappliable {
+                    name: "bear".to_owned(),
+                }),
+            "{:?}",
+            parts.said
+        );
     }
 
     // ----------------------------------------------- devpod's context options

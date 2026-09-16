@@ -46,6 +46,11 @@ pub devlaunch_core::api::LaunchNotice::CheckoutBehind::ahead: u32
 pub devlaunch_core::api::LaunchNotice::CheckoutBehind::behind: u32
 pub devlaunch_core::api::LaunchNotice::CheckoutBehind::branch: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::CheckoutBehind::workspace_id: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::name: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::source: std::path::PathBuf
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileNotForwarded
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileNotForwarded::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::CodexCredentialUnreadable
@@ -565,6 +570,11 @@ pub devlaunch_core::flows::launch::LaunchNotice::CheckoutBehind::ahead: u32
 pub devlaunch_core::flows::launch::LaunchNotice::CheckoutBehind::behind: u32
 pub devlaunch_core::flows::launch::LaunchNotice::CheckoutBehind::branch: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::CheckoutBehind::workspace_id: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::name: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::source: std::path::PathBuf
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileNotForwarded
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileNotForwarded::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::CodexCredentialUnreadable

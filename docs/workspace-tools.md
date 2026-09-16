@@ -172,9 +172,10 @@ logged in while holding a perfectly good login.
 
 ### Naming a profile
 
-`--claude-profile <name>` forwards a named login instead of the default one, for the
-case the order above cannot serve: two accounts on one machine, and a workspace
-that wants the one your host is not signed in to.
+`--claude-profile <name>` binds a named configuration directory into the container
+instead of forwarding the default login, for the case the order above cannot
+serve: two accounts on one machine, and a workspace that wants the one your host
+is not signed in to.
 
 ```bash
 dl owner/repo --claude-profile work
@@ -182,7 +183,13 @@ dl owner/repo --claude-profile work
 
 The name is one directory under `~/.claude-profiles/`, holding the
 `.credentials.json` a `claude` login writes. Each such directory is a
-`CLAUDE_CONFIG_DIR` of its own, which is what makes the logins independent.
+`CLAUDE_CONFIG_DIR` of its own, which is what makes the logins independent. The
+whole directory is bound in, not only the credential, so a `CLAUDE.md`, agents,
+skills or hooks living beside it reach the container too, and a token
+refresh in there lands back in the profile on disk rather than going stale. A
+bind lands only when the container is created, so switching to a different
+profile on a workspace that already exists is a `recreate`; a `restart` keeps
+whichever profile the container was created with.
 
 **That is somebody else's directory and `dl` only reads it.** The layout and the
 `CLAUDE_PROFILES_DIR` variable belong to the tool that manages them, honoured here

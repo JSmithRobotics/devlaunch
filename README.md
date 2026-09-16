@@ -342,8 +342,9 @@ dl 0.49.0
 Projects with several variants, compose sidecars, or a host-side `initializeCommand` are covered
 in [docs/devcontainer-projects.md](docs/devcontainer-projects.md).
 
-`--claude-profile <name>` forwards a named Claude login instead of the default one, for
-workspaces where you want a different account than the one `claude` on your host is signed in to:
+`--claude-profile <name>` binds a named Claude configuration directory into the container instead
+of forwarding the default login, for workspaces where you want a different account than the one
+`claude` on your host is signed in to:
 
 ```bash
 dl blooop/devlaunch --claude-profile work
@@ -355,6 +356,12 @@ own, which is what makes the logins independent. `dl` reads that layout rather t
 so profiles you already have work with no re-login, and it never writes there: creating and
 deleting them stays with whatever made the directory. By hand it is
 `CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude`, then log in.
+
+The whole directory is bound in, not just the credential: any `CLAUDE.md`, agents, skills or
+hooks living beside it reach the container too, and a token refresh in there lands back in
+the profile on disk. A bind lands only when the container is created, so switching profiles on a
+workspace that already exists needs a `recreate`; a plain `restart` keeps whichever profile the
+container was created with.
 
 `--claude-profile default` means the login you would get anyway, so a recalled line has a way to
 say "not the profile I used last time".

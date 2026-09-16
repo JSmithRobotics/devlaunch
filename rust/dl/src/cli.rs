@@ -626,10 +626,11 @@ pub(crate) struct Cli {
     /// pass it once.
     #[arg(long, value_name = "VARIANT|PATH")]
     devcontainer: Option<String>,
-    /// Forward a named Claude login instead of the default one. Profiles live in
-    /// `~/.claude-profiles/<name>/`, or under `CLAUDE_PROFILES_DIR`; dl reads them
-    /// and never creates one. Per launch: unlike `--devcontainer` it is not stored
-    /// with the workspace, so a workspace never forwards an account chosen weeks ago.
+    /// Bind a named Claude configuration directory into the container instead of
+    /// forwarding the default login. Profiles live in `~/.claude-profiles/<name>/`,
+    /// or under `CLAUDE_PROFILES_DIR`; dl reads them and never creates one. Per
+    /// launch: unlike `--devcontainer` it is not stored with the workspace, so a
+    /// workspace never forwards an account chosen weeks ago.
     #[arg(long = "claude-profile", value_name = "NAME")]
     claude_profile: Option<String>,
     /// Cut a new branch from this ref instead of the default branch. Only means

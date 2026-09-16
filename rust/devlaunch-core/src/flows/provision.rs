@@ -163,13 +163,14 @@ pub(crate) const CLAUDE_CONFIG_RELPATH: &str = ".claude";
 /// Where a named Claude profile will be bound inside a container, and the value
 /// `CLAUDE_CONFIG_DIR` takes there once something does the binding.
 ///
-/// Defined here, ahead of the mount itself, because [`ClaudeConfig::parse`] needs
-/// one fixed path to compare a probe's effective config directory against in
-/// order to tell "`dl` bound a profile here" apart from "this happens to be a
-/// container whose home is named that". The mount that actually lands something
-/// at this path is a later change; this constant and the probe fact about it are
-/// what let [`ClaudeConfig::Bound`] be decided the moment that mount exists,
-/// without a second definition of the path appearing alongside it.
+/// Defined here, ahead of [`ClaudeConfig::parse`], which needs one fixed path
+/// to compare a probe's effective config directory against in order to tell
+/// "`dl` bound a profile here" apart from "this happens to be a container
+/// whose home is named that". [`crate::flows::launch::ClaudeProfileMount`] is
+/// what lands something at this path; this constant and the probe fact about
+/// it are what let
+/// [`ClaudeConfig::Bound`] be decided from the probe alone, without a second
+/// definition of the path appearing alongside it.
 ///
 /// Outside every home directory for the same reason a shared cache mount would
 /// be: nothing above the leaf is invented, and the path still works with nothing
@@ -1739,11 +1740,11 @@ pub enum ClaudeConfig {
     /// because the mounted directory already carries the same credential file the
     /// host has and refreshes it the same way.
     ///
-    /// Nothing constructs this today: the mount that lands something at
-    /// [`CLAUDE_CONFIG_TARGET`] is a later change, so a real container's probe
-    /// always reports that path unmounted and this variant is unreachable in
-    /// practice. It exists now, ahead of the mount, so every match on
-    /// [`ClaudeConfig`] is already made by the compiler to say what it does about
+    /// [`crate::flows::launch::ClaudeProfileMount`] is what lands something at
+    /// [`CLAUDE_CONFIG_TARGET`], so `parse` reaches this variant on every bound
+    /// launch: the probe reports that path mounted and this arm is the one that
+    /// matches. It was added ahead of the mount, so every match on
+    /// [`ClaudeConfig`] was already made by the compiler to say what it does about
     /// a bound config rather than absorbing it into a catch-all later.
     ///
     /// Carries no payload -- this type is `Copy` and held across several call
