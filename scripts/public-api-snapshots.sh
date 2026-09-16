@@ -85,14 +85,36 @@
 #   scripts/public-api-snapshots.sh --print-residual      # the limit, counted
 #   scripts/public-api-snapshots.sh --classify api|rest   # rows on stdin
 #
-# Needs a nightly toolchain (cargo-public-api's rustdoc-JSON backend is
-# nightly-only; the crates themselves still build on the stable pin) and the
-# pinned cargo-public-api. This repository's devcontainer carries neither, so
-# this is a host command:
+# Needs the pinned cargo-public-api on PATH already -- this script does not
+# install it. `pixi run public-api` is the command that does: it installs the
+# pin (skipping the install once it is already there) and runs this script
+# with the environment described below already in place, which is what makes
+# the whole thing runnable from a plain checkout with no host setup. See
+# scripts/run-public-api.sh for exactly what it assembles and why.
 #
-#   rustup toolchain install nightly
-#   cargo install cargo-public-api --locked \
-#       --version "$(scripts/public-api-snapshots.sh --print-pin)"
+# That environment is a deliberate choice, not an incidental one, so it is
+# worth saying what it is even though this script does not set it up itself:
+# cargo-public-api's rustdoc-JSON backend wants a nightly toolchain, and this
+# repository has, on purpose, never had one -- what it renders these snapshots
+# with instead is the pinned *stable* toolchain everything else here builds
+# on, running with `RUSTC_BOOTSTRAP=1` set (which is what lets stable rustc
+# accept the unstable rustdoc-JSON flags) and a small shim standing in for
+# `rustup`, which cargo-public-api shells out to unconditionally once it has
+# decided -- correctly, since `cargo --version` here does not say nightly --
+# that it wants "a nightly toolchain" at all.
+#
+# The practical upshot, stated plainly because it is the sentence that saves
+# an afternoon: regenerating these snapshots under an actual nightly toolchain
+# instead of the pinned stable one will NOT reproduce them. Measured once,
+# switching toolchains moved a handful of rows in public-api.rest.txt and
+# devlaunch-runner/public-api.txt -- a `core::io::error::Error` path rendering
+# as `std::io::error::Error` instead, and a derived `StructuralPartialEq`
+# impl's bound changing shape -- with nothing added, removed, renamed or
+# re-signatured. That is rustdoc rendering drift between toolchains, the exact
+# thing `-ss` above exists to keep out of these files, and it is why a nightly
+# is not merely unnecessary here but actively the wrong tool: it produces a
+# spurious whole-file diff that looks like a real one until read closely.
+# Regenerate with `pixi run public-api`, on the stable pin, every time.
 #
 set -euo pipefail
 

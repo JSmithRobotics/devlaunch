@@ -24,6 +24,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "public-api-snapshots.sh"
+# The task both a developer and CI run: installs the pinned cargo-public-api
+# (skipping the install once it is already there) and assembles the
+# stable-toolchain-plus-RUSTC_BOOTSTRAP environment the snapshots are
+# reproducible under, before running SCRIPT.
+RUN_SCRIPT = REPO_ROOT / "scripts" / "run-public-api.sh"
+PYPROJECT = REPO_ROOT / "pyproject.toml"
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 # The development material moved out of the README into docs/ when the README was
 # cut back to an orientation document. The guard is about a reader having the
@@ -153,11 +159,26 @@ def test_ci_takes_the_file_list_from_the_script_rather_than_repeating_it():
 
 @pytest.mark.unit
 def test_ci_installs_the_version_the_script_pins():
+    """The install moved from ci.yml into the task both a developer and CI run.
+
+    `scripts/run-public-api.sh` is what installs the pin now -- skipping the
+    install once it is already there -- so that `pixi run public-api` is one
+    command that works the same locally and in CI. The job itself must run
+    that task rather than pinning a version of its own; the install script is
+    what must ask the regeneration script for the pin, since a different
+    renderer makes a whole-file diff that says nothing.
+    """
     job = ci_job("public-api")
-    assert "--print-pin" in job, (
-        "ci.yml names a cargo-public-api version of its own; the pin belongs to the "
-        "script that renders the snapshots, since a different renderer makes a "
-        "whole-file diff that says nothing"
+    assert "pixi run public-api" in job, (
+        "the public-api job no longer runs the pixi task that installs the "
+        "pinned cargo-public-api and assembles the stable+RUSTC_BOOTSTRAP "
+        "environment; see scripts/run-public-api.sh"
+    )
+    runner = (REPO_ROOT / "scripts" / "run-public-api.sh").read_text(encoding="utf-8")
+    assert "--print-pin" in runner, (
+        "scripts/run-public-api.sh names a cargo-public-api version of its own "
+        "rather than asking scripts/public-api-snapshots.sh for its pin, which is "
+        "the same drift this test used to guard against inside ci.yml"
     )
 
 
@@ -439,12 +460,36 @@ def run_the_ci_check(tmp_path: Path, listed: list[str], differing: str | None = 
         checked_in = root / "rust" / name
         checked_in.parent.mkdir(parents=True, exist_ok=True)
         checked_in.write_text("drifted\n" if name == differing else "generated\n", encoding="utf-8")
+    # The step's own first line is `pixi run public-api DEST` now, not the
+    # regeneration script directly -- scripts/run-public-api.sh is what
+    # installs the pin and assembles the stable+RUSTC_BOOTSTRAP environment,
+    # and neither is needed to exercise the diff logic these tests are about.
+    # So `pixi` itself is stubbed too, forwarding straight to the already-fake
+    # regeneration script above.
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    pixi_stub = fake_bin / "pixi"
+    pixi_stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'if [ "${1:-}" = "run" ] && [ "${2:-}" = "public-api" ]; then\n'
+        "  shift 2\n"
+        '  exec "$PWD/scripts/public-api-snapshots.sh" "$@"\n'
+        "fi\n"
+        'echo "pixi-stub: unsupported invocation: $*" >&2\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    pixi_stub.chmod(0o755)
     runner_temp = tmp_path / "runner-temp"
     runner_temp.mkdir()
     return subprocess.run(
         ["bash", "-c", ci_step_script(ci_job("public-api"), CI_CHECK_STEP)],
         cwd=root,
-        env={"PATH": os.environ["PATH"], "RUNNER_TEMP": str(runner_temp)},
+        env={
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "RUNNER_TEMP": str(runner_temp),
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -482,3 +527,59 @@ def test_the_ci_check_fails_when_it_compared_nothing(tmp_path):
         "the failure does not say that nothing was compared, so whoever hits it "
         "will look for a surface change that is not there"
     )
+
+
+@pytest.mark.unit
+def test_the_pixi_task_exists_and_carries_the_reproducing_environment():
+    """The snapshots and the environment that renders them are one fact now.
+
+    These three files are only reproducible under the specific environment
+    scripts/run-public-api.sh assembles: RUSTC_BOOTSTRAP=1 is what lets the
+    pinned *stable* toolchain accept the unstable rustdoc-JSON flags `cargo
+    public-api` needs, and CC/CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
+    pointed at /usr/bin/gcc is what lets that tool even build (the
+    conda-provided linker fails on it with an undefined `__libc_csu_init`).
+    Drop any one of the three and the next regeneration either fails outright
+    or, worse, renders under a different toolchain and produces a whole-file
+    diff that looks like a real one -- which is the exact failure mode #467
+    and the stable+bootstrap rebaseline both exist to stop being possible with
+    no source change behind it.
+
+    So this is not a test of behaviour scripts/run-public-api.sh already has
+    other tests for -- there are none, because running it means compiling and
+    running cargo-public-api, which is exactly the toolchain dependency this
+    whole change removes from the test suite. It is a tripwire on the
+    settings themselves: three `grep`s, so an edit that quietly drops one
+    fails a fast test instead of producing a mystery diff the next time
+    someone regenerates.
+    """
+    assert PYPROJECT.exists()
+    tasks = PYPROJECT.read_text(encoding="utf-8")
+    assert 'public-api = "bash scripts/run-public-api.sh"' in tasks, (
+        "pyproject.toml no longer defines the public-api pixi task (or points it "
+        "somewhere other than scripts/run-public-api.sh), so `pixi run public-api` "
+        "cannot be what a developer or ci.yml runs to regenerate these snapshots"
+    )
+    assert RUN_SCRIPT.is_file(), "scripts/run-public-api.sh is missing"
+    # Code lines only, not the header comment that describes them: the header
+    # names all three settings in prose, so a bare substring search would stay
+    # green even with the `export` or the `cargo install` line actually
+    # deleted -- which is precisely the version of this guard that was worth
+    # nothing when it was tried.
+    code_lines = [
+        line
+        for line in RUN_SCRIPT.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    code = "\n".join(code_lines)
+    for setting in (
+        "export RUSTC_BOOTSTRAP=1",
+        "CC=/usr/bin/gcc",
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=/usr/bin/gcc",
+    ):
+        assert setting in code, (
+            f"scripts/run-public-api.sh no longer sets {setting} in code (only, if "
+            "at all, in a comment describing it); without it these snapshots "
+            "either fail to render or render under a different toolchain, "
+            "producing a whole-file diff with no source change behind it"
+        )
