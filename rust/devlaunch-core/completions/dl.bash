@@ -69,9 +69,9 @@ _dl_completion() {
     # The retired spellings (--stop, --autorm) are absent by rule rather than by
     # hand: the grammar marks them `hide = true`, and the test drops every hidden
     # flag, so a spelling this build only still answers for is never offered.
-    local global_opts="--ls --install --refresh --prune --reconcile --purge --herdr-shell --rm --devcontainer --claude-profile --claude-profiles --help -h --version"
+    local global_opts="--ls --install --refresh --prune --reconcile --purge --herdr-shell --rm --devcontainer --claude-profile --from --claude-profiles --help -h --version"
     if [[ "$cmd" == aid ]]; then
-        global_opts="--claude --codex --gemini --devcontainer --claude-profile --help -h --version"
+        global_opts="--claude --codex --gemini --devcontainer --claude-profile --from --help -h --version"
     fi
 
     # Workspace subcommands
@@ -82,7 +82,7 @@ _dl_completion() {
     local ws_cmds="up stop kill rm rme code restart recreate reset dotfiles --rm --"
 
     # Options that take a value; a variant name, a profile name or a path follows.
-    local value_opts="--devcontainer --claude-profile"
+    local value_opts="--devcontainer --claude-profile --from"
 
     # The flags a workspace spec may still follow: they modify a launch instead
     # of being one. Every other flag ends the line, and that direction is the
@@ -106,7 +106,7 @@ _dl_completion() {
     # would mean a second exception rather than a wider `spec_follows` -- the
     # thing that follows is not a spec, and the branch below that handles `./`
     # is inside the spec position.
-    local spec_follows="--rm --devcontainer --claude-profile"
+    local spec_follows="--rm --devcontainer --claude-profile --from"
     if [[ "$cmd" == aid ]]; then
         # aid's own, from `parse_aid_args`: it reads an agent flag, a remote
         # control flag or a dl value option and keeps looking for the spec. The
@@ -115,7 +115,7 @@ _dl_completion() {
         # takes a value, so on `aid --unknown-taking-a-value foo owner/repo` it
         # calls `foo` the spec, and completing a slot aid itself cannot place is
         # worse than completing nothing.
-        spec_follows="--claude --codex --gemini --remote-control --remote --no-remote-control --no-remote --devcontainer --claude-profile"
+        spec_follows="--claude --codex --gemini --remote-control --remote --no-remote-control --no-remote --devcontainer --claude-profile --from"
     fi
 
     # After --claude-profile, offer the profile directories that exist. Read off the
