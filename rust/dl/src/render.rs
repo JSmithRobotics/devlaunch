@@ -3046,6 +3046,7 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             source,
             extra_binds,
             extra_binds_capped,
+            extra_binds_refused,
             credential_bind,
         } => {
             let mut message = format!(
@@ -3056,6 +3057,19 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
                 python_repr(name),
                 source.display()
             );
+            if name == claude_profiles::DEFAULT_PROFILE {
+                message.push_str(
+                    " This is the host's primary Claude configuration, not a sandboxed \
+                     profile, and the bind is read-write.",
+                );
+            }
+            if *extra_binds_refused {
+                message.push_str(
+                    " This profile's top-level symlinks were not checked: no \
+                     sibling-profiles root could be resolved on this host, so none of them \
+                     were bound and any such link stays dangling.",
+                );
+            }
             if !extra_binds.is_empty() {
                 let paths = extra_binds
                     .iter()
@@ -3089,6 +3103,14 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
              only lands when devpod creates one. Its Claude configuration is unchanged from \
              before this launch; a `recreate` is what binds it.",
             python_repr(name)
+        ),
+        LaunchNotice::ClaudeProfileSourceUnsafe { name, source } => format!(
+            "--claude-profile {} was not bound: {} is `/`, your home directory, or the Claude \
+             profiles root itself, and binding any of those whole into the container would \
+             expose far more than Claude configuration. This workspace still opens with your \
+             ordinary forwarded Claude login.",
+            python_repr(name),
+            source.display()
         ),
 
         LaunchNotice::CodexStageMissing { workspace_id } => format!(
@@ -5580,6 +5602,7 @@ mod tests {
             source: std::path::PathBuf::from("/home/me/.claude-profiles/bear"),
             extra_binds: Vec::new(),
             extra_binds_capped: false,
+            extra_binds_refused: false,
             credential_bind: None,
         })
         .expect("a sentence");
@@ -5600,6 +5623,78 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_extra_bind_check_is_said_rather_than_read_as_nothing_to_bind() {
+        // The confirmed defect's other half: an empty `extra_binds` with
+        // `extra_binds_refused` true is not the same state as an empty
+        // `extra_binds` with it false, and the operator must be told which one
+        // this is rather than the two reading identically.
+        let line = launch_notice(&LaunchNotice::ClaudeProfileBound {
+            name: "bear".to_owned(),
+            source: std::path::PathBuf::from("/home/me/.claude-profiles/bear"),
+            extra_binds: Vec::new(),
+            extra_binds_capped: false,
+            extra_binds_refused: true,
+            credential_bind: None,
+        })
+        .expect("a sentence");
+
+        assert!(
+            line.contains("were not checked"),
+            "a refused check must be said, not silently read as nothing to bind: {line}"
+        );
+    }
+
+    #[test]
+    fn default_is_named_as_the_hosts_primary_configuration_and_read_write() {
+        // devlaunch's item 4: the extra-bind sentences already say "read-only" and
+        // "read-write" explicitly, so `default`'s own notice must say what it binds
+        // is the host's primary configuration, not a sandboxed profile, and that
+        // the bind itself is read-write.
+        let line = launch_notice(&LaunchNotice::ClaudeProfileBound {
+            name: "default".to_owned(),
+            source: std::path::PathBuf::from("/home/me/.claude"),
+            extra_binds: Vec::new(),
+            extra_binds_capped: false,
+            extra_binds_refused: false,
+            credential_bind: None,
+        })
+        .expect("a sentence");
+
+        assert!(line.contains("primary Claude configuration"), "{line}");
+        assert!(line.contains("read-write"), "{line}");
+    }
+
+    #[test]
+    fn a_named_profile_says_nothing_about_being_the_primary_configuration() {
+        let line = launch_notice(&LaunchNotice::ClaudeProfileBound {
+            name: "bear".to_owned(),
+            source: std::path::PathBuf::from("/home/me/.claude-profiles/bear"),
+            extra_binds: Vec::new(),
+            extra_binds_capped: false,
+            extra_binds_refused: false,
+            credential_bind: None,
+        })
+        .expect("a sentence");
+
+        assert!(
+            !line.contains("primary Claude configuration"),
+            "only `default` binds the host's primary configuration: {line}"
+        );
+    }
+
+    #[test]
+    fn an_unsafe_default_source_is_refused_rather_than_bound() {
+        let line = launch_notice(&LaunchNotice::ClaudeProfileSourceUnsafe {
+            name: "default".to_owned(),
+            source: std::path::PathBuf::from("/home/me"),
+        })
+        .expect("a sentence");
+
+        assert!(line.contains("was not bound"), "{line}");
+        assert!(line.contains("/home/me"), "{line}");
+    }
+
+    #[test]
     fn a_bound_profile_with_extra_binds_names_every_host_path_read_only() {
         // devlaunch's D2: a mount nobody is shown is the defect this notice
         // exists to avoid, so every extra bind's resolved path must appear,
@@ -5612,6 +5707,7 @@ mod tests {
                 std::path::PathBuf::from("/shared/claude/CLAUDE.md"),
             ],
             extra_binds_capped: false,
+            extra_binds_refused: false,
             credential_bind: None,
         })
         .expect("a sentence");
@@ -5638,6 +5734,7 @@ mod tests {
             source: std::path::PathBuf::from("/home/me/.claude-profiles/bear"),
             extra_binds: vec![std::path::PathBuf::from("/shared/claude/agents")],
             extra_binds_capped: true,
+            extra_binds_refused: false,
             credential_bind: None,
         })
         .expect("a sentence");
@@ -5661,6 +5758,7 @@ mod tests {
             source: std::path::PathBuf::from("/home/me/.claude-profiles/bear"),
             extra_binds: Vec::new(),
             extra_binds_capped: false,
+            extra_binds_refused: false,
             credential_bind: Some(std::path::PathBuf::from("/shared/claude/.credentials.json")),
         })
         .expect("a sentence");

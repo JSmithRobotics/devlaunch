@@ -50,12 +50,16 @@ pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::credential_bind: core::option::Option<std::path::PathBuf>
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::extra_binds: alloc::vec::Vec<std::path::PathBuf>
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::extra_binds_capped: bool
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::extra_binds_refused: bool
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::source: std::path::PathBuf
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileNotForwarded
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileNotForwarded::name: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileSourceUnsafe
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileSourceUnsafe::name: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileSourceUnsafe::source: std::path::PathBuf
 pub devlaunch_core::api::LaunchNotice::CodexCredentialUnreadable
 pub devlaunch_core::api::LaunchNotice::CodexCredentialUnreadable::path: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::CodexStageMissing
@@ -577,12 +581,16 @@ pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::credential_bind: core::option::Option<std::path::PathBuf>
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::extra_binds: alloc::vec::Vec<std::path::PathBuf>
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::extra_binds_capped: bool
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::extra_binds_refused: bool
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::source: std::path::PathBuf
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileNotForwarded
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileNotForwarded::name: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSourceUnsafe
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSourceUnsafe::name: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSourceUnsafe::source: std::path::PathBuf
 pub devlaunch_core::flows::launch::LaunchNotice::CodexCredentialUnreadable
 pub devlaunch_core::flows::launch::LaunchNotice::CodexCredentialUnreadable::path: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::CodexStageMissing
