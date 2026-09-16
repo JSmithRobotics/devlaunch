@@ -47,6 +47,9 @@ pub devlaunch_core::api::LaunchNotice::CheckoutBehind::behind: u32
 pub devlaunch_core::api::LaunchNotice::CheckoutBehind::branch: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::CheckoutBehind::workspace_id: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::credential_bind: core::option::Option<std::path::PathBuf>
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::extra_binds: alloc::vec::Vec<std::path::PathBuf>
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::extra_binds_capped: bool
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::source: std::path::PathBuf
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable
@@ -571,6 +574,9 @@ pub devlaunch_core::flows::launch::LaunchNotice::CheckoutBehind::behind: u32
 pub devlaunch_core::flows::launch::LaunchNotice::CheckoutBehind::branch: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::CheckoutBehind::workspace_id: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::credential_bind: core::option::Option<std::path::PathBuf>
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::extra_binds: alloc::vec::Vec<std::path::PathBuf>
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::extra_binds_capped: bool
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::source: std::path::PathBuf
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable

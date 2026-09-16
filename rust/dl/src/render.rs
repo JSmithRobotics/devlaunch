@@ -3041,13 +3041,49 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
              holds. A workspace that predates the check picks it up after one `up`.",
             python_repr(name)
         ),
-        LaunchNotice::ClaudeProfileBound { name, source } => format!(
-            "Claude profile {}: {} is now the container's Claude configuration, so `claude` \
-             there runs as that account and refreshes its own login in place. Changing \
-             profile is a `recreate`, since a mount lands only when the container is created.",
-            python_repr(name),
-            source.display()
-        ),
+        LaunchNotice::ClaudeProfileBound {
+            name,
+            source,
+            extra_binds,
+            extra_binds_capped,
+            credential_bind,
+        } => {
+            let mut message = format!(
+                "Claude profile {}: {} is now the container's Claude configuration, so \
+                 `claude` there runs as that account and refreshes its own login in place. \
+                 Changing profile is a `recreate`, since a mount lands only when the \
+                 container is created.",
+                python_repr(name),
+                source.display()
+            );
+            if !extra_binds.is_empty() {
+                let paths = extra_binds
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                message.push_str(&format!(
+                    " This profile also has top-level symlinks reaching outside itself, so \
+                     the container's Claude configuration additionally reaches these host \
+                     paths, read-only: {paths}."
+                ));
+            }
+            if let Some(path) = credential_bind {
+                message.push_str(&format!(
+                    " Its credential file is itself a top-level symlink reaching outside the \
+                     profile, so the container's Claude configuration additionally reaches \
+                     this host path, read-write so a refresh can still write it in place: {}.",
+                    path.display()
+                ));
+            }
+            if *extra_binds_capped {
+                message.push_str(
+                    " More such links exist than this launch will bind; the rest are left \
+                     dangling rather than bound.",
+                );
+            }
+            message
+        }
         LaunchNotice::ClaudeProfileMountUnappliable { name } => format!(
             "--claude-profile {} was not bound: this container already exists, and a `--mount` \
              only lands when devpod creates one. Its Claude configuration is unchanged from \
@@ -5532,6 +5568,106 @@ mod tests {
                     .to_owned()
             )
         );
+    }
+
+    #[test]
+    fn a_bound_profile_with_no_extra_binds_says_nothing_about_symlinks() {
+        // The plain case: no top-level symlinks reach outside the profile, so
+        // neither the "also has top-level symlinks" sentence nor the capped
+        // sentence has anything to say.
+        let line = launch_notice(&LaunchNotice::ClaudeProfileBound {
+            name: "bear".to_owned(),
+            source: std::path::PathBuf::from("/home/me/.claude-profiles/bear"),
+            extra_binds: Vec::new(),
+            extra_binds_capped: false,
+            credential_bind: None,
+        })
+        .expect("a sentence");
+
+        assert!(line.contains("Claude profile 'bear'"), "{line}");
+        assert!(
+            !line.contains("top-level symlinks"),
+            "no extra binds means no mention of them: {line}"
+        );
+        assert!(
+            !line.contains("More such links exist"),
+            "no cap was hit: {line}"
+        );
+        assert!(
+            !line.contains("credential file"),
+            "no credential symlink means no mention of one: {line}"
+        );
+    }
+
+    #[test]
+    fn a_bound_profile_with_extra_binds_names_every_host_path_read_only() {
+        // devlaunch's D2: a mount nobody is shown is the defect this notice
+        // exists to avoid, so every extra bind's resolved path must appear,
+        // and the sentence must say the access is read-only.
+        let line = launch_notice(&LaunchNotice::ClaudeProfileBound {
+            name: "bear".to_owned(),
+            source: std::path::PathBuf::from("/home/me/.claude-profiles/bear"),
+            extra_binds: vec![
+                std::path::PathBuf::from("/shared/claude/agents"),
+                std::path::PathBuf::from("/shared/claude/CLAUDE.md"),
+            ],
+            extra_binds_capped: false,
+            credential_bind: None,
+        })
+        .expect("a sentence");
+
+        assert!(
+            line.contains("top-level symlinks reaching outside itself"),
+            "{line}"
+        );
+        assert!(line.contains("read-only"), "{line}");
+        assert!(line.contains("/shared/claude/agents"), "{line}");
+        assert!(line.contains("/shared/claude/CLAUDE.md"), "{line}");
+        assert!(
+            !line.contains("More such links exist"),
+            "the cap was not hit: {line}"
+        );
+    }
+
+    #[test]
+    fn a_bound_profile_past_the_cap_says_the_rest_are_left_dangling() {
+        // devlaunch's D2, the other half: past MAX_DANGLING_SYMLINK_BINDS the
+        // notice must say so rather than leave the excess silently unbound.
+        let line = launch_notice(&LaunchNotice::ClaudeProfileBound {
+            name: "bear".to_owned(),
+            source: std::path::PathBuf::from("/home/me/.claude-profiles/bear"),
+            extra_binds: vec![std::path::PathBuf::from("/shared/claude/agents")],
+            extra_binds_capped: true,
+            credential_bind: None,
+        })
+        .expect("a sentence");
+
+        assert!(
+            line.contains("More such links exist than this launch will bind"),
+            "{line}"
+        );
+        assert!(line.contains("left dangling rather than bound"), "{line}");
+    }
+
+    #[test]
+    fn a_bound_profile_with_a_symlinked_credential_says_it_is_read_write() {
+        // devlaunch's D2: a top-level `.credentials.json` symlink reaching
+        // outside the profile gets its own bind, but read-write -- unlike
+        // every other extra bind -- because a refresh writes that file in
+        // place. The notice must say so and must not lump it in with the
+        // read-only sentence.
+        let line = launch_notice(&LaunchNotice::ClaudeProfileBound {
+            name: "bear".to_owned(),
+            source: std::path::PathBuf::from("/home/me/.claude-profiles/bear"),
+            extra_binds: Vec::new(),
+            extra_binds_capped: false,
+            credential_bind: Some(std::path::PathBuf::from("/shared/claude/.credentials.json")),
+        })
+        .expect("a sentence");
+
+        assert!(line.contains("credential file"), "{line}");
+        assert!(line.contains("read-write"), "{line}");
+        assert!(line.contains("/shared/claude/.credentials.json"), "{line}");
     }
 
     /// The three sentences devlaunch#421 split `NoAlias` into, rendered.

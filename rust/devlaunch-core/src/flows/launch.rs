@@ -542,7 +542,41 @@ pub enum LaunchNotice {
     /// `--workspace-env` on every `up`, but a `--mount` lands only at creation,
     /// and `ClaudeProfileMount::ensure` alone cannot tell a create from a
     /// restart of a container that already exists.
-    ClaudeProfileBound { name: String, source: PathBuf },
+    ///
+    /// `extra_binds` names, in full, every host path a top-level dangling
+    /// symlink in this profile also binds in, *read-only*
+    /// (see `dangling_symlink_binds`). Those binds are the operator's own
+    /// profile reaching outside itself, and a mount nobody is shown is the
+    /// defect: this is the one place a launch says which host paths just
+    /// became reachable from inside the container. `extra_binds_capped` is set
+    /// when more such links existed than the cap allows -- the ones past the
+    /// cap are not bound, and this is how that is said rather than left
+    /// silent.
+    ///
+    /// `credential_bind` is the one dangling link `extra_binds` never carries:
+    /// a top-level symlink literally named [`claude::CREDENTIALS_FILENAME`]
+    /// that resolves outside the profile. It gets a bind of its own too, but
+    /// read-write rather than read-only -- a refresh writes that file in
+    /// place, and excluding it instead leaves a dangling link under the
+    /// parent bind that `claude` finds no credential behind. `None` is the
+    /// ordinary case, where the credential is a real file the parent bind
+    /// already carries -- but it is not the *only* case: a top-level
+    /// `.credentials.json` symlink whose resolved path is not valid UTF-8, or
+    /// carries a `,` or `=` (the name is fixed at
+    /// [`claude::CREDENTIALS_FILENAME`], so only the path can), whose bind
+    /// would have landed past [`MAX_DANGLING_SYMLINK_BINDS`], or whose
+    /// resolved target lands inside a sibling profile (or another
+    /// catastrophic target), is refused by [`resolve_dangling_symlink_binds`]
+    /// the same as any other entry and also reads back as `None` here, even
+    /// though the credential is not, in any of those cases, a real file
+    /// under the parent bind.
+    ClaudeProfileBound {
+        name: String,
+        source: PathBuf,
+        extra_binds: Vec<PathBuf>,
+        extra_binds_capped: bool,
+        credential_bind: Option<PathBuf>,
+    },
     /// A named profile resolved to a real, credentialed directory, but this call
     /// is not creating the container -- a restart or an attach against one devpod
     /// already knows -- so the mount cannot land.
@@ -1072,7 +1106,20 @@ pub(crate) enum ClaudeProfileMount {
     /// not exist, or it exists with nobody having logged in yet.
     Missing { name: String, source: PathBuf },
     /// Bound, and `CLAUDE_CONFIG_DIR` points at it.
-    Bound { name: String, source: PathBuf },
+    ///
+    /// `profiles_root` is the host's own configured root (`Host::claude_profiles_root`),
+    /// carried alongside `source` rather than re-derived from it later. D1: a root
+    /// re-derived from `source`'s canonicalized *parent* is only correct when `source`
+    /// is not itself a symlink; a profile directory symlinked out of the profiles
+    /// root (`~/.claude-profiles/bear -> /srv/bear`) canonicalizes to `/srv/bear`,
+    /// whose parent is `/srv` -- so a root inferred that way protects `/srv`, never
+    /// the real root or `$HOME`, and the catastrophic-target guard in
+    /// [`resolve_dangling_symlink_binds`] silently stops guarding anything.
+    Bound {
+        name: String,
+        source: PathBuf,
+        profiles_root: Option<PathBuf>,
+    },
 }
 
 impl ClaudeProfileMount {
@@ -1114,6 +1161,7 @@ impl ClaudeProfileMount {
         Self::Bound {
             name: named.to_owned(),
             source,
+            profiles_root: host.claude_profiles_root.clone(),
         }
     }
 
@@ -1150,16 +1198,24 @@ impl ClaudeProfileMount {
     /// same defect rather than only the one above.
     pub(crate) fn up_args(&self, creating_container: bool) -> Vec<String> {
         match self {
-            Self::Bound { source, .. } if creating_container => vec![
-                "--mount".to_owned(),
-                format!(
-                    "type=bind,source={},target={}",
-                    source.display(),
-                    provision::CLAUDE_CONFIG_TARGET
-                ),
-                "--workspace-env".to_owned(),
-                format!("CLAUDE_CONFIG_DIR={}", provision::CLAUDE_CONFIG_TARGET),
-            ],
+            Self::Bound {
+                source,
+                profiles_root,
+                ..
+            } if creating_container => {
+                let mut args = vec![
+                    "--mount".to_owned(),
+                    format!(
+                        "type=bind,source={},target={}",
+                        source.display(),
+                        provision::CLAUDE_CONFIG_TARGET
+                    ),
+                    "--workspace-env".to_owned(),
+                    format!("CLAUDE_CONFIG_DIR={}", provision::CLAUDE_CONFIG_TARGET),
+                ];
+                args.extend(dangling_symlink_binds(source, profiles_root.as_deref()));
+                args
+            }
             Self::Bound { .. }
             | Self::NotAsked
             | Self::NotAName { .. }
@@ -1167,6 +1223,347 @@ impl ClaudeProfileMount {
             | Self::Missing { .. } => Vec::new(),
         }
     }
+}
+
+/// The extra `--mount` flags a profile's top-level symlinks need, one per link
+/// whose target resolves outside the profile.
+///
+/// A profile is mostly symlinks into a shared location -- `CLAUDE.md`, `agents`,
+/// `skills`, `hooks`, `commands`, and the rest -- so that several named profiles
+/// can share one set of instructions rather than each keeping its own copy. The
+/// parent bind [`ClaudeProfileMount::up_args`] emits puts the profile directory
+/// in the container, which puts the *links* there too, dangling: their targets
+/// are paths outside the profile that the parent bind never reached. A bind of
+/// each link's resolved target at the position the link occupies shadows the
+/// link with a real directory, so it is never followed and never dangles.
+///
+/// It runs *after* the parent mount lands in the argv devpod receives, because
+/// a per-link mount is only useful shadowing a link the parent bind already put
+/// in place. [`ClaudeProfileMount::up_args`] keeps that order by construction
+/// (this is appended, never prepended). Whether devpod *needs* the argv in that
+/// order is a separate question this module cannot answer: docker sorts mount
+/// points by destination depth before applying them, so it is destination
+/// nesting -- the profile at `CLAUDE_CONFIG_TARGET` and a link mount at a path
+/// underneath it -- that makes the shadow work, not the order these flags are
+/// written in. Whether docker resolves a nested destination *through* the
+/// dangling symlink it sits on top of, rather than shadowing it outright, is
+/// inherited from `0fbc7ba`'s shipped behaviour and is not verifiable without
+/// creating a container; `the_parent_profile_mount_lands_before_any_symlink_mount`
+/// pins the argv order this module controls, not that.
+///
+/// The alternative -- one bind of the shared location's own parent directory,
+/// covering every link in one flag -- is deliberately not what this does. That
+/// parent is typically `~/.claude`, whose `.credentials.json` belongs to the
+/// *default* profile; binding it in would smuggle a second account's login into
+/// a container `--claude-profile` was asked to keep it out of. Binding each
+/// link's own target instead never reaches that file in the ordinary case,
+/// where no top-level entry of a real profile links to it -- and the one entry
+/// that would, a top-level symlink literally named
+/// [`claude::CREDENTIALS_FILENAME`], is bound read-write below rather than
+/// trusted to stay hypothetical (see the next paragraph for why write and not
+/// exclude).
+///
+/// Every one of these is `readonly` except that one. The per-profile credential
+/// is the one thing a container legitimately writes back (a refresh), and
+/// ordinarily that file lives under the parent bind, never under one of these --
+/// but `claude::has_credential` decides `Bound` with `is_file`, which follows a
+/// symlink, so a profile whose top-level `.credentials.json` is itself a link
+/// out of the profile is still `Bound`. Excluding that one entry by name (as
+/// this used to) leaves the parent bind carrying a dangling link: nothing on
+/// the host is mounted at that position, `claude` finds no credential and
+/// prompts for a fresh login, and nothing above this reports it -- a silent,
+/// immediate failure of the very feature the read-write bind exists for. Giving
+/// it the same shadowing bind as every other escaping link, but without
+/// `readonly`, is what makes refresh-in-place keep working when the credential
+/// itself is the thing that escapes. Every other entry stays `readonly`: that
+/// costs nothing a refresh needs and shrinks what a workspace can reach on the
+/// host to exactly the targets its own profile already links to.
+///
+/// Only the top level is walked, deliberately: a symlink nested inside `skills/`
+/// or similar still dangles, and that is a known, separate gap rather than a
+/// promise this covers every layout a profile could have.
+///
+/// A top-level entry emits nothing here, silently rather than with a warning
+/// (a `dl` launch is not the place to relitigate how the operator built their
+/// profile), for any of:
+/// - it is not a symlink (a real file or directory belongs to the profile
+///   itself and the parent bind already carries it);
+/// - it is a relative link that resolves to somewhere still inside the profile
+///   (again, the parent bind already carries it);
+/// - its target does not exist on the host, because binding a missing source is
+///   how devpod fails the *entire* launch, and one stale link must not cost a
+///   workspace the ability to open at all;
+/// - its name, or the resolved target's path, is not representable as UTF-8, or
+///   contains a `,` or a `=` -- devpod's `--mount` parser splits on `,` and cuts
+///   on `=` with last-occurrence-wins, so either character in an interpolated
+///   value lets the entry's own name or path rewrite a neighbouring field of
+///   the very mount spec meant to carry it. A name like `agents,source=oops`
+///   is a real, reachable filename (POSIX forbids `/` in one, not `,` or `=`)
+///   and it wins the whole `source=` field outright; a comma inside the
+///   resolved *path* instead truncates that field and passes a stray token to
+///   docker. No such name or path has a legitimate use here, so refusing
+///   rather than escaping is the honest answer;
+/// - its resolved target is neither a regular file nor a directory (a socket,
+///   device or FIFO has no legitimate use mounted here); or
+/// - its resolved target is an ancestor of (or equal to) the profiles root that
+///   holds every profile on this host, `$HOME` included -- a link shaped like
+///   that is a mistake, never an intent, and binding it would put every
+///   profile, or the whole host filesystem, inside the container. (A link to
+///   `/` itself is refused by the same test without a separate case: the
+///   profiles root is always an absolute path, so it always starts with `/`,
+///   making `/` an ancestor of it by construction.) The same guard also
+///   refuses the opposite direction: a resolved target *inside* the profiles
+///   root but outside this profile's own tree -- a sibling profile, most
+///   likely (`<root>/bear/otter -> <root>/otter`). That target is a
+///   descendant of the root rather than an ancestor of it, so `starts_with`
+///   the other way round is what catches it; left unguarded, it binds a
+///   different account's credential into a container this profile's name
+///   was supposed to keep it out of. Nothing about the *ancestor* direction
+///   changes here -- both are refused, for the different reasons above; or
+///
+/// - the profiles root itself did not resolve (no configured root, or one
+///   that fails to canonicalize) -- every top-level link is refused rather
+///   than only the ones a resolved root would have caught, because a guard
+///   that cannot see the root cannot tell an escaping link from a safe one.
+///
+/// [`claude::CREDENTIALS_FILENAME`] is the one name this walk never skips: see
+/// above for why it gets a read-write bind instead.
+///
+/// The count is also capped, at [`MAX_DANGLING_SYMLINK_BINDS`]; past the cap,
+/// [`LaunchNotice::ClaudeProfileBound::extra_binds_capped`] is how that is said
+/// rather than left silent, because a mount nobody is told about is the actual
+/// defect this whole function exists to avoid.
+fn dangling_symlink_binds(profile: &Path, profiles_root: Option<&Path>) -> Vec<String> {
+    let (binds, _capped) = resolve_dangling_symlink_binds(profile, profiles_root);
+    let mut args = Vec::new();
+    for bind in binds {
+        // The link's own position under the parent bind is the target, so the
+        // bind lands on top of the link rather than beside it, and the link is
+        // shadowed rather than followed.
+        //
+        // The one entry that is not `readonly` --
+        // `claude::CREDENTIALS_FILENAME` escaping the profile -- binds its
+        // target as its own single-*file* bind mount, not a directory. In the
+        // ordinary case the credential is a real file inside the profile's
+        // parent directory bind, and a refresh that writes a temp file and
+        // `rename(2)`s over it lands normally, because a rename inside an
+        // already-bound directory is not touching a mount point at all. Over
+        // a single-file bind mount like this one, that same rename targets
+        // the mount point itself: `rename(2)` onto a bind mount fails with
+        // `EBUSY`, and an unlink-plus-recreate fails the same way, `EBUSY`
+        // on the unlink -- measured in a user namespace over a file bind
+        // mount, neither call silently succeeds and lands nothing on the
+        // host. Only a truncate-and-write-in-place refresh is safe over a
+        // bind shaped like this. Nothing in this tree establishes which write
+        // style `claude` actually uses when it refreshes a credential, and
+        // settling it needs a real container -- this is recorded rather than
+        // fixed. It affects only this unusual symlinked-credential case; an
+        // ordinary real-file credential is covered by the parent directory
+        // bind and is unaffected.
+        let readonly = if bind.readonly { ",readonly" } else { "" };
+        args.push("--mount".to_owned());
+        args.push(format!(
+            "type=bind,source={},target={}/{}{readonly}",
+            bind.resolved.display(),
+            provision::CLAUDE_CONFIG_TARGET,
+            bind.name,
+        ));
+    }
+    args
+}
+
+/// The generous-but-finite limit [`resolve_dangling_symlink_binds`] holds every
+/// profile to. 64 is well past any real instructions tree's top level, and
+/// finite is what keeps a pathological profile from turning one launch into an
+/// unbounded number of `--mount` flags.
+const MAX_DANGLING_SYMLINK_BINDS: usize = 64;
+
+/// One top-level symlink [`resolve_dangling_symlink_binds`] has decided is safe
+/// and worth binding: its own name, positioned under the parent bind, and the
+/// host path it resolves to.
+#[derive(Debug)]
+struct DanglingSymlinkBind {
+    name: String,
+    resolved: PathBuf,
+    /// Whether this bind carries `,readonly`. False for exactly one entry: a
+    /// top-level symlink named [`claude::CREDENTIALS_FILENAME`] whose target
+    /// resolves outside the profile. See the doc comment on
+    /// [`resolve_dangling_symlink_binds`] for why that one is bound read-write
+    /// rather than excluded.
+    readonly: bool,
+}
+
+/// The extra binds a profile's top-level symlinks need, and whether the cap
+/// left any out.
+///
+/// Shared by [`dangling_symlink_binds`] (turns the binds into argv) and the
+/// `up` call site that builds [`LaunchNotice::ClaudeProfileBound`] (turns them
+/// into what the operator is shown) -- one walk of the filesystem and one set
+/// of safety decisions, read by both rather than duplicated between them.
+fn resolve_dangling_symlink_binds(
+    profile: &Path,
+    profiles_root: Option<&Path>,
+) -> (Vec<DanglingSymlinkBind>, bool) {
+    // The profile not resolving at all is a state `ClaudeProfileMount::ensure`
+    // has already ruled out for `Bound` (it requires a directory holding a
+    // credential) -- but this walks a filesystem a moment after that check ran,
+    // so treating a surprise failure here as "nothing to add" rather than
+    // panicking costs nothing.
+    let (Ok(canonical_profile), Ok(entries)) =
+        (std::fs::canonicalize(profile), std::fs::read_dir(profile))
+    else {
+        return (Vec::new(), false);
+    };
+    // D1: the caller's own root (`Host::claude_profiles_root`), canonicalized --
+    // never re-derived from `canonical_profile`'s parent. Every profile is
+    // `<profiles_root>/<name>` (see `claude::profile_dir`) only when `profile`
+    // itself is a real directory; when it is a symlink out of the profiles root
+    // (`~/.claude-profiles/bear -> /srv/bear`), `canonical_profile` is
+    // `/srv/bear` and its parent is `/srv`, which is not the profiles root at
+    // all. Taking the root from the host's own configuration instead means the
+    // catastrophic-target guard below still protects the real root and `$HOME`
+    // regardless of what the profile directory itself turns out to be.
+    //
+    // Fail CLOSED rather than open when the root does not resolve --
+    // absent (no configured root, and no `--claude-profile` override), or
+    // present but not a real directory (relative, or otherwise refusing to
+    // canonicalize). `Bound::profiles_root` cannot actually be `None` by the
+    // time this runs (`ensure` only reaches `Bound` through `claude::profile_dir`,
+    // which itself requires a root), but that invariant lives two functions
+    // away from this one and is not visible in this function's own types --
+    // an `Option` that silently produced an unguarded bind list on `None`
+    // would still fail open the moment anything upstream of here changed.
+    // Refusing every top-level link outright, rather than emitting them with
+    // no catastrophic-target check applied, is what keeps that failure mode
+    // from ever reintroducing the unguarded list this guard exists to
+    // prevent.
+    let Some(profiles_root) = profiles_root.and_then(|root| std::fs::canonicalize(root).ok())
+    else {
+        return (Vec::new(), false);
+    };
+
+    // Sorted so the argv is deterministic: `read_dir`'s order is whatever the
+    // filesystem happens to hand back, and a test (or a bug report) comparing
+    // argv byte-for-byte should not depend on that.
+    let mut names: Vec<_> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .collect();
+    names.sort();
+
+    let mut binds = Vec::new();
+    let mut capped = false;
+    for name in names {
+        let link_path = profile.join(&name);
+        // `symlink_metadata` does not follow the link, unlike `metadata` -- this
+        // is what lets a real directory or file be told apart from a symlink
+        // instead of being read as whatever it points at.
+        let Ok(meta) = std::fs::symlink_metadata(&link_path) else {
+            continue;
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        // `canonicalize` both resolves the link and confirms the target exists;
+        // a target missing on the host answers `Err` here and is skipped, per
+        // the doc comment above.
+        let Ok(resolved) = std::fs::canonicalize(&link_path) else {
+            continue;
+        };
+        // A link that stays inside the profile (a relative link to a sibling
+        // entry, most likely) needs nothing: the parent bind already carries it.
+        if resolved.starts_with(&canonical_profile) {
+            continue;
+        }
+
+        // D1: only a name and a resolved path free of devpod's own `--mount`
+        // separators can occupy that spec without one rewriting a field
+        // beside it (see the doc comment above). Non-UTF-8 is refused with the
+        // same reasoning `to_string_lossy` would otherwise paper over with a
+        // replacement character that no longer names the entry it came from.
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if name_str.contains(',') || name_str.contains('=') {
+            continue;
+        }
+        let Some(resolved_str) = resolved.to_str() else {
+            continue;
+        };
+        if resolved_str.contains(',') || resolved_str.contains('=') {
+            continue;
+        }
+
+        // D2: the credential's position under the parent bind is where a
+        // container reads and writes its own login. A real profile keeps it as
+        // a real file the parent bind already carries, but nothing enforces
+        // that upstream of here -- `claude::has_credential` decides `Bound`
+        // with `is_file`, which follows a symlink. So this one entry is not
+        // skipped: it gets the same shadowing bind as any other escaping link,
+        // but read-write (decided below), so a refresh in place still lands
+        // somewhere real instead of finding a dangling link under the parent
+        // bind and failing outright.
+        let readonly = name_str != claude::CREDENTIALS_FILENAME;
+
+        // D2: only a regular file or a directory has any legitimate use
+        // mounted here.
+        let Ok(target_meta) = std::fs::metadata(&resolved) else {
+            continue;
+        };
+        if !(target_meta.is_file() || target_meta.is_dir()) {
+            continue;
+        }
+
+        // D2: refuse catastrophic targets -- an ancestor of (or the whole of)
+        // the profiles root, `$HOME` included. A link to `/` itself is caught
+        // here too without a separate case: `profiles_root` is always
+        // absolute, so it always `starts_with("/")`. Ordinary ancestors of the
+        // *profile itself* that are not also ancestors of the profiles root
+        // (there are none in practice, since a profile is one level under its
+        // root) are deliberately not caught by this: the shared instructions
+        // tree a real profile links into legitimately lives somewhere
+        // unrelated, like `~/dotfiles/claude`.
+        //
+        // The other direction is narrower: a target *inside* the profiles
+        // root is a threat only when it is inside a *profile*.
+        // `resolved.starts_with(&canonical_profile)` above already excluded
+        // every target inside *this* profile's own tree, so a target whose
+        // first component under the root parses as a [`claude::ProfileName`]
+        // is necessarily a sibling account's directory, not this one. Left
+        // unguarded, a top-level link shaped like `<root>/bear/otter ->
+        // <root>/otter` resolves to a descendant of the root, passes the
+        // ancestor-only half of this check, and binds a different account's
+        // credential directory into a container this profile's own name was
+        // supposed to keep it out of. A dot-prefixed first component
+        // (`<root>/.shared/agents`) is deliberately let through instead:
+        // `ProfileName::parse` refuses a leading dot, so a dot-directory
+        // under the root is, by that same rule, guaranteed not to be another
+        // account's profile -- it is the shared-instructions tree every real
+        // profile links into, just kept under the root instead of beside it.
+        // A non-dot name like `_shared` still refuses, because nothing here
+        // can tell it apart from an account.
+        let sibling_profile = resolved
+            .strip_prefix(&profiles_root)
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .and_then(|c| c.as_os_str().to_str())
+            .is_some_and(|first| claude::ProfileName::parse(first).is_some());
+        let catastrophic = profiles_root.starts_with(&resolved) || sibling_profile;
+        if catastrophic {
+            continue;
+        }
+
+        if binds.len() >= MAX_DANGLING_SYMLINK_BINDS {
+            capped = true;
+            continue;
+        }
+        binds.push(DanglingSymlinkBind {
+            name: name_str.to_owned(),
+            resolved,
+            readonly,
+        });
+    }
+    (binds, capped)
 }
 
 // ===========================================================================
@@ -1987,10 +2384,28 @@ fn up_under_stage(
     let creating_container = matches!(request.naming, Naming::Create { .. })
         || !matches!(request.rebuild, Rebuild::Reuse);
     match &claude_mount {
-        ClaudeProfileMount::Bound { name, source } if creating_container => {
+        ClaudeProfileMount::Bound {
+            name,
+            source,
+            profiles_root,
+        } if creating_container => {
+            let (extra, extra_binds_capped) =
+                resolve_dangling_symlink_binds(source, profiles_root.as_deref());
+            let mut extra_binds = Vec::new();
+            let mut credential_bind = None;
+            for bind in extra {
+                if bind.readonly {
+                    extra_binds.push(bind.resolved);
+                } else {
+                    credential_bind = Some(bind.resolved);
+                }
+            }
             notices.say(LaunchNotice::ClaudeProfileBound {
                 name: name.clone(),
                 source: source.clone(),
+                extra_binds,
+                extra_binds_capped,
+                credential_bind,
             });
         }
         ClaudeProfileMount::Bound { name, .. } => {
@@ -8163,6 +8578,534 @@ mod tests {
         );
     }
 
+    /// A profile shaped like the plan's motivating case: several top-level
+    /// entries symlinked into a shared instructions tree outside the profile,
+    /// one relative link staying inside the profile, one dangling-target link,
+    /// and the credential itself, which is always a real file.
+    struct SymlinkedProfile {
+        profile: PathBuf,
+        shared_agents: PathBuf,
+    }
+
+    fn a_profile_with_dangling_symlinks(scene: &Scene) -> SymlinkedProfile {
+        let shared = scene.dir.path().join("shared-claude-instructions");
+        let shared_agents = shared.join("agents");
+        std::fs::create_dir_all(&shared_agents).expect("the shared agents directory");
+        std::fs::write(shared.join("CLAUDE.md"), "instructions").expect("the shared file");
+
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{}").expect("a credential");
+
+        // Dangles: an absolute link to a directory outside the profile.
+        std::os::unix::fs::symlink(&shared_agents, profile.join("agents"))
+            .expect("the agents link");
+        // Dangles: an absolute link to a file outside the profile.
+        std::os::unix::fs::symlink(shared.join("CLAUDE.md"), profile.join("CLAUDE.md"))
+            .expect("the CLAUDE.md link");
+        // Does not dangle: relative, and stays inside the profile.
+        std::os::unix::fs::symlink(".credentials.json", profile.join("local"))
+            .expect("a relative link inside the profile");
+        // Does not dangle because there is nothing to bind: the target is gone.
+        std::os::unix::fs::symlink(shared.join("gone"), profile.join("gone"))
+            .expect("a dangling-target link");
+
+        SymlinkedProfile {
+            profile,
+            shared_agents,
+        }
+    }
+
+    fn bound_mount_for(profile: &Path) -> ClaudeProfileMount {
+        ClaudeProfileMount::Bound {
+            name: "bear".to_owned(),
+            source: profile.to_path_buf(),
+            profiles_root: profile.parent().map(Path::to_path_buf),
+        }
+    }
+
+    #[test]
+    fn a_dangling_top_level_symlink_gets_its_own_readonly_mount() {
+        let scene = Scene::new();
+        let fixture = a_profile_with_dangling_symlinks(&scene);
+
+        let args = bound_mount_for(&fixture.profile).up_args(true);
+
+        let expected = format!(
+            "type=bind,source={},target={}/agents,readonly",
+            fixture.shared_agents.display(),
+            provision::CLAUDE_CONFIG_TARGET,
+        );
+        assert!(
+            args.contains(&expected),
+            "expected an agents mount in {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_relative_symlink_that_stays_inside_the_profile_emits_nothing() {
+        let scene = Scene::new();
+        let fixture = a_profile_with_dangling_symlinks(&scene);
+
+        let args = bound_mount_for(&fixture.profile).up_args(true);
+
+        assert!(
+            !args.iter().any(|arg| arg.contains("/local,")),
+            "a relative in-profile link must not get its own mount: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_symlink_whose_target_is_missing_on_the_host_emits_nothing() {
+        let scene = Scene::new();
+        let fixture = a_profile_with_dangling_symlinks(&scene);
+
+        let args = bound_mount_for(&fixture.profile).up_args(true);
+
+        assert!(
+            !args.iter().any(|arg| arg.contains("/gone,")),
+            "binding a missing source fails the whole devpod launch: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_real_file_in_the_profile_emits_nothing() {
+        let scene = Scene::new();
+        let fixture = a_profile_with_dangling_symlinks(&scene);
+
+        let args = bound_mount_for(&fixture.profile).up_args(true);
+
+        assert!(
+            !args.iter().any(|arg| arg.contains(".credentials.json,")),
+            ".credentials.json is a real file the parent bind already carries: {args:?}"
+        );
+    }
+
+    #[test]
+    fn the_parent_profile_mount_lands_before_any_symlink_mount() {
+        // Order, not membership: nested binds apply in the order they are given,
+        // so a per-link mount only works landing after the parent mount that put
+        // the dangling link there in the first place.
+        let scene = Scene::new();
+        let fixture = a_profile_with_dangling_symlinks(&scene);
+
+        let args = bound_mount_for(&fixture.profile).up_args(true);
+
+        let parent_index = args
+            .iter()
+            .position(|arg| arg == "--mount")
+            .expect("the parent mount flag");
+        let parent_value = &args[parent_index + 1];
+        assert!(
+            !parent_value.contains("readonly"),
+            "the parent bind must stay writable for credential refresh: {parent_value}"
+        );
+
+        let first_link_index = args
+            .iter()
+            .position(|arg| arg.contains("readonly"))
+            .expect("at least one dangling link in this fixture");
+        assert!(
+            first_link_index > parent_index,
+            "the parent mount ({parent_index}) must precede every link mount \
+             (first at {first_link_index}): {args:?}"
+        );
+    }
+
+    #[test]
+    fn the_credential_mount_is_never_readonly() {
+        // devlaunch's D2: excluding a symlinked `.credentials.json` by name
+        // used to leave the parent bind carrying a dangling link -- nothing on
+        // the host was mounted at that position, so `claude` found no
+        // credential and prompted for a fresh login while the launch notice
+        // still claimed a bound account. Binding it like any other escaping
+        // link, but read-write, is what keeps refresh-in-place working when
+        // the credential itself is the thing that escapes. A profile where
+        // the credential *is* a top-level symlink pointing outside the
+        // profile is the shape that exercises this: it must get its own bind,
+        // and that bind must never be `readonly`.
+        let scene = Scene::new();
+        let shared = scene.dir.path().join("shared-claude-instructions");
+        std::fs::create_dir_all(&shared).expect("the shared directory");
+        std::fs::write(shared.join(".credentials.json"), "{}").expect("the real credential");
+
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::os::unix::fs::symlink(
+            shared.join(".credentials.json"),
+            profile.join(".credentials.json"),
+        )
+        .expect("a credential symlink pointing outside the profile");
+
+        let args = bound_mount_for(&profile).up_args(true);
+
+        let mut ever = false;
+        for arg in &args {
+            if arg.contains(".credentials.json") && arg.starts_with("type=bind") {
+                ever = true;
+                assert!(
+                    !arg.contains("readonly"),
+                    "the credential mount must stay writable for refresh: {arg}"
+                );
+                assert!(
+                    arg.contains(&format!(
+                        "source={}",
+                        shared.join(".credentials.json").display()
+                    )),
+                    "the credential bind must point at its resolved target: {arg}"
+                );
+            }
+        }
+        assert!(
+            ever,
+            "a symlinked credential must get its own read-write bind rather than being \
+             left to a now-dangling parent mount: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_symlinked_profile_emits_no_extra_mounts_when_this_up_creates_no_container() {
+        // `up_args`' pairing invariant is one decision gating everything a bound
+        // profile emits, and that must include the per-link mounts: emitting them
+        // on a restart that lands no new container would name a bind devpod is
+        // never asked to make.
+        let scene = Scene::new();
+        let fixture = a_profile_with_dangling_symlinks(&scene);
+
+        let args = bound_mount_for(&fixture.profile).up_args(false);
+
+        assert_eq!(args, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_link_name_carrying_devpods_mount_separators_is_refused_rather_than_bound() {
+        // devpod's `--mount` parser splits on `,` and cuts on `=` with
+        // last-occurrence-wins, so a top-level entry named e.g.
+        // `agents,source=oops` would let the injected `source=` token win over
+        // the real one and rewrite this bind's own source -- a POSIX filename
+        // cannot itself contain `/`, but neither the parser's confusion nor the
+        // harm depends on one; the value after `source=` need only be a path
+        // *devpod* goes on to resolve, and a real filesystem accepts a comma
+        // and an equals sign in a filename just as readily as letters. There
+        // is no legitimate use for such a name, so it must be skipped rather
+        // than escaped.
+        let scene = Scene::new();
+        let shared = scene.dir.path().join("shared-claude-instructions");
+        std::fs::create_dir_all(&shared).expect("the shared directory");
+
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{}").expect("a credential");
+        std::os::unix::fs::symlink(&shared, profile.join("agents,source=oops"))
+            .expect("the injection-shaped link");
+
+        let args = bound_mount_for(&profile).up_args(true);
+
+        assert!(
+            !args.iter().any(|arg| arg.contains("source=oops")),
+            "an injected source token must never reach devpod's argv: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_shared_tree_path_containing_a_comma_is_refused_rather_than_truncated() {
+        // The same parser cuts the mount spec on every `,`, so a resolved
+        // target whose own path contains one truncates the source and passes
+        // a stray token through to docker rather than the path anyone meant.
+        let scene = Scene::new();
+        let shared = scene.dir.path().join("shared,instructions");
+        std::fs::create_dir_all(&shared).expect("the comma-bearing shared directory");
+
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{}").expect("a credential");
+        std::os::unix::fs::symlink(&shared, profile.join("agents")).expect("the link");
+
+        let args = bound_mount_for(&profile).up_args(true);
+
+        assert!(
+            !args.iter().any(|arg| arg.contains("shared,instructions")),
+            "a comma-bearing path must never be interpolated unescaped: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_utf8_link_name_is_refused_rather_than_replaced() {
+        // `to_string_lossy` would turn a non-UTF-8 name into one carrying
+        // U+FFFD, which then no longer names the entry it came from -- so with
+        // D1's validation in place it is natural to skip such a name outright
+        // rather than mint a mount for a name that does not really exist.
+        use std::os::unix::ffi::OsStrExt;
+
+        let scene = Scene::new();
+        let shared = scene.dir.path().join("shared-claude-instructions");
+        std::fs::create_dir_all(&shared).expect("the shared directory");
+
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{}").expect("a credential");
+        let bad_name = std::ffi::OsStr::from_bytes(b"agents-\xff\xfe");
+        std::os::unix::fs::symlink(&shared, profile.join(bad_name)).expect("the odd-named link");
+
+        let (binds, _capped) = resolve_dangling_symlink_binds(&profile, profile.parent());
+
+        assert!(
+            binds.is_empty(),
+            "a non-UTF-8 name must not produce a bind: {binds:?}"
+        );
+    }
+
+    #[test]
+    fn a_symlink_to_a_socket_is_refused() {
+        // Sockets, devices and FIFOs have no legitimate use bound in here --
+        // only "exists" gated this before, and that let anything through.
+        let scene = Scene::new();
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{}").expect("a credential");
+
+        let socket_path = scene.dir.path().join("odd.sock");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&socket_path).expect("a unix socket");
+        std::os::unix::fs::symlink(&socket_path, profile.join("agents"))
+            .expect("a link to the socket");
+
+        let (binds, _capped) = resolve_dangling_symlink_binds(&profile, profile.parent());
+
+        assert!(
+            binds.is_empty(),
+            "a socket must never be bound in: {binds:?}"
+        );
+    }
+
+    #[test]
+    fn a_symlink_to_the_filesystem_root_is_refused() {
+        let scene = Scene::new();
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{}").expect("a credential");
+        std::os::unix::fs::symlink("/", profile.join("agents")).expect("a link to root");
+
+        let (binds, _capped) = resolve_dangling_symlink_binds(&profile, profile.parent());
+
+        assert!(
+            binds.is_empty(),
+            "a link to `/` must never be bound in: {binds:?}"
+        );
+    }
+
+    #[test]
+    fn a_symlink_to_an_ancestor_of_the_profiles_root_is_refused() {
+        // devlaunch's D1: the profile directory itself is a symlink to a real
+        // directory in a *second, unrelated* tempdir
+        // (`<profiles_root>/bear -> <elsewhere>/bear`), so the two trees share
+        // no ancestor short of the filesystem root. A guard that re-derived
+        // the profiles root from `canonicalize(profile)`'s parent would land
+        // on `<elsewhere>`, which shares nothing with the real root -- so it
+        // would never catch a link back to the real root's own parent
+        // (`$HOME`, stood in for by the scene's own tempdir). Passing the
+        // host's own `profiles_root` explicitly is what keeps the guard aimed
+        // at the right directory regardless of where the profile itself
+        // resolves to.
+        let scene = Scene::new();
+        let elsewhere = tempfile::tempdir().expect("a second, unrelated tempdir");
+        let profiles_root = scene.dir.path().join("claude-profiles");
+        std::fs::create_dir_all(&profiles_root).expect("the profiles root");
+        let real_profile = elsewhere.path().join("bear");
+        std::fs::create_dir_all(&real_profile).expect("the real profile directory");
+        std::fs::write(real_profile.join(".credentials.json"), "{}").expect("a credential");
+        std::os::unix::fs::symlink(scene.dir.path(), real_profile.join("agents"))
+            .expect("a link to an ancestor of the profiles root");
+        let profile = profiles_root.join("bear");
+        std::os::unix::fs::symlink(&real_profile, &profile)
+            .expect("the profile directory itself, symlinked out of the profiles root");
+
+        let (binds, _capped) = resolve_dangling_symlink_binds(&profile, Some(&profiles_root));
+
+        assert!(
+            binds.is_empty(),
+            "a link to an ancestor of the profiles root must never be bound in: {binds:?}"
+        );
+    }
+
+    #[test]
+    fn a_symlink_to_the_profiles_root_itself_is_refused() {
+        // devlaunch's D1, as above: the profile directory is a symlink into a
+        // second, unrelated tempdir, so only the host's own `profiles_root`
+        // (passed explicitly) still names the real root once the profile is
+        // canonicalized somewhere else entirely.
+        let scene = Scene::new();
+        let elsewhere = tempfile::tempdir().expect("a second, unrelated tempdir");
+        let profiles_root = scene.dir.path().join("claude-profiles");
+        std::fs::create_dir_all(&profiles_root).expect("the profiles root");
+        let real_profile = elsewhere.path().join("bear");
+        std::fs::create_dir_all(&real_profile).expect("the real profile directory");
+        std::fs::write(real_profile.join(".credentials.json"), "{}").expect("a credential");
+        std::os::unix::fs::symlink(&profiles_root, real_profile.join("agents"))
+            .expect("a link to the profiles root itself, which would expose every profile");
+        let profile = profiles_root.join("bear");
+        std::os::unix::fs::symlink(&real_profile, &profile)
+            .expect("the profile directory itself, symlinked out of the profiles root");
+
+        let (binds, _capped) = resolve_dangling_symlink_binds(&profile, Some(&profiles_root));
+
+        assert!(
+            binds.is_empty(),
+            "a link to the profiles root itself must never be bound in: {binds:?}"
+        );
+    }
+
+    #[test]
+    fn a_symlink_to_a_sibling_profile_is_refused_but_a_dot_dir_under_the_root_is_not() {
+        // The threat the old ancestor-only check missed entirely: a top-level
+        // link shaped like `<root>/bear/otter -> <root>/otter` resolves to a
+        // DESCENDANT of the profiles root, not an ancestor of it, so
+        // `root.starts_with(&resolved)` alone never catches it. Left
+        // unguarded, this profile ("bear") would come out binding a
+        // different account's own profile directory -- credential included
+        // -- into the container read-only. `otter` is a real profile with
+        // its own `.credentials.json`, not a stand-in, so this pins the
+        // exact scenario the sibling-profile hole exposes.
+        //
+        // Both halves are asserted in the same fixture so an over-broad fix
+        // -- refusing everything under the root, sibling or not -- fails
+        // this test as loudly as no fix at all: `.shared` is a dot-directory
+        // under the root, which `ProfileName::parse` refuses outright, so by
+        // this tree's own rule it can never be mistaken for another
+        // account's profile. It is the shared-instructions layout a real
+        // profile legitimately uses, and it must still be bound.
+        let scene = Scene::new();
+        let profiles_root = scene.dir.path().join("claude-profiles");
+        std::fs::create_dir_all(&profiles_root).expect("the profiles root");
+
+        let otter = profiles_root.join("otter");
+        std::fs::create_dir_all(&otter).expect("the sibling profile directory");
+        std::fs::write(otter.join(".credentials.json"), "{\"otter\":true}")
+            .expect("the sibling's own credential");
+
+        let shared = profiles_root.join(".shared");
+        std::fs::create_dir_all(shared.join("agents")).expect("the shared instructions tree");
+
+        let profile = profiles_root.join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{\"bear\":true}")
+            .expect("this profile's own credential");
+        std::os::unix::fs::symlink(&otter, profile.join("otter"))
+            .expect("a top-level link straight to the sibling profile");
+        std::os::unix::fs::symlink(shared.join("agents"), profile.join("agents"))
+            .expect("a top-level link to the dot-directory's shared instructions");
+
+        let (binds, _capped) = resolve_dangling_symlink_binds(&profile, Some(&profiles_root));
+
+        assert!(
+            !binds.iter().any(|bind| bind.name == "otter"),
+            "a link to a sibling profile must never be bound in: {binds:?}"
+        );
+        assert!(
+            binds
+                .iter()
+                .any(|bind| bind.name == "agents" && bind.readonly),
+            "a link to a dot-directory under the root must still be bound: {binds:?}"
+        );
+    }
+
+    #[test]
+    fn with_no_profiles_root_known_every_escaping_link_is_refused() {
+        // The guard fails CLOSED when it cannot see the profiles root,
+        // rather than falling open the way `is_some_and` on an absent root
+        // used to -- an ordinary escaping link (the shared-instructions
+        // pattern every real profile uses) must still come out refused, not
+        // waved through for lack of a root to check it against.
+        let scene = Scene::new();
+        let shared = scene.dir.path().join("shared-claude-instructions");
+        std::fs::create_dir_all(&shared).expect("the shared directory");
+
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{}").expect("a credential");
+        std::os::unix::fs::symlink(&shared, profile.join("agents"))
+            .expect("an ordinary escaping link");
+
+        let (binds, capped) = resolve_dangling_symlink_binds(&profile, None);
+
+        assert!(
+            binds.is_empty(),
+            "with no profiles root known, nothing may be bound in: {binds:?}"
+        );
+        assert!(!capped, "refusing for lack of a root is not the cap firing");
+    }
+
+    #[test]
+    fn past_the_cap_extra_links_are_left_out_and_the_cap_is_announced() {
+        let scene = Scene::new();
+        let shared = scene.dir.path().join("shared-claude-instructions");
+        std::fs::create_dir_all(&shared).expect("the shared directory");
+
+        let profile = scene.dir.path().join("claude-profiles").join("bear");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join(".credentials.json"), "{}").expect("a credential");
+        for i in 0..MAX_DANGLING_SYMLINK_BINDS + 1 {
+            let target = shared.join(format!("target-{i}"));
+            std::fs::create_dir_all(&target).expect("a shared target");
+            std::os::unix::fs::symlink(&target, profile.join(format!("link-{i:03}")))
+                .expect("a link past the cap");
+        }
+
+        let (binds, capped) = resolve_dangling_symlink_binds(&profile, profile.parent());
+
+        assert_eq!(binds.len(), MAX_DANGLING_SYMLINK_BINDS);
+        assert!(capped, "more links existed than the cap allows");
+    }
+
+    #[test]
+    fn a_bound_profiles_extra_binds_are_named_in_the_notice() {
+        // D2's actual defect: a mount the operator never sees. The notice must
+        // carry every extra bind's resolved source path, not merely the
+        // profile's own.
+        let scene = Scene::new().naming_a_claude_profile("bear", true);
+        let profile = scene
+            .host
+            .claude_profiles_root
+            .clone()
+            .unwrap()
+            .join("bear");
+        let shared = scene.dir.path().join("shared-claude-instructions");
+        std::fs::create_dir_all(&shared).expect("the shared directory");
+        std::os::unix::fs::symlink(&shared, profile.join("agents")).expect("the link");
+        scene.runner.script(["devpod", "up"], Response::exited(0));
+
+        let mut context = CommandContext::new(&scene.runner);
+        let token = HostToken::new();
+        let request = UpRequest::new(
+            "myws",
+            Naming::Create {
+                workspace_id: "myws",
+            },
+        );
+        let mut notices = Vec::new();
+
+        let outcome = workspace_up(
+            &mut context,
+            &scene.host,
+            &token,
+            &ClaudeSeen::new(),
+            &NoProvisioning,
+            &request,
+            None,
+            &mut notices,
+        );
+
+        assert_eq!(outcome, Ok(UpOutcome::Started));
+        let bound = notices
+            .iter()
+            .find_map(|notice| match notice {
+                LaunchNotice::ClaudeProfileBound { extra_binds, .. } => Some(extra_binds.clone()),
+                _ => None,
+            })
+            .expect("a ClaudeProfileBound notice");
+        assert_eq!(bound, vec![shared.clone()], "{notices:?}");
+    }
+
     #[test]
     fn a_profile_directory_with_no_credential_binds_nothing() {
         // The launch survives, as it does for a pixi cache that could not be
@@ -8283,6 +9226,9 @@ mod tests {
             notices.contains(&LaunchNotice::ClaudeProfileBound {
                 name: "bear".to_owned(),
                 source: profile,
+                extra_binds: Vec::new(),
+                extra_binds_capped: false,
+                credential_bind: None,
             }),
             "{notices:?}"
         );
@@ -8431,6 +9377,9 @@ mod tests {
             notices.contains(&LaunchNotice::ClaudeProfileBound {
                 name: "bear".to_owned(),
                 source: profile.clone(),
+                extra_binds: Vec::new(),
+                extra_binds_capped: false,
+                credential_bind: None,
             }),
             "{notices:?}"
         );
