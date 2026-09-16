@@ -19,7 +19,7 @@ one argument instead of a clone, a config file and a build command.
 [![GitHub pull-requests merged](https://badgen.net/github/merged-prs/blooop/devlaunch)](https://github.com/blooop/devlaunch/pulls?q=is%3Amerged)
 [![GitHub release](https://img.shields.io/github/release/blooop/devlaunch.svg)](https://GitHub.com/blooop/devlaunch/releases/)
 [![PyPI](https://img.shields.io/pypi/v/devlaunch)](https://pypi.org/project/devlaunch/)
-[![Conda](https://img.shields.io/badge/conda-v0.49.0-brightgreen?logo=anaconda)](https://prefix.dev/channels/@jsmithrobotics/jsmithrobotics/packages/devlaunch)
+[![Conda](https://img.shields.io/badge/conda-v0.49.0+fork.1-brightgreen?logo=anaconda)](https://prefix.dev/channels/@jsmithrobotics/jsmithrobotics/packages/devlaunch)
 [![License](https://img.shields.io/github/license/blooop/devlaunch)](https://opensource.org/license/mit/)
 [![Platform](https://img.shields.io/badge/platform-linux--64-blue)](https://github.com/blooop/devlaunch/releases)
 [![Pixi Badge](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/prefix-dev/pixi/main/assets/badge/v0.json)](https://pixi.sh)
@@ -36,7 +36,7 @@ one argument instead of a clone, a config file and a build command.
 Needs [Docker](https://docs.docker.com/engine/install/) on the machine, usable without `sudo`.
 
 ```bash
-pixi global install --channel https://prefix.dev/jsmithrobotics/jsmithrobotics --channel https://prefix.dev/blooop --channel conda-forge devlaunch=0.49.0
+pixi global install --channel https://prefix.dev/jsmithrobotics/jsmithrobotics --channel https://prefix.dev/blooop --channel conda-forge devlaunch=0.49.0+fork.1
 dl --install && source ~/.bashrc
 ```
 
@@ -126,7 +126,7 @@ GitHub still works from inside either way, over HTTPS with the `gh` token `dl` f
 ### pixi (recommended)
 
 ```bash
-pixi global install --channel https://prefix.dev/jsmithrobotics/jsmithrobotics --channel https://prefix.dev/blooop --channel conda-forge devlaunch=0.49.0
+pixi global install --channel https://prefix.dev/jsmithrobotics/jsmithrobotics --channel https://prefix.dev/blooop --channel conda-forge devlaunch=0.49.0+fork.1
 ```
 
 That is the minimal install, and it is deliberately minimal: `dl`, `aid`, and the `devpod` they
@@ -334,7 +334,7 @@ clone, and [docs/cleanup.md](docs/cleanup.md) says what it carries one past and 
 
 ```bash
 $ dl --version
-dl 0.49.0
+dl 0.49.0+fork.1
 ```
 
 `--devcontainer <variant|path>` picks a non-default `devcontainer.json`. A bare name means
@@ -434,7 +434,7 @@ the question and launches one-shot, so scripts behave as they always have.
 | `--no-remote-control`, `--no-remote` | Start a plain local session. Remote Control is on by default for `claude`: the session is named after the workspace and can be read and steered from claude.ai/code or the Claude app. It needs a claude.ai login in the container |
 | `--remote-control`, `--remote` | Ask for Remote Control by name. `claude` has it already; beside `--codex` or `--gemini` this says they have not got it and stops |
 | `--devcontainer <variant\|path>` | Passed through to `dl` |
-| `--claude-profile <name>` | Passed through to `dl`: which host Claude login to forward. Not the claude.ai account the container's `claude` is paired to for Remote Control |
+| `--claude-profile <name>` | Passed through to `dl`: which Claude configuration directory to bind in. Not the claude.ai account the container's `claude` is paired to for Remote Control |
 
 **The trade, stated plainly.** Every agent starts in full auto, because it is already inside a
 disposable container holding only this repo and the per-tool prompts would stall an unattended
