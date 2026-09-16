@@ -3041,6 +3041,39 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
              holds. A workspace that predates the check picks it up after one `up`.",
             python_repr(name)
         ),
+        // warning: the bind landed and pointed at the target, but this container's
+        // uid cannot write into it, so a refreshed token has nowhere to go. Named for
+        // the cause rather than the symptom -- see
+        // LaunchNotice::ClaudeProfileMountUidMismatch's own doc.
+        LaunchNotice::ClaudeProfileMountUidMismatch {
+            name,
+            target,
+            container_uid,
+            dir_uid,
+        } => format!(
+            "Claude profile {}: {} is bound in, but this container's uid ({container_uid}) does \
+             not own it (uid {dir_uid}) and cannot write to it, so a refreshed Claude login \
+             cannot be saved. This repo's devcontainer.json is the likely cause -- \
+             \"updateRemoteUserUID\": false, or containerUser/remoteUser pinned to a fixed user \
+             -- rather than anything on the host.",
+            python_repr(name),
+            target.display()
+        ),
+        // warning: the bind landed, but a different profile's directory is actually
+        // mounted there -- a container created with one profile, later launched with
+        // a different name, and a `--mount` that only lands at creation.
+        LaunchNotice::ClaudeProfileMountSwitched {
+            name,
+            requested,
+            bound,
+        } => format!(
+            "Claude profile {}: this container's Claude configuration is still {}, not {} -- a \
+             `--mount` only lands when devpod creates a container, so a profile named after \
+             this one was created keeps the old one. `recreate` is what moves it.",
+            python_repr(name),
+            bound.display(),
+            requested.display()
+        ),
         LaunchNotice::ClaudeProfileBound {
             name,
             source,
@@ -5587,6 +5620,46 @@ mod tests {
             Some(
                 "The shared pixi cache at /c/pixi is not there after all, so this container \
                  downloads its own packages."
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn a_uid_mismatch_names_both_uids_and_the_devcontainer() {
+        let line = launch_notice(&LaunchNotice::ClaudeProfileMountUidMismatch {
+            name: "bear".to_owned(),
+            target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
+            container_uid: 1000,
+            dir_uid: 1001,
+        });
+        assert_eq!(
+            line,
+            Some(
+                "Claude profile 'bear': /var/tmp/devlaunch-claude is bound in, but this \
+                 container's uid (1000) does not own it (uid 1001) and cannot write to it, so a \
+                 refreshed Claude login cannot be saved. This repo's devcontainer.json is the \
+                 likely cause -- \"updateRemoteUserUID\": false, or containerUser/remoteUser \
+                 pinned to a fixed user -- rather than anything on the host."
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn a_switched_mount_names_the_source_actually_bound_and_the_one_asked_for() {
+        let line = launch_notice(&LaunchNotice::ClaudeProfileMountSwitched {
+            name: "otter".to_owned(),
+            requested: std::path::PathBuf::from("/home/me/.claude-profiles/otter"),
+            bound: std::path::PathBuf::from("/home/me/.claude-profiles/bear"),
+        });
+        assert_eq!(
+            line,
+            Some(
+                "Claude profile 'otter': this container's Claude configuration is still \
+                 /home/me/.claude-profiles/bear, not /home/me/.claude-profiles/otter -- a \
+                 `--mount` only lands when devpod creates a container, so a profile named after \
+                 this one was created keeps the old one. `recreate` is what moves it."
                     .to_owned()
             )
         );

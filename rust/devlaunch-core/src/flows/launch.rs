@@ -58,7 +58,7 @@
 //! bytes are a contract with a shell rather than prose for a person.
 
 use std::borrow::Cow;
-use std::cell::{Cell, OnceCell, RefCell};
+use std::cell::{OnceCell, RefCell};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -90,8 +90,8 @@ use crate::flows::lifecycle::{
 use crate::flows::listing::CommandContext;
 use crate::flows::provision::verdict_cache::VerdictCache;
 use crate::flows::provision::{
-    self, ClaudeConfig, DevpodMissing, HostLayout, PassOccasion, ProvisionEvent, Provisioning,
-    Switches, ZellijSwitch,
+    self, ClaudeConfig, ClaudeMountFacts, DevpodMissing, HostLayout, PassOccasion, ProvisionEvent,
+    Provisioning, Switches, ZellijSwitch,
 };
 use crate::flows::records::{self, Records, RecordsNotice, StartupError};
 use crate::flows::repo_manager::CacheNotice;
@@ -548,6 +548,36 @@ pub enum LaunchNotice {
     /// inside the session. `dl <ws> stop` already prints the same courtesy for the
     /// same flag.
     ClaudeProfileNotForwarded { name: String },
+    /// A named profile was bound in, the probe found the bind mounted and
+    /// pointed at correctly -- but this container's own uid does not own the
+    /// directory, so a refreshed credential has nowhere to land.
+    ///
+    /// Named for the cause devlaunch can actually see rather than the symptom:
+    /// docker has no uid translation for a bind mount, so what ordinarily makes
+    /// one writable is the devcontainer spec's `updateRemoteUserUID` (default
+    /// `true` on Linux) rewriting the container's user to the host's uid at
+    /// creation. A repo that sets it `false`, or pins `containerUser`/
+    /// `remoteUser` to a fixed user, is what leaves these two uids apart --
+    /// which is the file whoever reads this notice needs to go edit.
+    ClaudeProfileMountUidMismatch {
+        name: String,
+        target: PathBuf,
+        container_uid: u32,
+        dir_uid: u32,
+    },
+    /// A named profile was bound in, but the probe found a *different* source
+    /// mounted at the target than the one this launch asked to bind.
+    ///
+    /// The mount lands only at container creation, so a container created with
+    /// one profile and later launched with `--claude-profile` naming a
+    /// different one keeps the first, silently -- `devpod up` cannot land a new
+    /// `--mount` on a container that already exists. `recreate` is what moves
+    /// it.
+    ClaudeProfileMountSwitched {
+        name: String,
+        requested: PathBuf,
+        bound: PathBuf,
+    },
     /// A named profile was bound in as the container's Claude configuration.
     ///
     /// Said because attribution is the failure profiles exist to prevent: this is
@@ -623,8 +653,10 @@ pub enum LaunchNotice {
     /// Says only what is true regardless of what is already bound: this call did
     /// not bind `name`. It does not say whether the running container already
     /// holds this profile or a different one, because [`ClaudeProfileMount::Bound`]
-    /// carries no fact about what is currently mounted -- reporting the bound
-    /// source path is step 5's job. Switching profiles is a `recreate`.
+    /// carries no fact about what is currently mounted -- the probe reports the
+    /// bound source path separately, as [`LaunchNotice::ClaudeProfileMountSwitched`]
+    /// when it differs from what this call asked for. Switching profiles is a
+    /// `recreate`.
     ClaudeProfileMountUnappliable { name: String },
 
     /// This workspace was provisioned before, but without the codex stage, and this
@@ -1810,20 +1842,69 @@ pub(crate) struct HostToken {
 ///
 /// Empty until a pass answers. Empty is not [`ClaudeConfig::Ours`]: it forwards no
 /// login at all. See [`crate::clients::claude`] for why that is the safe direction.
+///
+/// Held behind a [`RefCell`] rather than a [`Cell`], since [`ClaudeObservation`]
+/// carries [`ClaudeMountFacts`] once a mount's source is known, and `Cell::get`
+/// needs `Copy`. `ClaudeObservation` is cheap to clone -- one small struct, at
+/// most one short path -- so the cost this pays for the wider payload is nothing
+/// a per-launch value notices.
 #[derive(Debug, Default)]
-pub(crate) struct ClaudeSeen(Cell<Option<ClaudeConfig>>);
+pub(crate) struct ClaudeSeen(RefCell<ClaudeObservation>);
 
 impl ClaudeSeen {
     pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    fn set(&self, seen: Option<ClaudeConfig>) {
-        self.0.set(seen);
+    fn set(&self, seen: ClaudeObservation) {
+        *self.0.borrow_mut() = seen;
     }
 
-    fn get(&self) -> Option<ClaudeConfig> {
-        self.0.get()
+    fn get(&self) -> ClaudeObservation {
+        self.0.borrow().clone()
+    }
+}
+
+/// What a live pass learned about the container's Claude config directory --
+/// [`ClaudeConfig`] and [`ClaudeMountFacts`] together, which is what crosses from
+/// [`Provision::provision_tools`] into [`ClaudeSeen`]. Kept separate from
+/// [`crate::flows::provision::Pass`], which also carries `Provisioning`: that is
+/// the pass's own outcome, and this is deliberately narrower.
+///
+/// `Default` is "nothing observed", the same reading [`ClaudeSeen`] gave an
+/// absent [`ClaudeConfig`] before this widened: [`Self::config`] is `None` and
+/// [`Self::mount`]'s facts are all `None` too.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ClaudeObservation {
+    config: Option<ClaudeConfig>,
+    mount: ClaudeMountFacts,
+}
+
+impl ClaudeObservation {
+    /// From a live pass's own two facts.
+    fn from_pass(config: Option<ClaudeConfig>, mount: ClaudeMountFacts) -> Self {
+        Self { config, mount }
+    }
+
+    /// From [`Provision::remembered_claude`], which only ever answers the
+    /// ownership question -- a host-side record has no live mount to report, so
+    /// every mount fact reads "unknown" here rather than a guessed one.
+    fn remembered(config: Option<ClaudeConfig>) -> Self {
+        Self {
+            config,
+            mount: ClaudeMountFacts::default(),
+        }
+    }
+
+    /// Who owns the container's Claude config directory, as far as this launch
+    /// knows.
+    pub(crate) fn config(&self) -> Option<ClaudeConfig> {
+        self.config
+    }
+
+    /// The raw mount facts a `--claude-profile` bind's verification needs.
+    pub(crate) fn mount(&self) -> &ClaudeMountFacts {
+        &self.mount
     }
 }
 
@@ -2220,6 +2301,22 @@ pub trait Provision {
         None
     }
 
+    /// The raw mount facts the most recent [`Self::provision_tools`] call
+    /// observed, alongside the [`ClaudeConfig`] it already returned there -- see
+    /// [`ClaudeMountFacts`]. A second question beside `provision_tools` rather
+    /// than a wider answer to it, for the reason [`Self::remembered_claude`] is
+    /// already a second method and not a wider [`Option`]: `provision_tools`'s
+    /// signature is frozen (#251 §7), and this is asked immediately after it and
+    /// nowhere else -- which is what keeps a pass's two facts from drifting apart
+    /// without a second round trip.
+    ///
+    /// [`ClaudeMountFacts::default()`] -- "the probe could not say", never "no"
+    /// -- for every implementation that never asked, which is every one but the
+    /// real pass.
+    fn last_claude_mount(&self) -> ClaudeMountFacts {
+        ClaudeMountFacts::default()
+    }
+
     /// Whether a setup pass over the container standing now began and never
     /// finished, from the host's own records and without a round trip.
     ///
@@ -2304,6 +2401,11 @@ pub struct ToolProvisioning<'e> {
     host: Option<HostLayout>,
     verdicts: VerdictCache,
     events: RefCell<&'e mut dyn Notices<ProvisionEvent>>,
+    /// What the most recent live pass saw of the mount, for
+    /// [`Provision::last_claude_mount`] to hand back right after
+    /// `provision_tools` returns -- see that method's doc for why this is a
+    /// second question rather than a wider answer to the first.
+    last_claude_mount: RefCell<ClaudeMountFacts>,
 }
 
 impl<'e> ToolProvisioning<'e> {
@@ -2325,6 +2427,7 @@ impl<'e> ToolProvisioning<'e> {
             // every pass travels, exactly as it did before the cache existed.
             verdicts: VerdictCache::under(cache, DevpodHome::locate()),
             events: RefCell::new(events),
+            last_claude_mount: RefCell::new(ClaudeMountFacts::default()),
         }
     }
 
@@ -2383,12 +2486,17 @@ impl Provision for ToolProvisioning<'_> {
         // The Claude fact travels; every arm of `Provisioning` still says nothing.
         provisioned.map(|pass| {
             let _: Provisioning = pass.provisioning;
+            *self.last_claude_mount.borrow_mut() = pass.claude_mount().clone();
             pass.claude()
         })
     }
 
     fn remembered_claude(&self, workspace_id: &str) -> Option<ClaudeConfig> {
         self.verdicts.remembered_claude(workspace_id)
+    }
+
+    fn last_claude_mount(&self) -> ClaudeMountFacts {
+        self.last_claude_mount.borrow().clone()
     }
 
     fn pass_never_finished(&self, workspace_id: &str) -> bool {
@@ -2559,7 +2667,10 @@ fn up_under_stage(
         let seen = provision
             .provision_tools(context.runner(), identity, PassOccasion::TopUp, title)
             .map_err(|DevpodMissing| NotRun::NotInstalled)?;
-        claude_seen.set(seen);
+        claude_seen.set(ClaudeObservation::from_pass(
+            seen,
+            provision.last_claude_mount(),
+        ));
         return Ok(UpOutcome::SkippedSiblingWon);
     }
 
@@ -2771,7 +2882,10 @@ fn up_under_stage(
         let seen = provision
             .provision_tools(context.runner(), identity, PassOccasion::AfterUp, title)
             .map_err(|DevpodMissing| NotRun::NotInstalled)?;
-        claude_seen.set(seen);
+        claude_seen.set(ClaudeObservation::from_pass(
+            seen,
+            provision.last_claude_mount(),
+        ));
     }
     drop(serialization);
     Ok(UpOutcome::Started)
@@ -3530,16 +3644,35 @@ impl<'a> SessionContext<'a> {
     /// account, discovered later and somewhere else" outcome the refusal below exists
     /// to prevent. So the token stays unforwarded and
     /// [`LaunchNotice::ClaudeProfileNotForwarded`] says so once.
+    ///
+    /// `ClaudeConfig::Bound` alone is not the end of the story either: it says the
+    /// bind landed and pointed `CLAUDE_CONFIG_DIR` at
+    /// [`crate::flows::provision::CLAUDE_CONFIG_TARGET`], never whether the mount is
+    /// actually usable. A bind is not a guarantee -- see [`claude_profile_mount_notice`]
+    /// for the two ways it can still be silently inert, and this arm says nothing at
+    /// all when it is not, since there is nothing to forward and nothing that failed
+    /// to forward either way.
     fn forwarded_claude(
         &self,
         notices: &mut dyn Notices<LaunchNotice>,
     ) -> Result<Option<claude::Token>, SessionRefused> {
-        match self.claude_seen.get() {
+        let seen = self.claude_seen.get();
+        match seen.config() {
             Some(ClaudeConfig::Ours) => {}
-            // A bound profile refreshes in place, the same way the host's own
-            // credential file does -- there is nothing to forward and nothing
-            // that failed to forward, so this arm says neither.
-            Some(ClaudeConfig::Bound) => return Ok(None),
+            Some(ClaudeConfig::Bound) => {
+                if let Some(name) = self.host.claude.profile.as_deref() {
+                    let requested = match ClaudeProfileMount::ensure(self.host) {
+                        ClaudeProfileMount::Bound { source, .. } => Some(source),
+                        _ => None,
+                    };
+                    if let Some(notice) =
+                        claude_profile_mount_notice(name, requested.as_deref(), seen.mount())
+                    {
+                        notices.say(notice);
+                    }
+                }
+                return Ok(None);
+            }
             Some(ClaudeConfig::Foreign) | None => {
                 if let Some(name) = self.host.claude.profile.as_deref() {
                     notices.say(LaunchNotice::ClaudeProfileNotForwarded {
@@ -3607,6 +3740,101 @@ impl<'a> SessionContext<'a> {
             codex::CredentialLookup::Missing(_) => None,
         }
     }
+}
+
+/// Which notice, if any, a bound Claude profile earns from what the probe
+/// actually saw of the mount.
+///
+/// Called only when `claude_seen`'s [`ClaudeConfig`] already answered
+/// [`ClaudeConfig::Bound`] -- the bind landed, and `CLAUDE_CONFIG_DIR` resolved
+/// to exactly [`crate::flows::provision::CLAUDE_CONFIG_TARGET`]. Two more things
+/// can still be wrong, and neither is visible from that alone:
+///
+/// - **A different profile is actually mounted there.** The mount lands only at
+///   container creation, so a container created with one profile and later
+///   launched with `--claude-profile` naming a different one keeps the first,
+///   silently -- `devpod up` cannot move a `--mount` on a container that already
+///   exists. `requested` is the source this launch asked
+///   [`ClaudeProfileMount::ensure`] to bind; `mount.target_source()` is the
+///   source the probe actually found there. Only their final path components
+///   -- the profile names -- are compared, not the whole path: see the
+///   comparison itself for why the whole path is unsound here. The two names
+///   differing is the evidence of this, and it is conclusive as far as a
+///   name comparison can be; it is not evidence when a profile directory is
+///   itself a symlink elsewhere, which is silent rather than guessed at.
+/// - **This container's uid cannot write into it.** Docker has no uid
+///   translation for a bind mount (measured: docker 29.6.1 rejects `idmap` and
+///   `idmap=true` alike on `--mount`); what ordinarily makes one writable is the
+///   devcontainer spec's `updateRemoteUserUID` (default `true` on Linux)
+///   rewriting the container's user to the host's uid at creation. A repo that
+///   turns that off, or pins `containerUser`/`remoteUser` to a fixed user, is
+///   what leaves the two uids [`ClaudeMountFacts::container_uid`] and
+///   [`ClaudeMountFacts::dir_uid`] apart.
+///
+/// The switch is checked first: a mount pointed at the wrong profile entirely is
+/// the more fundamental problem, and its own uid facts describe whichever
+/// profile is actually there rather than the one asked for, which would be a
+/// confusing thing to name as the cause.
+///
+/// `None` on success and on every fact the probe could not resolve -- a mount
+/// this cannot back up with evidence is not reported as broken, the same
+/// standard [`ClaudeConfig::parse`] itself holds to. `requested` is `None` when
+/// [`ClaudeProfileMount::ensure`] itself resolved no source for this launch's
+/// request (a bare name past `ProfileName::parse`, no profiles root) -- there is
+/// nothing to compare against, so the switch check is skipped rather than
+/// guessed.
+fn claude_profile_mount_notice(
+    name: &str,
+    requested: Option<&Path>,
+    mount: &ClaudeMountFacts,
+) -> Option<LaunchNotice> {
+    if let (Some(requested), Some(bound)) = (requested, mount.target_source()) {
+        let bound_path = Path::new(bound);
+        // `bound` is mountinfo field 4: a mount root in its *source*
+        // filesystem's own namespace, not a host pathname. The two agree only
+        // when the source lives on the filesystem mounted at `/` -- on a host
+        // where it does not (a btrfs subvolume, a separate `/home`
+        // partition, an LVM or ZFS dataset), `bound` carries a namespace
+        // prefix `requested` never had: `/@home/josh/.claude-profiles/bear`
+        // for a request of `/home/josh/.claude-profiles/bear`. Comparing the
+        // whole path there flags a perfectly correct first bind as switched.
+        //
+        // Profile names are unique under the profiles root, so comparing
+        // only the final path component -- the profile name -- is sound for
+        // the mismatch this notice exists to catch, and it is unaffected by
+        // whatever namespace prefix the source filesystem adds.
+        //
+        // What it still cannot catch: a profile directory that is itself a
+        // symlink elsewhere can carry a final component that differs from
+        // the requested name on a bind that is in fact correct, or agree on
+        // one that is not. Neither `file_name()` returning `None` (an
+        // unusual `bound`, such as `/`) is evidence of anything either. In
+        // both cases this stays silent rather than guess -- a false "your
+        // profile is not what you asked for" is worse than saying nothing,
+        // which is the whole lesson of the whole-path comparison this
+        // replaces.
+        if let (Some(requested_name), Some(bound_name)) =
+            (requested.file_name(), bound_path.file_name())
+            && requested_name != bound_name
+        {
+            return Some(LaunchNotice::ClaudeProfileMountSwitched {
+                name: name.to_owned(),
+                requested: requested.to_path_buf(),
+                bound: PathBuf::from(bound),
+            });
+        }
+    }
+    if mount.writable() == Some(false)
+        && let (Some(container_uid), Some(dir_uid)) = (mount.container_uid(), mount.dir_uid())
+    {
+        return Some(LaunchNotice::ClaudeProfileMountUidMismatch {
+            name: name.to_owned(),
+            target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+            container_uid,
+            dir_uid,
+        });
+    }
+    None
 }
 
 /// SSH into a workspace, optionally running a command.
@@ -5883,7 +6111,10 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
                     self.container_title(placement.title()).as_deref(),
                 )
                 .map_err(|DevpodMissing| LaunchAborted::DevpodNotRun(NotRun::NotInstalled))?;
-            self.claude_seen.set(seen);
+            self.claude_seen.set(ClaudeObservation::from_pass(
+                seen,
+                self.provision.last_claude_mount(),
+            ));
             return Ok(Launched::AlreadyRunning);
         }
         if let Some(refused) = self.bring_up(&LaunchVerb::Up, devcontainer, placement)? {
@@ -6041,7 +6272,10 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
                 self.container_title(placement.title()).as_deref(),
             )
             .map_err(|DevpodMissing| LaunchAborted::DevpodNotRun(NotRun::NotInstalled))?;
-        self.claude_seen.set(seen);
+        self.claude_seen.set(ClaudeObservation::from_pass(
+            seen,
+            self.provision.last_claude_mount(),
+        ));
         Ok(())
     }
 
@@ -6065,9 +6299,10 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
         // So a workspace created by this build carries an answer from the pass that
         // created it and never reaches this at all. A workspace that predates it
         // acquires one on its next `up`, `restart` or `recreate`.
-        if self.claude_seen.get().is_none() {
-            self.claude_seen
-                .set(self.provision.remembered_claude(placement.workspace_id()));
+        if self.claude_seen.get().config().is_none() {
+            self.claude_seen.set(ClaudeObservation::remembered(
+                self.provision.remembered_claude(placement.workspace_id()),
+            ));
         }
         // Both names, from the one `placement.title()` and the one gate behind it,
         // so the tab and the pane cannot be given different answers.
@@ -6552,6 +6787,9 @@ mod tests {
         /// What the host's records say about a workspace no pass ran for, which is
         /// what `dl`'s real implementation reads out of its verdict cache.
         claude_remembered: Option<ClaudeConfig>,
+        /// The mount facts the same pass observed, alongside `claude_seen` --
+        /// unknown by default, like every fact [`ClaudeMountFacts`] carries.
+        claude_mount: ClaudeMountFacts,
         /// Whether the host's records say the last pass over this container was cut
         /// short. Read from the same cache the field above is.
         pass_never_finished: bool,
@@ -6608,6 +6846,10 @@ mod tests {
 
         fn remembered_claude(&self, _workspace_id: &str) -> Option<ClaudeConfig> {
             self.claude_remembered
+        }
+
+        fn last_claude_mount(&self) -> ClaudeMountFacts {
+            self.claude_mount.clone()
         }
 
         fn pass_never_finished(&self, _workspace_id: &str) -> bool {
@@ -11025,7 +11267,7 @@ mod tests {
         let mut notices = no_notices();
         let mut said = Vec::new();
         let claude_seen = ClaudeSeen::new();
-        claude_seen.set(seen);
+        claude_seen.set(ClaudeObservation::remembered(seen));
         let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
         let _ = workspace_ssh(
             &context,
@@ -11175,7 +11417,7 @@ mod tests {
         let token = HostToken::new();
         let mut notices = no_notices();
         let claude_seen = ClaudeSeen::new();
-        claude_seen.set(Some(ClaudeConfig::Ours));
+        claude_seen.set(ClaudeObservation::remembered(Some(ClaudeConfig::Ours)));
         let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
         workspace_ssh(&context, "myws", command, None, &mut |_| {}, &mut notices)
     }
@@ -11187,14 +11429,19 @@ mod tests {
     /// repo whose devcontainer mounts its own Claude config, `None` is a workspace
     /// that predates the provisioning record, `DEVLAUNCH_NO_TOOLS`, or a probe report
     /// that would not parse.
+    ///
+    /// `mount` is what a `--claude-profile` mount's own verification reads: unknown
+    /// ([`ClaudeMountFacts::default`]) for every test above that is not about the
+    /// mount at all, and a specific set of facts for the ones that are.
     fn a_session_on_someone_elses_claude(
         scene: &Scene,
         seen: Option<ClaudeConfig>,
+        mount: ClaudeMountFacts,
     ) -> (Result<Session, SessionRefused>, Vec<LaunchNotice>) {
         let token = HostToken::new();
         let mut notices = Vec::new();
         let claude_seen = ClaudeSeen::new();
-        claude_seen.set(seen);
+        claude_seen.set(ClaudeObservation::from_pass(seen, mount));
         let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
         let opened = workspace_ssh(
             &context,
@@ -11234,7 +11481,8 @@ mod tests {
                 // the profile is good and still cannot be carried.
                 .naming_a_claude_profile("work", true);
 
-            let (opened, notices) = a_session_on_someone_elses_claude(&scene, seen);
+            let (opened, notices) =
+                a_session_on_someone_elses_claude(&scene, seen, ClaudeMountFacts::default());
 
             // Still a session, and still no token: the silence was the defect, not the
             // decision.
@@ -11259,14 +11507,206 @@ mod tests {
         // carried out is worth a word.
         let scene = Scene::new().on_a_terminal(&["myws"]).with_running("myws");
 
-        let (opened, notices) =
-            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Foreign));
+        let (opened, notices) = a_session_on_someone_elses_claude(
+            &scene,
+            Some(ClaudeConfig::Foreign),
+            ClaudeMountFacts::default(),
+        );
 
         assert!(opened.is_ok(), "{opened:?}");
         assert!(
             !notices
                 .iter()
                 .any(|notice| matches!(notice, LaunchNotice::ClaudeProfileNotForwarded { .. })),
+            "{notices:?}"
+        );
+    }
+
+    // =======================================================================
+    // a bound mount's own verification: what the probe saw of it decides
+    // whether the operator hears anything more, once `ClaudeConfig::Bound`
+    // has already established the bind landed and pointed at the target.
+    // =======================================================================
+
+    /// Only the notices [`claude_profile_mount_notice`] can produce, in order --
+    /// `workspace_ssh` says plenty else along the way (an `SshCommand` among
+    /// them), and none of that is this table's business.
+    fn claude_profile_mount_notices(notices: &[LaunchNotice]) -> Vec<LaunchNotice> {
+        notices
+            .iter()
+            .filter(|notice| {
+                matches!(
+                    notice,
+                    LaunchNotice::ClaudeProfileNotForwarded { .. }
+                        | LaunchNotice::ClaudeProfileMountUidMismatch { .. }
+                        | LaunchNotice::ClaudeProfileMountSwitched { .. }
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_bound_mount_the_probe_confirms_is_working_gets_no_notice_at_all() {
+        // Mounted, pointed at the right source, and writable: the mount is doing
+        // its job, so nothing more is worth saying.
+        let scene = Scene::new()
+            .on_a_terminal(&["myws"])
+            .with_running("myws")
+            .naming_a_claude_profile("work", true);
+        let source = scene
+            .host
+            .claude_profiles_root
+            .clone()
+            .unwrap()
+            .join("work");
+        let mount = ClaudeMountFacts::synthetic(
+            Some(true),
+            Some(source.to_str().expect("a utf-8 fixture path")),
+            Some(true),
+            Some(1000),
+            Some(1000),
+        );
+        let (opened, notices) =
+            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Bound), mount);
+        assert!(opened.is_ok(), "{opened:?}");
+        assert!(
+            claude_profile_mount_notices(&notices).is_empty(),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn a_bound_mount_the_containers_uid_cannot_write_names_both_uids_and_the_devcontainer() {
+        // Mounted and pointed at the right source, but not writable -- and the
+        // probe can name why, because it saw both uids.
+        let scene = Scene::new()
+            .on_a_terminal(&["myws"])
+            .with_running("myws")
+            .naming_a_claude_profile("work", true);
+        let source = scene
+            .host
+            .claude_profiles_root
+            .clone()
+            .unwrap()
+            .join("work");
+        let mount = ClaudeMountFacts::synthetic(
+            Some(true),
+            Some(source.to_str().expect("a utf-8 fixture path")),
+            Some(false),
+            Some(1000),
+            Some(1001),
+        );
+        let (opened, notices) =
+            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Bound), mount);
+        assert!(opened.is_ok(), "{opened:?}");
+        assert_eq!(
+            claude_profile_mount_notices(&notices),
+            vec![LaunchNotice::ClaudeProfileMountUidMismatch {
+                name: "work".to_owned(),
+                target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+                container_uid: 1000,
+                dir_uid: 1001,
+            }],
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn a_bound_mount_of_a_different_profile_names_the_source_actually_mounted() {
+        // a container created with one profile and later launched with
+        // `--claude-profile` naming a different one keeps the first, silently,
+        // because `devpod up` cannot move a `--mount` on a container that already
+        // exists. `ClaudeConfig::Bound` alone cannot tell this apart from a
+        // genuinely correct bind -- the effective directory is
+        // `CLAUDE_CONFIG_TARGET` either way -- but the probe's own view of *which*
+        // source is mounted there can.
+        let scene = Scene::new()
+            .on_a_terminal(&["myws"])
+            .with_running("myws")
+            .naming_a_claude_profile("otter", true);
+        let root = scene.host.claude_profiles_root.clone().unwrap();
+        std::fs::create_dir_all(root.join("bear")).expect("a sibling profile directory");
+        let bear = root.join("bear");
+        let mount = ClaudeMountFacts::synthetic(
+            Some(true),
+            Some(bear.to_str().expect("a utf-8 fixture path")),
+            Some(true),
+            Some(1000),
+            Some(1000),
+        );
+        let (opened, notices) =
+            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Bound), mount);
+        assert!(opened.is_ok(), "{opened:?}");
+        assert_eq!(
+            claude_profile_mount_notices(&notices),
+            vec![LaunchNotice::ClaudeProfileMountSwitched {
+                name: "otter".to_owned(),
+                requested: root.join("otter"),
+                bound: bear,
+            }],
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn a_bound_mount_on_a_non_root_source_filesystem_gets_no_false_switch_notice() {
+        // mountinfo field 4 is a path in the *source* filesystem's
+        // own namespace, not a host pathname. On a host where the profiles
+        // root lives on a mounted subvolume or a separate filesystem (btrfs
+        // subvolumes are the Arch/openSUSE default, and a dedicated `/home`
+        // partition, LVM or ZFS dataset behave the same way), field 4 carries
+        // that filesystem's own root as a prefix -- e.g. `/@home/...` -- even
+        // on a bind that is exactly the one requested. Comparing whole paths
+        // flags this as switched; comparing only the final path component
+        // (the profile name) does not. This fixture fails against the old
+        // whole-path comparison.
+        let scene = Scene::new()
+            .on_a_terminal(&["myws"])
+            .with_running("myws")
+            .naming_a_claude_profile("work", true);
+        let source = scene
+            .host
+            .claude_profiles_root
+            .clone()
+            .unwrap()
+            .join("work");
+        let namespaced = format!("/@home{}", source.to_str().expect("a utf-8 fixture path"));
+        let mount = ClaudeMountFacts::synthetic(
+            Some(true),
+            Some(namespaced.as_str()),
+            Some(true),
+            Some(1000),
+            Some(1000),
+        );
+        let (opened, notices) =
+            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Bound), mount);
+        assert!(opened.is_ok(), "{opened:?}");
+        assert!(
+            claude_profile_mount_notices(&notices).is_empty(),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn a_bound_mount_with_unknown_facts_never_guesses_a_cause() {
+        // The probe answered nothing at all -- `DEVLAUNCH_NO_TOOLS`, a trip that
+        // never got through, or a build that predates these keys. Every fact
+        // reads unknown, and the outcome must stay silent: a cause this cannot
+        // back up with evidence is not asserted, the same standard
+        // `ClaudeConfig::parse` itself holds to.
+        let scene = Scene::new()
+            .on_a_terminal(&["myws"])
+            .with_running("myws")
+            .naming_a_claude_profile("work", true);
+        let (opened, notices) = a_session_on_someone_elses_claude(
+            &scene,
+            Some(ClaudeConfig::Bound),
+            ClaudeMountFacts::default(),
+        );
+        assert!(opened.is_ok(), "{opened:?}");
+        assert!(
+            claude_profile_mount_notices(&notices).is_empty(),
             "{notices:?}"
         );
     }
