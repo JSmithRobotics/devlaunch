@@ -65,9 +65,9 @@ pub fn devlaunch_runner::Outcome<T>::clone(&self) -> devlaunch_runner::Outcome<T
 impl<T: core::cmp::Eq> core::cmp::Eq for devlaunch_runner::Outcome<T>
 impl<T: core::cmp::PartialEq> core::cmp::PartialEq for devlaunch_runner::Outcome<T>
 pub fn devlaunch_runner::Outcome<T>::eq(&self, &devlaunch_runner::Outcome<T>) -> bool
-impl<T: core::cmp::PartialEq> core::marker::StructuralPartialEq for devlaunch_runner::Outcome<T>
 impl<T: core::fmt::Debug> core::fmt::Debug for devlaunch_runner::Outcome<T>
 pub fn devlaunch_runner::Outcome<T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<T> core::marker::StructuralPartialEq for devlaunch_runner::Outcome<T>
 pub enum devlaunch_runner::StdinPlan
 pub devlaunch_runner::StdinPlan::File(std::path::PathBuf)
 pub devlaunch_runner::StdinPlan::Inherit
@@ -145,8 +145,8 @@ pub fn devlaunch_runner::OsFailure::clone(&self) -> devlaunch_runner::OsFailure
 impl core::cmp::Eq for devlaunch_runner::OsFailure
 impl core::cmp::PartialEq for devlaunch_runner::OsFailure
 pub fn devlaunch_runner::OsFailure::eq(&self, &devlaunch_runner::OsFailure) -> bool
-impl core::convert::From<&core::io::error::Error> for devlaunch_runner::OsFailure
-pub fn devlaunch_runner::OsFailure::from(&core::io::error::Error) -> Self
+impl core::convert::From<&std::io::error::Error> for devlaunch_runner::OsFailure
+pub fn devlaunch_runner::OsFailure::from(&std::io::error::Error) -> Self
 impl core::fmt::Debug for devlaunch_runner::OsFailure
 pub fn devlaunch_runner::OsFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for devlaunch_runner::OsFailure
