@@ -2691,13 +2691,20 @@ impl<'a> SessionContext<'a> {
         &self,
         notices: &mut dyn Notices<LaunchNotice>,
     ) -> Result<Option<claude::Token>, SessionRefused> {
-        if self.claude_seen.get() != Some(ClaudeConfig::Ours) {
-            if let Some(name) = self.host.claude.profile.as_deref() {
-                notices.say(LaunchNotice::ClaudeProfileNotForwarded {
-                    name: name.to_owned(),
-                });
+        match self.claude_seen.get() {
+            Some(ClaudeConfig::Ours) => {}
+            // A bound profile refreshes in place, the same way the host's own
+            // credential file does -- there is nothing to forward and nothing
+            // that failed to forward, so this arm says neither.
+            Some(ClaudeConfig::Bound) => return Ok(None),
+            Some(ClaudeConfig::Foreign) | None => {
+                if let Some(name) = self.host.claude.profile.as_deref() {
+                    notices.say(LaunchNotice::ClaudeProfileNotForwarded {
+                        name: name.to_owned(),
+                    });
+                }
+                return Ok(None);
             }
-            return Ok(None);
         }
         match claude::resolve_token(
             self.host.home.as_deref(),
@@ -8999,7 +9006,16 @@ mod tests {
         // whatever account that directory holds and reported nothing, which is the
         // "wrong account, found out later and somewhere else" outcome the refusal one
         // branch down exists to prevent.
-        for seen in [Some(ClaudeConfig::Foreign), None] {
+        //
+        // `Bound` sits in the same list for the opposite reason: it is the one
+        // non-`Ours` arm where the profile *was* carried -- the mount refreshes in
+        // place -- so it is the negative case proving the notice is not said on
+        // every non-`Ours` launch, only on the ones that actually dropped it.
+        for (seen, expect_notice) in [
+            (Some(ClaudeConfig::Foreign), true),
+            (None, true),
+            (Some(ClaudeConfig::Bound), false),
+        ] {
             let scene = Scene::new()
                 .on_a_terminal(&["myws"])
                 .with_running("myws")
@@ -9019,7 +9035,8 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(said, ["work"], "{seen:?}: {notices:?}");
+            let expected: &[&str] = if expect_notice { &["work"] } else { &[] };
+            assert_eq!(said, expected, "{seen:?}: {notices:?}");
         }
     }
 

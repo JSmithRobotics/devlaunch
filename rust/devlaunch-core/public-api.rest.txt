@@ -2714,6 +2714,7 @@ impl core::fmt::Debug for devlaunch_core::flows::provision::BundleFailed
 pub fn devlaunch_core::flows::provision::BundleFailed::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for devlaunch_core::flows::provision::BundleFailed
 pub enum devlaunch_core::flows::provision::ClaudeConfig
+pub devlaunch_core::flows::provision::ClaudeConfig::Bound
 pub devlaunch_core::flows::provision::ClaudeConfig::Foreign
 pub devlaunch_core::flows::provision::ClaudeConfig::Ours
 impl core::clone::Clone for devlaunch_core::flows::provision::ClaudeConfig

@@ -70,6 +70,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
+use crate::clients::claude::CREDENTIALS_FILENAME;
 use crate::clients::devpod::{self, Call, NotRun};
 use crate::notices::Notices;
 use crate::runner::interrupt;
@@ -159,11 +160,31 @@ pub(crate) const CLAUDE_VERSIONS_RELPATH: &str = ".local/share/claude/versions";
 /// `CLAUDE_CONFIG_DIR` does not say otherwise.
 pub(crate) const CLAUDE_CONFIG_RELPATH: &str = ".claude";
 
+/// Where a named Claude profile will be bound inside a container, and the value
+/// `CLAUDE_CONFIG_DIR` takes there once something does the binding.
+///
+/// Defined here, ahead of the mount itself, because [`ClaudeConfig::parse`] needs
+/// one fixed path to compare a probe's effective config directory against in
+/// order to tell "`dl` bound a profile here" apart from "this happens to be a
+/// container whose home is named that". The mount that actually lands something
+/// at this path is a later change; this constant and the probe fact about it are
+/// what let [`ClaudeConfig::Bound`] be decided the moment that mount exists,
+/// without a second definition of the path appearing alongside it.
+///
+/// Outside every home directory for the same reason a shared cache mount would
+/// be: nothing above the leaf is invented, and the path still works with nothing
+/// mounted on it.
+pub(crate) const CLAUDE_CONFIG_TARGET: &str = "/var/tmp/devlaunch-claude";
+
 /// The report keys the Claude config facts travel under.
 const CLAUDE_HOME_KEY: &str = "claudehome";
 const CLAUDE_DIR_KEY: &str = "claudedir";
 const CLAUDE_MOUNTS_KEY: &str = "claudemounts";
 const CLAUDE_SCAN_KEY: &str = "claudescan";
+/// Whether [`CLAUDE_CONFIG_TARGET`] is itself a mount point -- evidence a
+/// `--claude-profile` bind's `--mount` landed, independent of what
+/// `CLAUDE_CONFIG_DIR` resolves to. See [`ClaudeConfig::parse`].
+const CLAUDE_TARGET_MOUNTED_KEY: &str = "claudetargetmounted";
 
 /// Whether the mount scan ran at all, which is the one thing an empty mount list
 /// cannot say for itself.
@@ -1390,6 +1411,12 @@ pub(crate) fn probe_script() -> String {
     lines.join("\n")
 }
 
+/// The mount-matching awk program's body, verbatim -- no invocation, no input
+/// file -- so [`claude_config_lines`] can splice it into the probe script and
+/// the differential test on [`matching_mount_roots_over`] can run the very same
+/// string standalone against a fixture, rather than a retyped copy of it.
+const CLAUDE_MOUNT_SCAN_AWK: &str = "{ p = $5\n  gsub(/\\\\040/, \" \", p)\n  gsub(/\\\\011/, \"\\t\", p)\n  if (p == d || index(d \"/\", p \"/\") == 1 || p == d \"/\" c)\n    print $4\n}";
+
 /// The lines that describe the container's Claude config directory.
 ///
 /// Facts, and no verdict: where the directory resolved to, what `$HOME` resolved
@@ -1412,15 +1439,30 @@ pub(crate) fn probe_script() -> String {
 /// The mount scan reads `mountinfo` rather than asking `findmnt`, and it looks
 /// both ways. `findmnt --target` answers for the *nearest* mount at or **above** a
 /// path, and one shape that matters sits below one: this repo's own claude-code
-/// feature mounted nine individual paths under `~/.claude` before it switched to
-/// mounting the directory — `settings.json` read-only and `.credentials.json`
-/// read-write — and against that shape a question about the directory reports
-/// nothing mounted. But the other direction matters just as much and a descendants
-/// scan is blind to it: a devcontainer that binds the host's whole `$HOME` onto the
-/// container's home puts nothing under `~/.claude` and owns every byte in it. So
-/// the scan matches a mount point that *is* the directory, one **under** it, and
-/// one **above** it. Field 4 of a `mountinfo` line is the mount's root within its
-/// source filesystem, which is the same subpath `findmnt` prints in brackets.
+/// feature mounted the credential file by name, `.credentials.json`, before it
+/// switched to mounting the directory — and against that shape a question about
+/// the directory reports nothing mounted. But the other direction matters just as
+/// much and a check on the credential alone is blind to it: a devcontainer that
+/// binds the host's whole `$HOME` onto the container's home puts nothing under
+/// `~/.claude` and owns every byte in it. So the scan matches a mount point that
+/// *is* the directory, one **above** it, or the credential file itself. Field 4 of
+/// a `mountinfo` line is the mount's root within its source filesystem, which is
+/// the same subpath `findmnt` prints in brackets.
+///
+/// # Why the credential and not every descendant
+///
+/// An earlier shape of this scan matched *every* descendant, which is one mount
+/// too many. What the verdict decides is whether to forward a login, and the
+/// reason not to is a credential the container already has that can refresh
+/// itself -- so the question is who owns `.credentials.json`, not who owns
+/// anything in the directory. A read-only bind of `~/.claude/skills` -- exactly
+/// what this repo's own feature uses to share the developer's `agents/`,
+/// `commands/`, `hooks/` and `skills/` with a container -- owns instructions and
+/// no login at all, and convicting it made sharing those and using
+/// `--claude-profile` mutually exclusive for no reason that survives stating.
+/// Matching the credential by name keeps the shape that scan was added for --
+/// `p == d "/" c` is exactly the nine-paths mount above -- while letting every
+/// other descendant, `settings.json` included, read as `Ours`.
 ///
 /// `/` is not among the ancestors an `index` test can match — `$5 "/"` is `//`,
 /// which no absolute path has as a prefix — and that is the right answer rather
@@ -1438,9 +1480,13 @@ pub(crate) fn probe_script() -> String {
 /// travel still escaped, which is what makes one space-joined value a sound wire
 /// format — an escaped path carries no literal space to split on — and
 /// [`unescape_mount`] undoes them on the host. A literal backslash is left alone:
-/// undoing `\134` here would need a gsub replacement awk spells three ways, and
-/// leaving it escaped can only fail towards [`ClaudeConfig::Foreign`], which
-/// forwards nothing.
+/// undoing `\134` here would need a gsub replacement awk spells three ways. For
+/// [`cfg_dir_is_foreign`]'s roots that can only fail towards
+/// [`ClaudeConfig::Foreign`], which forwards nothing -- but a `cfg_dir` itself
+/// holding an unescaped `\134` is a different case: this scan then misses the
+/// mount at its own directory and fails the other way, towards
+/// [`ClaudeConfig::Ours`]. Both are pre-existing and out of scope here; this
+/// sentence only says which is which.
 fn claude_config_lines() -> Vec<String> {
     vec![
         "cfg_home=$(readlink -f \"${HOME-}\" 2>/dev/null || true)".to_owned(),
@@ -1460,19 +1506,31 @@ fn claude_config_lines() -> Vec<String> {
         // the awk's and a pipeline's is the last command's: `tr` succeeds cheerfully
         // in an image where `awk` was never installed, which is exactly the case
         // `cfg_scan` exists to notice.
-        "  if cfg_mounts=$(awk -v d=\"$cfg_dir\" -v ORS=' ' '".to_owned(),
-        "        { p = $5".to_owned(),
-        "          gsub(/\\\\040/, \" \", p)".to_owned(),
-        "          gsub(/\\\\011/, \"\\t\", p)".to_owned(),
-        "          if (p == d || index(p, d \"/\") == 1 || index(d \"/\", p \"/\") == 1)"
-            .to_owned(),
-        "            print $4".to_owned(),
-        "        }' /proc/self/mountinfo 2>/dev/null); then".to_owned(),
+        // At the directory, above it, or the credential file itself. Not every
+        // descendant: see "Why the credential and not every descendant" above.
+        format!(
+            "  if cfg_mounts=$(awk -v d=\"$cfg_dir\" -v c={CREDENTIALS_FILENAME} -v ORS=' ' '{CLAUDE_MOUNT_SCAN_AWK}' /proc/self/mountinfo 2>/dev/null); then"
+        ),
         format!("    cfg_scan={CLAUDE_SCAN_OK}"),
         "  fi".to_owned(),
         "fi".to_owned(),
         format!("echo \"{PROBE_MARK} {CLAUDE_SCAN_KEY} $cfg_scan\""),
         format!("echo \"{PROBE_MARK} {CLAUDE_MOUNTS_KEY} $cfg_mounts\""),
+        // Whether `CLAUDE_CONFIG_TARGET` is itself a mount point, independent of
+        // what `cfg_dir` resolved to -- the fact [`ClaudeConfig::parse`] needs to
+        // tell a bound profile apart from a container whose config directory
+        // merely happens to share that path. Nothing binds anything there yet, so
+        // this reports `no` on every container today; it exists so the fact is
+        // available the moment something does.
+        "cfg_target_mounted=no".to_owned(),
+        "if [ -r /proc/self/mountinfo ]; then".to_owned(),
+        format!(
+            "  if awk -v t={CLAUDE_CONFIG_TARGET} '$5 == t {{ found=1 }} END {{ exit !found }}' /proc/self/mountinfo 2>/dev/null; then"
+        ),
+        "    cfg_target_mounted=yes".to_owned(),
+        "  fi".to_owned(),
+        "fi".to_owned(),
+        format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_MOUNTED_KEY} $cfg_target_mounted\""),
     ]
 }
 
@@ -1662,19 +1720,38 @@ pub(crate) fn is_official_claude(versions_dir: &str, claude_binary: &str) -> boo
 
 /// Who owns the Claude config directory in a container.
 ///
-/// Two arms and no third, because the question has two answers and the absence of
-/// an answer is `Option::None` at the call site rather than a state something could
-/// match on and forget. `Foreign` is not a failure: it is a repo's devcontainer
-/// having arranged Claude's identity itself, which is an arrangement devlaunch has
-/// nothing better to offer than.
+/// Three arms, and the absence of an answer is `Option::None` at the call site
+/// rather than a fourth state something could match on and forget. `Foreign` is
+/// not a failure: it is a repo's devcontainer having arranged Claude's identity
+/// itself, which is an arrangement devlaunch has nothing better to offer than.
+/// `Bound` is `dl`'s own doing, and is documented at its own variant below.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClaudeConfig {
     /// Nothing outside the container is mounted there, so what devlaunch puts in
     /// the environment is the only login the container has.
     Ours,
     /// Something is mounted at or under it from outside, and whatever mounted it
-    /// owns what is in there.
+    /// owns what is in there. Not `dl`'s own profile bind -- see [`Self::Bound`].
     Foreign,
+    /// The container's effective config directory is exactly
+    /// [`CLAUDE_CONFIG_TARGET`], and the probe found that path itself mounted --
+    /// `dl` bound a named profile in. Ours in every sense: forward nothing,
+    /// because the mounted directory already carries the same credential file the
+    /// host has and refreshes it the same way.
+    ///
+    /// Nothing constructs this today: the mount that lands something at
+    /// [`CLAUDE_CONFIG_TARGET`] is a later change, so a real container's probe
+    /// always reports that path unmounted and this variant is unreachable in
+    /// practice. It exists now, ahead of the mount, so every match on
+    /// [`ClaudeConfig`] is already made by the compiler to say what it does about
+    /// a bound config rather than absorbing it into a catch-all later.
+    ///
+    /// Carries no payload -- this type is `Copy` and held across several call
+    /// sites, so a `String` naming the profile would ripple past the value it
+    /// adds. A later change that needs the profile's identity can read it
+    /// alongside this variant from the probe's own facts, without this enum
+    /// having to carry it.
+    Bound,
 }
 
 impl ClaudeConfig {
@@ -1690,6 +1767,11 @@ impl ClaudeConfig {
     /// differ in exactly the case that costs something — forwarding the host's
     /// short-lived token over a mounted credential that can refresh itself, which
     /// is worse than forwarding nothing. See [`crate::clients::claude`].
+    ///
+    /// [`Self::Bound`] is decided first, and takes both facts it names literally:
+    /// the effective config directory must equal [`CLAUDE_CONFIG_TARGET`] exactly,
+    /// and the probe must have found that path itself mounted. Either missing or
+    /// false falls through to the existing [`cfg_dir_is_foreign`] rule, unchanged.
     pub(crate) fn parse(report: &str, host_home: Option<&str>) -> Option<Self> {
         let found = marked_lines(report);
         // A scan that did not happen is not evidence of ownership. Without this the
@@ -1700,6 +1782,12 @@ impl ClaudeConfig {
         }
         let home = found.get(CLAUDE_HOME_KEY)?;
         let mounts = found.get(CLAUDE_MOUNTS_KEY)?;
+        let dir = found.get(CLAUDE_DIR_KEY).map(String::as_str).unwrap_or("");
+        let target_mounted =
+            found.get(CLAUDE_TARGET_MOUNTED_KEY).map(String::as_str) == Some("yes");
+        if target_mounted && dir == CLAUDE_CONFIG_TARGET {
+            return Some(Self::Bound);
+        }
         Some(if cfg_dir_is_foreign(home, host_home, mounts) {
             Self::Foreign
         } else {
@@ -3321,18 +3409,24 @@ echo "devlaunch-probe claudedir $cfg_dir"
 cfg_scan=no
 cfg_mounts=
 if [ -n "$cfg_dir" ] && [ -r /proc/self/mountinfo ]; then
-  if cfg_mounts=$(awk -v d="$cfg_dir" -v ORS=' ' '
-        { p = $5
-          gsub(/\\040/, " ", p)
-          gsub(/\\011/, "\t", p)
-          if (p == d || index(p, d "/") == 1 || index(d "/", p "/") == 1)
-            print $4
-        }' /proc/self/mountinfo 2>/dev/null); then
+  if cfg_mounts=$(awk -v d="$cfg_dir" -v c=.credentials.json -v ORS=' ' '{ p = $5
+  gsub(/\\040/, " ", p)
+  gsub(/\\011/, "\t", p)
+  if (p == d || index(d "/", p "/") == 1 || p == d "/" c)
+    print $4
+}' /proc/self/mountinfo 2>/dev/null); then
     cfg_scan=ok
   fi
 fi
 echo "devlaunch-probe claudescan $cfg_scan"
-echo "devlaunch-probe claudemounts $cfg_mounts""#;
+echo "devlaunch-probe claudemounts $cfg_mounts"
+cfg_target_mounted=no
+if [ -r /proc/self/mountinfo ]; then
+  if awk -v t=/var/tmp/devlaunch-claude '$5 == t { found=1 } END { exit !found }' /proc/self/mountinfo 2>/dev/null; then
+    cfg_target_mounted=yes
+  fi
+fi
+echo "devlaunch-probe claudetargetmounted $cfg_target_mounted""#;
 
     const PYTHON_TRANSFER_SCRIPT: &str = r#"set -eu
 exec >&2
@@ -5137,6 +5231,7 @@ fi
             .replace("command -v claude", "")
             .replace(CLAUDE_VERSIONS_RELPATH, "")
             .replace(CLAUDE_CONFIG_RELPATH, "")
+            .replace(CLAUDE_CONFIG_TARGET, "")
             .replace("devlaunch-probe claude", "");
         assert!(!scrubbed.contains("claude"), "{scrubbed}");
         assert!(!script.contains("--version"));
@@ -5180,25 +5275,46 @@ fi
     }
 
     #[test]
-    fn a_feature_that_mounts_only_paths_underneath_is_still_foreign() {
+    fn a_credential_mounted_by_name_is_still_foreign() {
         // The shape a check on the directory alone cannot see, and the one that costs
         // real host state: before it switched to mounting the directory, this repo's
         // own feature bound nine individual paths under `~/.claude` -- among them
         // `settings.json` read-only and `.credentials.json` read-write. `findmnt
         // --target` on the directory answers for the container's own filesystem and
-        // reports nothing, so the probe scans descendants instead.
+        // reports nothing, so the probe matches the credential file by name instead.
+        //
+        // Only the credential's root reaches this verdict now: the scan no longer
+        // forwards a `settings.json` or `agents` mount, so this is what it would
+        // hand `ClaudeConfig::parse` for that historical container rather than every
+        // mount it had. See [`shared_instruction_directories_are_not_evidence_of_a_login`].
         let report = claude_report(
             "/home/vscode",
-            &[
-                "/home/hostuser/.claude/settings.json",
-                "/home/hostuser/.claude/.credentials.json",
-                "/home/hostuser/.claude/agents",
-            ],
+            &["/home/hostuser/.claude/.credentials.json"],
         );
         assert_eq!(
             ClaudeConfig::parse(&report, ELSEWHERE),
             Some(ClaudeConfig::Foreign),
             "a credential mounted from the host must never be written over"
+        );
+    }
+
+    #[test]
+    fn shared_instruction_directories_are_not_evidence_of_a_login() {
+        // The read-only mounts this repo's feature uses to share the developer's
+        // agents, commands, hooks and skills. Under the old every-descendant scan any
+        // one of them read as somebody else owning the login, which made sharing
+        // instructions and `--claude-profile` mutually exclusive for no reason that
+        // survives stating.
+        //
+        // The scan is what excludes them, so the roots below are what it would hand
+        // `ClaudeConfig::parse` for such a container: nothing. This asserts the
+        // verdict that empty earns; `the_awk_and_rust_scans_agree_on_every_ordinary_shape`
+        // is what holds the scan itself to producing that emptiness.
+        let report = claude_report("/home/vscode", &[]);
+        assert_eq!(
+            ClaudeConfig::parse(&report, ELSEWHERE),
+            Some(ClaudeConfig::Ours),
+            "instructions are not a credential"
         );
     }
 
@@ -5299,6 +5415,62 @@ fi
     }
 
     #[test]
+    fn a_target_bound_and_mounted_reads_as_bound() {
+        // The case this variant exists for: `dl` itself bound a named profile at
+        // `CLAUDE_CONFIG_TARGET`, the bind landed, and the effective config
+        // directory points at exactly that. Ours in every sense, and named as such
+        // rather than left for a caller to reconstruct.
+        let report = format!(
+            "devlaunch-probe claudehome /home/vscode\n\
+             devlaunch-probe claudedir {CLAUDE_CONFIG_TARGET}\n\
+             devlaunch-probe claudescan ok\n\
+             devlaunch-probe claudemounts \n\
+             devlaunch-probe claudetargetmounted yes"
+        );
+        assert_eq!(
+            ClaudeConfig::parse(&report, ELSEWHERE),
+            Some(ClaudeConfig::Bound)
+        );
+    }
+
+    #[test]
+    fn a_target_that_is_not_a_mount_point_is_not_bound() {
+        // The effective directory happens to equal the target -- unlikely outside a
+        // launch that asked for a profile, but not proof of anything by itself --
+        // and nothing is actually mounted there. Falls through to the ordinary
+        // rule, which reads an empty mount list as the container's own.
+        let report = format!(
+            "devlaunch-probe claudehome /home/vscode\n\
+             devlaunch-probe claudedir {CLAUDE_CONFIG_TARGET}\n\
+             devlaunch-probe claudescan ok\n\
+             devlaunch-probe claudemounts \n\
+             devlaunch-probe claudetargetmounted no"
+        );
+        assert_eq!(
+            ClaudeConfig::parse(&report, ELSEWHERE),
+            Some(ClaudeConfig::Ours),
+            "the target with nothing mounted at it is still this container's own"
+        );
+    }
+
+    #[test]
+    fn a_config_directory_repointed_away_from_the_target_is_not_bound() {
+        // The bind landed -- `CLAUDE_CONFIG_TARGET` is genuinely mounted -- but the
+        // effective config directory resolved elsewhere. Not `Bound`: the container
+        // is not actually configured from the bind.
+        let report = "devlaunch-probe claudehome /home/vscode\n\
+             devlaunch-probe claudedir /home/vscode/.claude\n\
+             devlaunch-probe claudescan ok\n\
+             devlaunch-probe claudemounts \n\
+             devlaunch-probe claudetargetmounted yes";
+        assert_eq!(
+            ClaudeConfig::parse(report, ELSEWHERE),
+            Some(ClaudeConfig::Ours),
+            "mounted at the target, but not what the config directory resolved to"
+        );
+    }
+
+    #[test]
     fn a_host_home_that_spells_the_container_home_is_still_the_hosts() {
         // A mount root is a path in its *source* namespace, so a bind of the host's
         // `~/.claude` reports the host's own path. Compared against the container's
@@ -5370,26 +5542,40 @@ fi
     }
 
     /// The probe's mount-matching rule, in Rust: every `mountinfo` root whose mount
-    /// point is `cfg_dir`, sits under it, or is an ancestor of it.
+    /// point is `cfg_dir`, is an ancestor of it, or is the credential file itself.
     ///
     /// A deliberate second implementation of the awk in [`claude_config_lines`], which
     /// is the only reason the constant it replaced was ever worth having. Fields 4 and
     /// 5 are read positionally because those two sit before `mountinfo`'s optional
     /// fields, which is what makes `$4` and `$5` safe in the awk as well.
-    fn matching_mount_roots(cfg_dir: &str) -> Vec<String> {
-        let info = std::fs::read_to_string("/proc/self/mountinfo").expect("mountinfo");
+    ///
+    /// Takes the mountinfo table as text, rather than reading
+    /// `/proc/self/mountinfo` itself, so the differential tests below can point it
+    /// at a fixture instead of this machine's real mount table. [`matching_mount_roots`]
+    /// just past it is the thin wrapper that reads the real one, for the one caller
+    /// that has no fixture to hand it.
+    fn matching_mount_roots_over(info: &str, cfg_dir: &str) -> Vec<String> {
         let with_slash = format!("{cfg_dir}/");
+        let credential = format!("{cfg_dir}/{CREDENTIALS_FILENAME}");
         info.lines()
             .filter_map(|line| {
                 let mut fields = line.split(' ').skip(3);
                 let root = fields.next()?;
                 let point = unescape_mount(fields.next()?);
                 let matches = point == cfg_dir
-                    || point.starts_with(&with_slash)
-                    || with_slash.starts_with(&format!("{point}/"));
+                    || with_slash.starts_with(&format!("{point}/"))
+                    || point == credential;
                 matches.then(|| root.to_owned())
             })
             .collect()
+    }
+
+    /// [`matching_mount_roots_over`] against this container's own mount table --
+    /// the one caller ([`the_probe_reports_the_config_facts_when_it_actually_runs`])
+    /// that has no fixture to pass and wants the real thing.
+    fn matching_mount_roots(cfg_dir: &str) -> Vec<String> {
+        let info = std::fs::read_to_string("/proc/self/mountinfo").expect("mountinfo");
+        matching_mount_roots_over(&info, cfg_dir)
     }
 
     #[test]
@@ -6218,104 +6404,169 @@ fi
         );
     }
 
-    /// The probe's own mount scan, run against a `mountinfo` this test wrote.
-    ///
-    /// The awk is composed on the host and reads one hardcoded path, so pointing it
-    /// at a fixture is a `str::replace` on the script this module built. That is the
-    /// only way to state what the scan matches without a bind mount and a root
-    /// shell, and what it matches is the whole of the ownership question.
-    ///
-    /// `mounts` are `(root, mount point)` pairs relative to a scratch directory, and
-    /// the mount points are created for real: the probe resolves the config
-    /// directory with `readlink -f` before scanning, so a table of paths that do not
-    /// exist is a table it never reaches. Returns the roots the scan printed, with
-    /// the scratch prefix taken back off so the assertion reads as a path.
-    fn scan_against(mounts: &[(&str, &str)], cfg_dir: &str) -> Vec<String> {
-        let scratch = tempfile::tempdir().expect("a scratch dir");
-        let root = scratch
-            .path()
-            .canonicalize()
-            .expect("a real scratch dir")
-            .to_str()
-            .expect("utf-8")
-            .to_owned();
+    /// A `mountinfo` fixture: this container's own root filesystem line, plus
+    /// `mounts` as `(root, mount point)` pairs. Mount points are escaped the way
+    /// the kernel escapes them -- a literal space becomes `\040`, a tab `\011` --
+    /// which is exactly what [`unescape_mount`] and the awk's two `gsub`s exist to
+    /// undo, so a fixture can hand both implementations a point that needs it.
+    fn mountinfo_table(mounts: &[(&str, &str)]) -> String {
         let mut table = "25 1 0:24 / / rw - overlay overlay rw\n".to_owned();
-        for (index, (source, point)) in mounts.iter().enumerate() {
-            std::fs::create_dir_all(format!("{root}{point}")).expect("a mount point");
-            // The kernel's spelling, which is what the awk has to undo.
-            let escaped = format!("{root}{point}").replace(' ', "\\040");
+        for (index, (root, point)) in mounts.iter().enumerate() {
+            let escaped = point.replace(' ', "\\040").replace('\t', "\\011");
             let id = index + 30;
             table.push_str(&format!(
-                "{id} 25 8:1 {root}{source} {escaped} rw - ext4 /dev/sda1 rw\n"
+                "{id} 25 8:1 {root} {escaped} rw - ext4 /dev/sda1 rw\n"
             ));
         }
-        let mountinfo = scratch.path().join("mountinfo");
-        std::fs::write(&mountinfo, &table).expect("a mount table");
-        std::fs::create_dir_all(format!("{root}{cfg_dir}")).expect("a config dir");
+        table
+    }
 
-        let script = claude_config_lines()
-            .join("\n")
-            .replace("/proc/self/mountinfo", mountinfo.to_str().expect("utf-8"));
-        let answered = std::process::Command::new("bash")
+    /// The mount-matching awk [`claude_config_lines`] ships -- [`CLAUDE_MOUNT_SCAN_AWK`],
+    /// the same string, not a retyped copy -- run standalone via `sh` against a
+    /// `mountinfo` fixture, alongside [`matching_mount_roots_over`] over the
+    /// identical text. Both are handed `cfg_dir` untouched, with no `readlink -f`
+    /// in between, which is what lets a fixture reach a `cfg_dir` shape the
+    /// resolver would otherwise normalize away before either scan saw it -- a
+    /// trailing slash, in particular.
+    ///
+    /// Returns `(awk, rust)`, each sorted, so a caller only has to compare. Per
+    /// the standing rule on a second hand-maintained copy of a fact: this pair
+    /// *is* the diff test the awk and the Rust twin owe each other, so the tests
+    /// below assert agreement and nothing else -- a third, hand-kept list of
+    /// which roots ought to match would be the very shape the rule forbids.
+    fn awk_and_rust_roots(info: &str, cfg_dir: &str) -> (Vec<String>, Vec<String>) {
+        let mountinfo = tempfile::NamedTempFile::new().expect("a scratch file");
+        std::fs::write(mountinfo.path(), info).expect("a mount table");
+        let script = format!(
+            "awk -v d=\"$1\" -v c={CREDENTIALS_FILENAME} -v ORS=' ' '{CLAUDE_MOUNT_SCAN_AWK}' \"$2\""
+        );
+        let answered = std::process::Command::new("sh")
             .arg("-c")
-            .arg(script)
-            .env("CLAUDE_CONFIG_DIR", format!("{root}{cfg_dir}"))
+            .arg(&script)
+            .arg("sh") // $0, unused by the script but conventional to supply
+            .arg(cfg_dir)
+            .arg(mountinfo.path())
             .output()
-            .expect("bash ran");
-        let report = String::from_utf8_lossy(&answered.stdout).into_owned();
-        let found = marked_lines(&report);
-        assert_eq!(
-            found.get(CLAUDE_SCAN_KEY).map(String::as_str),
-            Some(CLAUDE_SCAN_OK),
-            "{report}"
+            .expect("sh ran");
+        assert!(
+            answered.status.success(),
+            "the awk exited nonzero: {answered:?}"
         );
-        found
-            .get(CLAUDE_MOUNTS_KEY)
-            .map(|roots| {
-                roots
-                    .split_whitespace()
-                    .map(|found| found.replace(&root, ""))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// A container's mount table: the host's home bound onto the container's, one
-    /// file bound underneath the config directory, and a tmpfs beside it.
-    const FIXTURE_MOUNTS: &[(&str, &str)] = &[
-        ("/host/hostuser", "/home/vscode"),
-        (
-            "/host/hostuser/.claude/settings.json",
-            "/home/vscode/.claude/settings.json",
-        ),
-        ("/host/cache", "/home/vscode/.cache"),
-    ];
-
-    #[test]
-    fn the_scan_sees_a_mount_above_the_config_directory_as_well_as_under_it() {
-        // The shape a descendants-only scan is blind to, and the reason `findmnt` was
-        // rejected in the first place cuts both ways: a devcontainer that binds the
-        // host's whole `$HOME` onto the container's home puts nothing under
-        // `~/.claude` and owns every byte in it. `/` is not among the ancestors and
-        // must not be, since the container's own root filesystem cannot be evidence
-        // against itself, and the `.cache` mount is a sibling and no business of ours.
-        assert_eq!(
-            scan_against(FIXTURE_MOUNTS, "/home/vscode/.claude"),
-            vec!["/host/hostuser", "/host/hostuser/.claude/settings.json"]
-        );
+        let mut awk_roots: Vec<String> = String::from_utf8_lossy(&answered.stdout)
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        let mut rust_roots = matching_mount_roots_over(info, cfg_dir);
+        awk_roots.sort();
+        rust_roots.sort();
+        (awk_roots, rust_roots)
     }
 
     #[test]
-    fn the_scan_matches_a_mount_point_whose_path_holds_a_space() {
-        // `mountinfo` writes it as `\040`, so a config directory with a space in its
-        // path matched no line at all and the report said nothing was mounted there.
-        assert_eq!(
-            scan_against(
-                &[("/host/data", "/opt/my dir/.claude")],
-                "/opt/my dir/.claude"
+    fn the_awk_and_rust_scans_agree_on_every_ordinary_shape() {
+        // One fixture, one `cfg_dir`, every arm the doc on
+        // [`matching_mount_roots_over`] names plus the near-misses an
+        // every-descendant scan or a sloppy name check used to convict.
+        let mounts: &[(&str, &str)] = &[
+            // Equal path: a bind lands exactly on the config directory.
+            ("/host/exact", "/home/vscode/.claude"),
+            // Ancestor: the host's whole home bound onto the container's, which a
+            // descendants-only scan is blind to. `/`, the default line every
+            // fixture carries, must never join this list -- the container's own
+            // root filesystem cannot be evidence against itself.
+            ("/host/hostuser", "/home/vscode"),
+            // The credential, mounted by name -- the historical shape, and the
+            // one this verdict exists to convict.
+            (
+                "/host/hostuser/.claude/.credentials.json",
+                "/home/vscode/.claude/.credentials.json",
             ),
-            vec!["/host/data"]
+            // A descendant that is not the credential: shared instructions.
+            // Convicting it made sharing the developer's skills and using
+            // `--claude-profile` mutually exclusive for no reason that survives
+            // stating.
+            (
+                "/host/hostuser/.claude/skills",
+                "/home/vscode/.claude/skills",
+            ),
+            (
+                "/host/hostuser/.claude/settings.json",
+                "/home/vscode/.claude/settings.json",
+            ),
+            // A deep descendant, same reasoning, two levels down.
+            (
+                "/host/hostuser/.claude/sub",
+                "/home/vscode/.claude/sub/deep",
+            ),
+            // The credential's name with a trailing character: not the
+            // credential the rule names.
+            ("/host/notcred", "/home/vscode/.claude/.credentials.jsonx"),
+            // The credential's name, but a directory further down: still not
+            // the literal `cfg_dir/.credentials.json` the rule matches.
+            ("/host/nested", "/home/vscode/.claude/sub/.credentials.json"),
+            // Prefix siblings in both directions: neither is a descendant of
+            // `.claude`, and a substring check on the path rather than a path
+            // check would wrongly convict both.
+            ("/host/siblingx", "/home/vscode/.claudex"),
+            ("/host/siblingbackup", "/home/vscode/.claude-backup"),
+            // An ordinary sibling, no business of ours.
+            ("/host/cache", "/home/vscode/.cache"),
+        ];
+        let (awk_roots, rust_roots) =
+            awk_and_rust_roots(&mountinfo_table(mounts), "/home/vscode/.claude");
+        assert_eq!(awk_roots, rust_roots, "{mounts:?}");
+        // And what they agree *on*. Agreement alone would pass a rule both
+        // implementations got wrong the same way, which is the one thing a
+        // differential cannot see; this is the expectation the concrete test
+        // this one replaced used to carry. Three arms fire and nothing else:
+        // the bind at the directory, the home above it, and the credential by
+        // name -- every descendant that is not the credential stays out.
+        assert_eq!(
+            rust_roots,
+            vec![
+                "/host/exact",
+                "/host/hostuser",
+                "/host/hostuser/.claude/.credentials.json",
+            ],
+            "{mounts:?}"
         );
+    }
+
+    #[test]
+    fn the_awk_and_rust_scans_agree_on_a_path_holding_a_space() {
+        // `mountinfo` writes it as `\040`, so a config directory with a space in
+        // its path matched no line at all before both implementations undid it.
+        let (awk_roots, rust_roots) = awk_and_rust_roots(
+            &mountinfo_table(&[("/host/data", "/opt/my dir/.claude")]),
+            "/opt/my dir/.claude",
+        );
+        assert_eq!(awk_roots, rust_roots);
+    }
+
+    #[test]
+    fn the_awk_and_rust_scans_agree_on_a_path_holding_a_tab() {
+        // The same escape, `mountinfo`'s other one: `\011`.
+        let (awk_roots, rust_roots) = awk_and_rust_roots(
+            &mountinfo_table(&[("/host/data", "/opt/my\tdir/.claude")]),
+            "/opt/my\tdir/.claude",
+        );
+        assert_eq!(awk_roots, rust_roots);
+    }
+
+    #[test]
+    fn the_awk_and_rust_scans_agree_on_a_trailing_slash_in_cfg_dir() {
+        // A `cfg_dir` reached through this helper carries no `readlink -f`
+        // normalization, so a trailing slash reaches the matching rule itself
+        // rather than being resolved away first. Covers the ancestor arm and the
+        // equal-path arm together, since a trailing slash changes what each
+        // compares against.
+        let mounts: &[(&str, &str)] = &[
+            ("/host/hostuser", "/home/vscode"),
+            ("/host/exact", "/home/vscode/.claude"),
+        ];
+        let (awk_roots, rust_roots) =
+            awk_and_rust_roots(&mountinfo_table(mounts), "/home/vscode/.claude/");
+        assert_eq!(awk_roots, rust_roots, "{mounts:?}");
     }
 
     #[test]
