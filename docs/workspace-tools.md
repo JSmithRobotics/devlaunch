@@ -215,6 +215,11 @@ next.
 `--claude-profile default` resolves the login you would get anyway and never consults
 a `default/` directory. It exists as a word because a picker needs something to
 select, and a recalled line needs a way to say "not the profile I used last time".
+It still binds that login's own configuration directory into the container,
+read-write, the same as a named profile does, whenever a credential file sits
+in it; a host whose Claude login is not a credential file in that directory
+falls back to forwarding the login with nothing mounted, silently, since
+there is no name here for a launch to refuse over.
 
 ### Seeing which account a profile actually holds
 
