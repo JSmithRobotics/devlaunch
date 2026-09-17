@@ -643,6 +643,17 @@ fn grammar_refusal(refused: &cli::GrammarError) -> String {
         cli::GrammarError::DevcontainerNotAllowed { command } => {
             format!("--devcontainer means nothing for {command}: it opens no workspace.")
         }
+        cli::GrammarError::NoGpuNotAllowed { command } => {
+            format!("--no-gpu means nothing for {command}: it opens no workspace.")
+        }
+        cli::GrammarError::GpuNotAllowed { command } => {
+            format!("--gpu means nothing for {command}: it opens no workspace.")
+        }
+        cli::GrammarError::GpuConflict => {
+            "--gpu and --no-gpu cannot both be given: --gpu resets a workspace's GPU passthrough \
+             and --no-gpu turns it off, so the pair asks for both at once. Use one or the other."
+                .to_owned()
+        }
         cli::GrammarError::ClaudeProfileNotAllowed { command } => {
             format!("--claude-profile means nothing for {command}: it forwards no Claude login.")
         }

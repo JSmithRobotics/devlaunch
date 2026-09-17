@@ -2939,6 +2939,25 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             source.display()
         ),
 
+        // --- --no-gpu (warning; no Python line, the flag is new)
+        LaunchNotice::NoGpuDockerNotFound => {
+            "--no-gpu: no docker found on PATH, so no wrapper could be written. Launching without \
+             it: a compose devcontainer reserving a GPU this host does not have will fail exactly \
+             as it would without --no-gpu."
+                .to_owned()
+        }
+        LaunchNotice::NoGpuWrapperNotWritten { path, reason } => format!(
+            "--no-gpu: could not write the wrapper docker to {} ({reason}). Launching without it: \
+             a compose devcontainer reserving a GPU this host does not have will fail exactly as it \
+             would without --no-gpu.",
+            path.display()
+        ),
+        LaunchNotice::GpuDockerNotFound => {
+            "--gpu: no docker found on PATH, so DOCKER_PATH could not be reset. Launching as \
+             before: a workspace an earlier --no-gpu set up keeps the wrapper."
+                .to_owned()
+        }
+
         // --- the launch lock (locks.py:89's bare `print`, and dl.py 3727/3744)
         LaunchNotice::WaitingForSiblingLaunch { workspace_id } => {
             format!("dl: waiting for another launch of {workspace_id}")
@@ -3254,6 +3273,18 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             "Ignoring --devcontainer: {workspace_id} is already running. Use 'dl {spec} recreate \
              --devcontainer ...' to switch config."
         ),
+        LaunchNotice::GpuIgnoredRunning {
+            workspace_id,
+            spec,
+            enable,
+        } => {
+            let flag = if *enable { "--gpu" } else { "--no-gpu" };
+            format!(
+                "Ignoring {flag}: {workspace_id} is already running, and a container's GPU \
+                 passthrough is fixed at create time. Use 'dl {spec} recreate {flag} ...' to \
+                 apply it."
+            )
+        }
 
         // --- devpod's own lock (devlaunch#600, devlaunch#602; no Python line,
         // Python never watched)

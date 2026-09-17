@@ -366,6 +366,29 @@ impl Host {
         self.cache_dir.join("pixi")
     }
 
+    /// Where `--no-gpu`'s wrapper `docker` is written.
+    ///
+    /// Under the cache dir like [`Self::pixi_cache_source`] and for the same
+    /// reason: `XDG_CACHE_HOME` scopes it and `--purge` clears it. One path for
+    /// every workspace rather than one per launch -- the wrapper's own content
+    /// (the resolved real `docker`) is a fact about this host, not about which
+    /// workspace is being opened, so every `--no-gpu` launch overwrites the same
+    /// file rather than leaving a stale copy behind per workspace.
+    pub(crate) fn no_gpu_wrapper_path(&self) -> PathBuf {
+        self.cache_dir.join(NO_GPU_WRAPPER_NAME)
+    }
+
+    /// Where the wrapper's per-launch compose overrides are created.
+    ///
+    /// Under the cache dir for the same reason as [`Self::no_gpu_wrapper_path`]:
+    /// `XDG_CACHE_HOME` scopes it and `--purge` clears it. Unlike the wrapper
+    /// script itself, this is a directory the *script* writes into at run
+    /// time, one file per launch (`mktemp` inside it, so concurrent launches
+    /// never collide on a name) -- `dl` only needs to bake the path in once.
+    pub(crate) fn no_gpu_override_dir(&self) -> PathBuf {
+        self.cache_dir.join(NO_GPU_OVERRIDE_DIR_NAME)
+    }
+
     /// The socket `dl` names to devpod when the host has no agent to forward.
     ///
     /// Under the cache dir like the control sockets, so `XDG_CACHE_HOME` scopes it
@@ -449,6 +472,23 @@ pub enum LaunchNotice {
     /// `exist_ok` hit on a plain file, or something deleting it between the two
     /// calls. Narrow, and honestly so.
     PixiCacheNotADirectory { source: PathBuf },
+
+    // --- `--no-gpu`/`--gpu` (plan/gpu-optional-launch/00-spec.md). Neither
+    // Python line: the flags are new. Each is a way its own flag silently falls
+    // back to leaving `DOCKER_PATH` exactly as devpod already has it, which
+    // must not be silent -- `--no-gpu`'s fallback reproduces the exact GPU
+    // refusal the flag exists to prevent, and `--gpu`'s leaves a workspace an
+    // earlier `--no-gpu` set up still wearing the wrapper with nothing said
+    // about the reset not having happened.
+    /// No `docker` was found on `PATH` to resolve an absolute path for, so no
+    /// wrapper could be written and `--no-gpu` does nothing this launch.
+    NoGpuDockerNotFound,
+    /// The wrapper could not be written to the cache directory, so `--no-gpu`
+    /// does nothing this launch.
+    NoGpuWrapperNotWritten { path: PathBuf, reason: String },
+    /// No `docker` was found on `PATH` to reset `DOCKER_PATH` to, so `--gpu`
+    /// does nothing this launch.
+    GpuDockerNotFound,
 
     // --- the launch lock (dl.py `workspace_up`)
     /// Another launch of this workspace holds the lock, and this one is about to
@@ -781,6 +821,19 @@ pub enum LaunchNotice {
     /// A `--devcontainer` choice cannot be honoured: the workspace is already
     /// running, and switching config means recreating it.
     DevcontainerIgnoredRunning { workspace_id: String, spec: String },
+    /// A `--gpu`/`--no-gpu` choice cannot be honoured: the workspace is already
+    /// running, and a container's `DeviceRequests` are fixed at create time, so
+    /// no launch against a running container can change them -- forcing a
+    /// `bring_up` here would not work, since docker cannot change a running
+    /// container's GPU behaviour whatever `DOCKER_PATH` devpod is handed for a
+    /// later create. `enable` is `true` for `--gpu`, `false` for `--no-gpu`; the
+    /// caller never says this for [`GpuRequest::Unspecified`]. See
+    /// `plan/gpu-optional-launch/00-spec.md`.
+    GpuIgnoredRunning {
+        workspace_id: String,
+        spec: String,
+        enable: bool,
+    },
 
     // --- devpod's own lock (devlaunch#600, devlaunch#602)
     /// This launch's `devpod up` is waiting on devpod's workspace lock, which
@@ -1119,6 +1172,355 @@ impl PixiCache {
             }),
         }
     }
+}
+
+// ===========================================================================
+// `--no-gpu`/`--gpu`: a wrapper `docker` that strips GPU reservations out of a
+// compose-based devcontainer, and the way back off it
+// ===========================================================================
+
+/// `--no-gpu`, `--gpu`, or neither, as the CLI carried it.
+///
+/// A sum rather than a bool, because devpod persists whatever `--provider-option
+/// DOCKER_PATH=...` a launch hands it *with the workspace, forever*: a workspace
+/// created with `--no-gpu` keeps that `DOCKER_PATH` on every later launch that
+/// does not say otherwise, and until this type existed there was no supported
+/// way back to GPU passthrough short of destroying and recreating the workspace.
+/// A bool cannot represent "leave it alone" -- `false` reads identically whether
+/// nobody asked or somebody is trying to undo an earlier `--no-gpu` -- so the
+/// third state is not a convenience, it is what makes the flag reversible at
+/// all. See `plan/gpu-optional-launch/00-spec.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuRequest {
+    /// Neither flag was given: pass no `--provider-option` at all, so devpod
+    /// keeps whatever `DOCKER_PATH` the workspace already has.
+    #[default]
+    Unspecified,
+    /// `--no-gpu`: hand devpod the wrapper that strips GPU reservations.
+    Disable,
+    /// `--gpu`: hand devpod the real, absolute `docker`, resetting a workspace
+    /// an earlier `--no-gpu` left pointed at the wrapper.
+    Enable,
+}
+
+/// The wrapper script's filename under [`Host::cache_dir`].
+///
+/// One name rather than one per launch: the wrapper's content is a fact about
+/// this host (the resolved absolute `docker`), not about which workspace is
+/// being opened, so every `--no-gpu` launch overwrites the same file. See
+/// `plan/gpu-optional-launch/00-spec.md`.
+const NO_GPU_WRAPPER_NAME: &str = "no-gpu-docker";
+
+/// The subdirectory (under [`Host::cache_dir`]) the wrapper drops its
+/// per-launch compose overrides into. See [`Host::no_gpu_override_dir`].
+const NO_GPU_OVERRIDE_DIR_NAME: &str = "no-gpu-overrides";
+
+/// Whether, and how, this launch changes the `DOCKER_PATH` devpod is handed for
+/// this workspace.
+///
+/// A sum rather than an `Option<PathBuf>`, for [`PixiCache`]'s reason: each way
+/// of not applying an override is a different fact, worth reporting
+/// differently, and a launch that cannot resolve what [`GpuRequest`] asked for
+/// still has to survive -- it falls back to leaving `DOCKER_PATH` exactly as
+/// devpod already has it, with a notice saying why rather than a silent
+/// difference in behaviour.
+///
+/// **This decides only what `DOCKER_PATH` devpod is handed, if anything.** The
+/// wrapper's own refusal -- an old Compose, a `docker compose config
+/// --services` that failed -- happens later, inside the script, on the
+/// operator's terminal while `devpod up` runs; nothing here can see that far
+/// ahead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GpuOverride {
+    /// Neither `--gpu` nor `--no-gpu`: nothing to resolve, and no
+    /// `--provider-option` to hand devpod, so it keeps whatever `DOCKER_PATH`
+    /// the workspace already has.
+    Unspecified,
+    /// `--no-gpu`: the wrapper is written, executable, and ready at this path.
+    WrapperWritten { script: PathBuf },
+    /// `--no-gpu`, but no `docker` was found on `PATH` to resolve an absolute
+    /// path for. The wrapper must never resolve `docker` from `PATH` itself --
+    /// doing so risks it finding itself -- so there is nothing to bake into a
+    /// script, and none is written.
+    WrapperDockerNotFound,
+    /// `--no-gpu`, but the wrapper could not be written to the cache
+    /// directory: a read-only or full disk, most likely.
+    WrapperNotWritten { path: PathBuf, reason: String },
+    /// `--gpu`: the real, absolute `docker`, ready to reset `DOCKER_PATH` to.
+    RealDocker { path: PathBuf },
+    /// `--gpu`, but no `docker` was found on `PATH` to reset `DOCKER_PATH` to.
+    RealDockerNotFound,
+}
+
+impl GpuOverride {
+    /// Resolve `requested` against this host: write the wrapper, resolve the
+    /// real `docker`, or say why neither could be done.
+    ///
+    /// `requested` is `--gpu`/`--no-gpu` as the CLI carried it -- per launch,
+    /// like `--devcontainer`, and forwarded to devpod on every launch that asks
+    /// for one rather than remembered by `dl` itself; devpod's own workspace
+    /// record is what makes a later plain `dl <ws>` keep the same
+    /// `DOCKER_PATH`, and what makes `--gpu` the only way off it.
+    pub(crate) fn ensure(requested: GpuRequest, host: &Host) -> Self {
+        match requested {
+            GpuRequest::Unspecified => Self::Unspecified,
+            GpuRequest::Disable => {
+                let Some(real_docker) = provision::which("docker") else {
+                    return Self::WrapperDockerNotFound;
+                };
+                let script = host.no_gpu_wrapper_path();
+                let override_dir = host.no_gpu_override_dir();
+                match write_no_gpu_wrapper(&script, &real_docker, &override_dir) {
+                    Ok(()) => Self::WrapperWritten { script },
+                    Err(reason) => Self::WrapperNotWritten {
+                        path: script,
+                        reason,
+                    },
+                }
+            }
+            GpuRequest::Enable => match provision::which("docker") {
+                Some(real_docker) => Self::RealDocker { path: real_docker },
+                None => Self::RealDockerNotFound,
+            },
+        }
+    }
+
+    /// The `devpod up` flag that hands devpod the override, or nothing.
+    pub(crate) fn up_args(&self) -> Vec<String> {
+        match self {
+            Self::WrapperWritten { script } => vec![
+                "--provider-option".to_owned(),
+                format!("DOCKER_PATH={}", script.display()),
+            ],
+            Self::RealDocker { path } => vec![
+                "--provider-option".to_owned(),
+                format!("DOCKER_PATH={}", path.display()),
+            ],
+            Self::Unspecified
+            | Self::WrapperDockerNotFound
+            | Self::WrapperNotWritten { .. }
+            | Self::RealDockerNotFound => Vec::new(),
+        }
+    }
+
+    /// The notice this outcome is worth, if any -- only the ways this silently
+    /// falls back to leaving `DOCKER_PATH` as devpod already has it are worth a
+    /// word; a launch that named neither flag, and one that resolved cleanly,
+    /// have nothing to add.
+    pub(crate) fn notice(&self) -> Option<LaunchNotice> {
+        match self {
+            Self::Unspecified | Self::WrapperWritten { .. } | Self::RealDocker { .. } => None,
+            Self::WrapperDockerNotFound => Some(LaunchNotice::NoGpuDockerNotFound),
+            Self::WrapperNotWritten { path, reason } => {
+                Some(LaunchNotice::NoGpuWrapperNotWritten {
+                    path: path.clone(),
+                    reason: reason.clone(),
+                })
+            }
+            Self::RealDockerNotFound => Some(LaunchNotice::GpuDockerNotFound),
+        }
+    }
+}
+
+/// Write the wrapper to `path`, creating its parent directory and setting it
+/// executable.
+///
+/// Written atomically, the same way [`write_options_cache`] is: to a `.tmp`
+/// sibling, made executable, then renamed over `path`. A plain `std::fs::write`
+/// to `path` directly would let a concurrent second `--no-gpu` launch truncate
+/// the script while a first launch's `bash` is mid-read of it -- this is a file
+/// that gets executed, not merely read back, so a half-written version is a
+/// syntax error in someone else's already-running `devpod up`.
+fn write_no_gpu_wrapper(
+    path: &Path,
+    real_docker: &Path,
+    override_dir: &Path,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    // Written to a `.tmp` sibling and renamed into place, exactly as
+    // `write_options_cache` is, so a concurrent second `--no-gpu` launch never
+    // execs a half-written script: `path` either does not exist yet or is the
+    // last complete version, never a truncated one.
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, no_gpu_wrapper_script(real_docker, override_dir))
+        .map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+    }
+    std::fs::rename(&temporary, path).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// The wrapper's own source, with `real_docker` baked in as an absolute path.
+///
+/// **Never resolves `docker` from `PATH` itself** -- that is `dl`'s job, done
+/// once by [`GpuOverride::ensure`], because a wrapper that looked itself up
+/// risks finding itself when `DOCKER_PATH` points `PATH` at it.
+///
+/// Behaviour, exactly as `plan/gpu-optional-launch/00-spec.md` validates it by
+/// hand:
+/// - Anything but a `compose` first word execs the real docker unchanged.
+/// - Otherwise the argv is walked to find the **subcommand boundary**: the
+///   region of global, project-scoping flags Compose accepts before the verb
+///   (`up`, `logs`, `rm`, ...), stopping at the first token that is not one of
+///   them. The override is always inserted **immediately before that
+///   boundary** -- never scanned for and appended after the *last* `-f`, which
+///   is wrong the moment `-f`/`--force` reappears as a subcommand's own flag
+///   (`logs -f`, `rm -f svc`): appending after those corrupts the invocation,
+///   since Compose then reads the inserted path as a stray positional. Global
+///   flags recognised, value-taking: `-f`/`--file`, `-p`/`--project-name`,
+///   `--profile`, `--project-directory`, `--env-file`, `--parallel`,
+///   `--progress`, `--ansi` (both `--flag value` and `--flag=value` forms);
+///   boolean: `--compatibility`, `--dry-run`, `--all-resources`. Everything
+///   from the subcommand onward is passed through untouched.
+/// - The services are enumerated with `<real docker> compose <the global
+///   region only> config --services`, and each one gets `deploy: !reset null`
+///   and `runtime: !reset null` in a generated override, inserted as one more
+///   `-f` at the boundary. This runs even when the caller gave no `-f` at
+///   all -- inserting at the boundary is correct either way, so there is
+///   nothing to silently fall through for; only a genuine failure (old
+///   Compose, a failed `config --services`) refuses.
+/// - `!reset` needs Compose >= 2.24; an older one is refused with a message
+///   on stderr rather than left to Compose's own parse error.
+/// - Anything that stops the override being applied says why on stderr and
+///   exits non-zero, rather than falling through to a plain `docker compose`
+///   that would reproduce the silent GPU failure this exists to prevent.
+fn no_gpu_wrapper_script(real_docker: &Path, override_dir: &Path) -> String {
+    format!(
+        r#"#!/usr/bin/env bash
+# Generated by dl --no-gpu. See plan/gpu-optional-launch/00-spec.md.
+# Do not edit: dl overwrites this on the next --no-gpu launch.
+set -euo pipefail
+
+real_docker="{real_docker}"
+override_dir="{override_dir}"
+
+if [ "${{1-}}" != "compose" ]; then
+  exec "$real_docker" "$@"
+fi
+shift
+
+# Walk Compose's own global, project-scoping flags to find where they end and
+# the subcommand begins. That boundary is where the override always goes --
+# inserting anywhere in the subcommand's own arguments (`logs -f`, `rm -f
+# svc`) corrupts the call, since `-f`/`--force` are reused there for something
+# else entirely.
+args=("$@")
+global_end=-1
+saw_file=0
+i=0
+while [ "$i" -lt "${{#args[@]}}" ]; do
+  case "${{args[$i]-}}" in
+    -f|--file)
+      saw_file=1
+      global_end=$((i + 1))
+      i=$((i + 2))
+      ;;
+    -p|--project-name|--profile|--project-directory|--env-file|--parallel|--progress|--ansi)
+      # Value-taking: the flag and its value are both part of the global region.
+      global_end=$((i + 1))
+      i=$((i + 2))
+      ;;
+    --file=*)
+      saw_file=1
+      global_end=$i
+      i=$((i + 1))
+      ;;
+    --project-name=*|--profile=*|--project-directory=*|--env-file=*|--parallel=*|--progress=*|--ansi=*)
+      # Same flags, inline-value form: one token, still global.
+      global_end=$i
+      i=$((i + 1))
+      ;;
+    --compatibility|--dry-run|--all-resources)
+      global_end=$i
+      i=$((i + 1))
+      ;;
+    *)
+      # First token that is not a global flag or a global flag's value: this
+      # is the subcommand. Stop walking.
+      break
+      ;;
+  esac
+done
+
+if [ "$saw_file" -eq 0 ]; then
+  # No compose file was named, so there is no project definition for an
+  # override to extend and nothing here to neutralise: compose would discover
+  # its own files. devpod uses exactly this shape to probe -- a bare `docker
+  # compose`, and `compose version` -- and refusing those was measured to make
+  # devpod give up on compose and launch anyway, GPU reservation intact, which
+  # is the failure this wrapper exists to prevent.
+  #
+  # So this is not the silent fall-through the spec forbids. That rule is
+  # about a call this wrapper was meant to rewrite and could not; here there
+  # is nothing to apply, and saying so on stderr would only be noise on every
+  # probe.
+  exec "$real_docker" compose "${{args[@]}}"
+fi
+
+before=("${{args[@]:0:$((global_end + 1))}}")
+after=("${{args[@]:$((global_end + 1))}}")
+
+compose_version="$("$real_docker" compose version --short 2>&1)" || {{
+  echo "dl --no-gpu: '$real_docker compose version' failed, so this wrapper cannot confirm Compose supports !reset (needs >= 2.24). Refusing rather than silently keep the GPU reservation in place. Output: $compose_version" >&2
+  exit 1
+}}
+compose_version="${{compose_version#v}}"
+major="${{compose_version%%.*}}"
+rest="${{compose_version#*.}}"
+minor="${{rest%%.*}}"
+if ! [[ "$major" =~ ^[0-9]+$ ]] || ! [[ "$minor" =~ ^[0-9]+$ ]]; then
+  echo "dl --no-gpu: could not parse Compose version '$compose_version'; !reset needs >= 2.24. Refusing rather than silently keep the GPU reservation in place." >&2
+  exit 1
+fi
+if [ "$major" -lt 2 ] || {{ [ "$major" -eq 2 ] && [ "$minor" -lt 24 ]; }}; then
+  echo "dl --no-gpu: Compose $compose_version is older than 2.24, which !reset needs to neutralise a GPU reservation. Upgrade Compose, or drop --no-gpu." >&2
+  exit 1
+fi
+
+services="$("$real_docker" compose "${{before[@]}}" config --services)" || {{
+  echo "dl --no-gpu: '$real_docker compose ... config --services' failed, so this wrapper cannot enumerate the project's services. Refusing rather than silently keep the GPU reservation in place." >&2
+  exit 1
+}}
+
+mkdir -p "$override_dir"
+
+# Sweep overrides left behind by earlier launches, before creating our own.
+# This is the only correct point to delete one of these files: not on our own
+# way out, and not with a trap.
+#
+# The override has to outlive this shell, because `docker compose` -- started
+# below by `exec` -- is what reads it *after* this process is replaced. An
+# EXIT trap does not run across an `exec`, so it would never fire; if it
+# somehow did, or if an `rm` were added before the `exec`, the file would be
+# gone before compose ever opened it and the GPU reservation would silently
+# come back. So there is no trap here, on purpose. A stale file is instead
+# swept the next time any --no-gpu launch runs, long after the compose that
+# read it has exited.
+find "$override_dir" -type f -mmin +1440 -delete 2>/dev/null || true
+
+override_file="$(mktemp "$override_dir/override.XXXXXX")"
+
+{{
+  echo "services:"
+  while IFS= read -r service; do
+    [ -z "$service" ] && continue
+    printf '  %s:\n' "$service"
+    printf '    deploy: !reset null\n'
+    printf '    runtime: !reset null\n'
+  done <<< "$services"
+}} > "$override_file"
+
+exec "$real_docker" compose "${{before[@]}}" -f "$override_file" "${{after[@]}}"
+"#,
+        real_docker = real_docker.display(),
+        override_dir = override_dir.display(),
+    )
 }
 
 // ===========================================================================
@@ -2050,6 +2452,11 @@ pub(crate) struct UpRequest<'a> {
     pub(crate) rebuild: Rebuild,
     /// A `devcontainer.json` path from [`spec::resolve_devcontainer_ref`].
     pub(crate) devcontainer: Option<&'a DevcontainerPath>,
+    /// `--gpu`/`--no-gpu`, as the CLI carried it. Resolved into a
+    /// [`GpuOverride`] inside [`up_under_stage`], the same way `pixi` and
+    /// `claude` are resolved from a bare request -- this field is the request,
+    /// not the resolution.
+    pub(crate) gpu: GpuRequest,
 }
 
 impl<'a> UpRequest<'a> {
@@ -2062,6 +2469,7 @@ impl<'a> UpRequest<'a> {
             ide: Ide::NoIde,
             rebuild: Rebuild::Reuse,
             devcontainer: None,
+            gpu: GpuRequest::Unspecified,
         }
     }
 
@@ -2083,6 +2491,12 @@ impl<'a> UpRequest<'a> {
         self
     }
 
+    #[must_use]
+    pub(crate) fn with_gpu(mut self, gpu: GpuRequest) -> Self {
+        self.gpu = gpu;
+        self
+    }
+
     /// Whether this call is here for something a sibling launch cannot have done
     /// for it.
     ///
@@ -2094,6 +2508,7 @@ impl<'a> UpRequest<'a> {
         !matches!(self.ide, Ide::NoIde)
             || !matches!(self.rebuild, Rebuild::Reuse)
             || self.devcontainer.is_some()
+            || !matches!(self.gpu, GpuRequest::Unspecified)
     }
 }
 
@@ -2101,11 +2516,16 @@ impl<'a> UpRequest<'a> {
 ///
 /// `token` goes last because Python appends it last, inside the launch lock, from
 /// the context manager that owns the private file it names.
+///
+/// `gpu` has no Python order to match -- it is new -- so it is placed beside
+/// `pixi` and `claude`, the other host-resolved `--provider-option`/`--mount`
+/// contributions that do not depend on `creating_container`.
 pub(crate) fn up_args(
     request: &UpRequest<'_>,
     options: &ContextOptions,
     pixi: &PixiCache,
     claude: &ClaudeProfileMount,
+    gpu: &GpuOverride,
     creating_container: bool,
     token: &[String],
 ) -> Vec<String> {
@@ -2130,6 +2550,7 @@ pub(crate) fn up_args(
     args.extend(options.up_args());
     args.extend(pixi.up_args());
     args.extend(claude.up_args(creating_container));
+    args.extend(gpu.up_args());
     args.extend(token.iter().cloned());
     args
 }
@@ -2613,6 +3034,8 @@ fn up_under_stage(
     let pixi = PixiCache::ensure(host.pixi_cache_source());
     notices.say_all(pixi.notice());
     let claude_mount = ClaudeProfileMount::ensure(host);
+    let gpu = GpuOverride::ensure(request.gpu, host);
+    notices.say_all(gpu.notice());
 
     // Taken here, so the lock covers the state re-check, the `up` and the tools:
     // a launch waiting on a prewarm must not attach before the tools land.
@@ -2748,6 +3171,7 @@ fn up_under_stage(
         &options,
         &pixi,
         &claude_mount,
+        &gpu,
         creating_container,
         &token_args,
     );
@@ -5700,12 +6124,13 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
         raw_spec: &str,
         verb: &LaunchVerb,
         devcontainer: Option<&DevcontainerPath>,
+        gpu: GpuRequest,
     ) -> Result<Launched, LaunchAborted> {
         let placement = match self.place(raw_spec)? {
             Ok(placement) => placement,
             Err(refusal) => return Ok(Launched::Refused(refusal)),
         };
-        self.carry_out(raw_spec, verb, devcontainer, placement)
+        self.carry_out(raw_spec, verb, devcontainer, gpu, placement)
     }
 
     /// Stages one to three: spec to [`Placement`].
@@ -5958,17 +6383,37 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
         raw_spec: &str,
         verb: &LaunchVerb,
         devcontainer: Option<&DevcontainerPath>,
+        gpu: GpuRequest,
         placement: Placement,
     ) -> Result<Launched, LaunchAborted> {
         match verb {
-            LaunchVerb::Dotfiles => self.run_dotfiles(&placement),
-            LaunchVerb::Up => self.run_up_verb(&placement, devcontainer),
-            LaunchVerb::Restart => self.run_restart(verb, devcontainer, &placement),
-            LaunchVerb::Attach { .. } => self.run_attach(raw_spec, verb, devcontainer, &placement),
+            LaunchVerb::Dotfiles => self.run_dotfiles(raw_spec, gpu, &placement),
+            LaunchVerb::Up => self.run_up_verb(raw_spec, &placement, devcontainer, gpu),
+            LaunchVerb::Restart => self.run_restart(verb, devcontainer, gpu, &placement),
+            LaunchVerb::Attach { .. } => {
+                self.run_attach(raw_spec, verb, devcontainer, gpu, &placement)
+            }
             LaunchVerb::Code | LaunchVerb::Recreate | LaunchVerb::Reset => {
-                self.run_rebuild(verb, devcontainer, &placement)
+                self.run_rebuild(verb, devcontainer, gpu, &placement)
             }
         }
+    }
+
+    /// Say [`LaunchNotice::GpuIgnoredRunning`] for an explicit `--gpu`/`--no-gpu`
+    /// against a workspace this launch found already running and is not going
+    /// to `bring_up` -- silent for [`GpuRequest::Unspecified`], which asked for
+    /// nothing to begin with.
+    fn say_gpu_ignored_running(&mut self, gpu: GpuRequest, workspace_id: &str, raw_spec: &str) {
+        let enable = match gpu {
+            GpuRequest::Unspecified => return,
+            GpuRequest::Disable => false,
+            GpuRequest::Enable => true,
+        };
+        self.notices.say(LaunchNotice::GpuIgnoredRunning {
+            workspace_id: workspace_id.to_owned(),
+            spec: raw_spec.to_owned(),
+            enable,
+        });
     }
 
     /// `dl <ws>` and `dl <ws> -- cmd`, including the fast-attach arm.
@@ -5977,6 +6422,7 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
         raw_spec: &str,
         verb: &LaunchVerb,
         devcontainer: Option<&DevcontainerPath>,
+        gpu: GpuRequest,
         placement: &Placement,
     ) -> Result<Launched, LaunchAborted> {
         // A running container is not on its own evidence that there is something
@@ -6012,6 +6458,7 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
                             spec: raw_spec.to_owned(),
                         });
                     }
+                    self.say_gpu_ignored_running(gpu, placement.workspace_id(), raw_spec);
                     // Before the session, because the session is what the missing
                     // tools are missing *from*: a shell handed over first would be
                     // the one that goes looking for a `claude` the interrupted pass
@@ -6023,7 +6470,7 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
                 }
             }
         }
-        if let Some(refused) = self.bring_up(verb, devcontainer, placement)? {
+        if let Some(refused) = self.bring_up(verb, devcontainer, gpu, placement)? {
             return Ok(Launched::Refused(refused));
         }
         let session = self.attach(placement, verb.command());
@@ -6038,9 +6485,10 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
         &mut self,
         verb: &LaunchVerb,
         devcontainer: Option<&DevcontainerPath>,
+        gpu: GpuRequest,
         placement: &Placement,
     ) -> Result<Launched, LaunchAborted> {
-        if let Some(refused) = self.bring_up(verb, devcontainer, placement)? {
+        if let Some(refused) = self.bring_up(verb, devcontainer, gpu, placement)? {
             return Ok(Launched::Refused(refused));
         }
         if !verb.attaches() {
@@ -6057,6 +6505,7 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
         &mut self,
         verb: &LaunchVerb,
         devcontainer: Option<&DevcontainerPath>,
+        gpu: GpuRequest,
         placement: &Placement,
     ) -> Result<Launched, LaunchAborted> {
         let stopped =
@@ -6065,7 +6514,7 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
         if let StopOutcome::DevpodRefused { exit } = stopped {
             return Ok(Launched::Refused(LaunchRefusal::StopRefused { exit }));
         }
-        if let Some(refused) = self.bring_up(verb, devcontainer, placement)? {
+        if let Some(refused) = self.bring_up(verb, devcontainer, gpu, placement)? {
             return Ok(Launched::Refused(refused));
         }
         let session = self.attach(placement, verb.command());
@@ -6078,8 +6527,10 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
     /// `dl <ws> up`: bring it up and stop there.
     fn run_up_verb(
         &mut self,
+        raw_spec: &str,
         placement: &Placement,
         devcontainer: Option<&DevcontainerPath>,
+        gpu: GpuRequest,
     ) -> Result<Launched, LaunchAborted> {
         // The same question the attach arm asks, for the same reason: a create that
         // died in its hooks leaves the container up, so `Running` is a reading the
@@ -6094,6 +6545,7 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
             self.notices.say(LaunchNotice::AlreadyRunning {
                 workspace_id: placement.workspace_id().to_owned(),
             });
+            self.say_gpu_ignored_running(gpu, placement.workspace_id(), raw_spec);
             // Still top up the tools: `up` is one of the two verbs named as how a
             // workspace that missed provisioning gets it, and returning here
             // without them would make the documented recovery the one path that
@@ -6117,7 +6569,7 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
             ));
             return Ok(Launched::AlreadyRunning);
         }
-        if let Some(refused) = self.bring_up(&LaunchVerb::Up, devcontainer, placement)? {
+        if let Some(refused) = self.bring_up(&LaunchVerb::Up, devcontainer, gpu, placement)? {
             return Ok(Launched::Refused(refused));
         }
         self.forced_refresh();
@@ -6141,7 +6593,12 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
     /// devpod nothing about `--id` and, once the container is already running,
     /// needs no `up` at all -- so the mount can never land on this path either,
     /// and a requested profile is reported unforwarded rather than bound.
-    fn run_dotfiles(&mut self, placement: &Placement) -> Result<Launched, LaunchAborted> {
+    fn run_dotfiles(
+        &mut self,
+        raw_spec: &str,
+        gpu: GpuRequest,
+        placement: &Placement,
+    ) -> Result<Launched, LaunchAborted> {
         let running = lifecycle::workspace_state(
             self.context.runner(),
             placement.workspace_id(),
@@ -6157,7 +6614,7 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
                 Placement::Creating { workspace_id, .. } => Naming::Create { workspace_id },
                 Placement::Known { .. } | Placement::Listed { .. } => Naming::Anonymous,
             };
-            let request = UpRequest::new(placement.source(), naming);
+            let request = UpRequest::new(placement.source(), naming).with_gpu(gpu);
             let title = self.container_title(placement.title());
             let outcome = workspace_up(
                 self.context,
@@ -6173,6 +6630,8 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
             if let UpOutcome::Refused { exit } = outcome {
                 return Ok(Launched::Refused(LaunchRefusal::UpRefused { exit }));
             }
+        } else {
+            self.say_gpu_ignored_running(gpu, placement.workspace_id(), raw_spec);
         }
         let session = SessionContext::new(
             self.context.runner(),
@@ -6195,12 +6654,14 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
         &mut self,
         verb: &LaunchVerb,
         devcontainer: Option<&DevcontainerPath>,
+        gpu: GpuRequest,
         placement: &Placement,
     ) -> Result<Option<LaunchRefusal>, LaunchAborted> {
         let request = UpRequest::new(placement.source(), placement.naming())
             .with_ide(verb.ide())
             .with_rebuild(verb.rebuild())
-            .with_devcontainer(devcontainer);
+            .with_devcontainer(devcontainer)
+            .with_gpu(gpu);
         let title = self.container_title(placement.title());
         let outcome = workspace_up(
             self.context,
@@ -8681,6 +9142,7 @@ mod tests {
             &ContextOptions::default(),
             &pixi,
             &ClaudeProfileMount::NotAsked,
+            &GpuOverride::Unspecified,
             true,
             &[],
         );
@@ -8709,6 +9171,485 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------- the wrapper script itself
+    //
+    // `no_gpu_wrapper_script` is bash, not Rust, so its own logic (finding the
+    // last `-f` pair, enumerating services, gating on the Compose version) is
+    // only really tested by running it -- against a fake `docker` that never
+    // touches the real daemon, plan/gpu-optional-launch/00-spec.md's own
+    // validation method.
+
+    /// A fake `docker` that logs every invocation (one line per call, args
+    /// joined by `\x1f` so an empty or space-holding argument survives the
+    /// split) and answers `compose version --short` and `compose ... config
+    /// --services` from fixed strings.
+    fn fake_docker(dir: &Path, compose_version: &str, services: &str) -> PathBuf {
+        let log = dir.join("calls.log");
+        let script = format!(
+            r#"#!/usr/bin/env bash
+printf '%s\x1f' "$@" >> "{log}"
+printf '\n' >> "{log}"
+if [ "$1" = compose ] && [ "$2" = version ]; then
+  printf '%s\n' "{compose_version}"
+  exit 0
+fi
+if [ "$1" = compose ] && [ "${{@: -2:1}}" = config ] && [ "${{@: -1}}" = --services ]; then
+  printf '%s\n' "{services}"
+  exit 0
+fi
+exit 0
+"#,
+            log = log.display(),
+        );
+        let path = dir.join("docker");
+        std::fs::write(&path, script).expect("write fake docker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake docker");
+        }
+        path
+    }
+
+    /// The calls the fake `docker` logged, each as its argv.
+    fn logged_calls(dir: &Path) -> Vec<Vec<String>> {
+        let log = dir.join("calls.log");
+        let Ok(text) = std::fs::read_to_string(&log) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(|line| {
+                line.split('\x1f')
+                    .filter(|part| !part.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Write the wrapper for `real_docker` into `dir` and run it with `args`.
+    fn run_wrapper(dir: &Path, real_docker: &Path, args: &[&str]) -> std::process::Output {
+        let wrapper = dir.join("wrapper");
+        let override_dir = dir.join("overrides");
+        write_no_gpu_wrapper(&wrapper, real_docker, &override_dir).expect("write wrapper");
+        std::process::Command::new(&wrapper)
+            .args(args)
+            .output()
+            .expect("run wrapper")
+    }
+
+    #[test]
+    fn a_non_compose_invocation_execs_the_real_docker_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let docker = fake_docker(dir.path(), "2.24.0", "web");
+
+        let output = run_wrapper(dir.path(), &docker, &["ps", "-a"]);
+
+        assert!(output.status.success());
+        assert_eq!(logged_calls(dir.path()), vec![vec!["ps", "-a"]]);
+    }
+
+    #[test]
+    fn a_compose_invocation_naming_no_file_passes_straight_through() {
+        // devpod probes with a bare `docker compose` and with `compose version`
+        // before it launches anything. An earlier attempt at defect 2 made the
+        // wrapper insert an override into those too, which fails -- there is no
+        // project to extend -- and a non-zero exit there was measured to make
+        // devpod give up on compose and launch anyway, GPU reservation intact.
+        // That is the exact failure this wrapper exists to prevent, so a call
+        // naming no compose file is passed through untouched.
+        //
+        // This is not the silent fall-through the spec forbids. That rule is
+        // about a call the wrapper was meant to rewrite and could not; here
+        // there is nothing to apply.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let docker = fake_docker(dir.path(), "2.24.0", "web");
+
+        let output = run_wrapper(dir.path(), &docker, &["compose", "version"]);
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(logged_calls(dir.path()), vec![vec!["compose", "version"]]);
+    }
+
+    #[test]
+    fn the_override_is_inserted_at_the_subcommand_boundary_and_names_every_service() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let docker = fake_docker(dir.path(), "2.24.0", "web\nworker\n");
+
+        let output = run_wrapper(
+            dir.path(),
+            &docker,
+            &[
+                "compose",
+                "--project-name",
+                "p",
+                "-f",
+                "base.yml",
+                "-f",
+                "override.yml",
+                "up",
+                "-d",
+            ],
+        );
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let calls = logged_calls(dir.path());
+        // First the version check, then the services enumeration (through the
+        // caller's own global region -- `--project-name p -f base.yml -f
+        // override.yml`), then the real `up`, rewritten with dl's override
+        // inserted right at the subcommand boundary.
+        assert_eq!(calls[0], vec!["compose", "version", "--short"], "{calls:?}");
+        assert_eq!(
+            calls[1],
+            vec![
+                "compose",
+                "--project-name",
+                "p",
+                "-f",
+                "base.yml",
+                "-f",
+                "override.yml",
+                "config",
+                "--services",
+            ],
+            "{calls:?}"
+        );
+        let up_call = &calls[2];
+        assert_eq!(
+            &up_call[..7],
+            [
+                "compose",
+                "--project-name",
+                "p",
+                "-f",
+                "base.yml",
+                "-f",
+                "override.yml"
+            ],
+        );
+        assert_eq!(&up_call[7], "-f");
+        let generated = &up_call[8];
+        assert_eq!(&up_call[9..], ["up", "-d"]);
+
+        let override_contents = std::fs::read_to_string(generated).expect("read override");
+        // Two-space, then four-space nesting -- `services:` -> `  <name>:` ->
+        // `    deploy: !reset null`, exactly the YAML plan/gpu-optional-launch/
+        // 00-spec.md shows. A service name at zero indent would be a sibling
+        // top-level key, not one Compose reads as nested under `services`.
+        assert_eq!(
+            override_contents,
+            "services:\n\
+             \x20\x20web:\n\
+             \x20\x20\x20\x20deploy: !reset null\n\
+             \x20\x20\x20\x20runtime: !reset null\n\
+             \x20\x20worker:\n\
+             \x20\x20\x20\x20deploy: !reset null\n\
+             \x20\x20\x20\x20runtime: !reset null\n"
+        );
+    }
+
+    #[test]
+    fn logs_follow_and_rm_force_come_through_untouched_apart_from_the_override() {
+        // Defect 1: the old wrapper scanned the WHOLE argv for the last -f/--file
+        // and appended the override after it, which lands *inside* the
+        // subcommand's own arguments when that subcommand reuses -f for
+        // something else -- `logs --follow` and `rm --force`. Both must come
+        // through with the override landing before the subcommand, and
+        // everything from the subcommand on left exactly as given.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let docker = fake_docker(dir.path(), "2.24.0", "web\nworker\n");
+
+        let output = run_wrapper(
+            dir.path(),
+            &docker,
+            &["compose", "-f", "a.yml", "-f", "b.yml", "logs", "-f"],
+        );
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let calls = logged_calls(dir.path());
+        let final_call = calls.last().expect("a final call was logged");
+        assert_eq!(&final_call[..5], ["compose", "-f", "a.yml", "-f", "b.yml"]);
+        assert_eq!(&final_call[5], "-f");
+        // final_call[6] is the generated override path.
+        assert_eq!(&final_call[7..], ["logs", "-f"]);
+
+        let dir2 = tempfile::tempdir().expect("tempdir");
+        let docker2 = fake_docker(dir2.path(), "2.24.0", "web\nworker\n");
+        let output2 = run_wrapper(
+            dir2.path(),
+            &docker2,
+            &["compose", "-f", "a.yml", "-f", "b.yml", "rm", "-f", "svc"],
+        );
+        assert!(
+            output2.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output2.stderr)
+        );
+        let calls2 = logged_calls(dir2.path());
+        let final_call2 = calls2.last().expect("a final call was logged");
+        assert_eq!(&final_call2[..5], ["compose", "-f", "a.yml", "-f", "b.yml"]);
+        assert_eq!(&final_call2[5], "-f");
+        assert_eq!(&final_call2[7..], ["rm", "-f", "svc"]);
+    }
+
+    #[test]
+    fn file_equals_form_is_recognised_as_the_global_flag_it_is() {
+        // Defect 2: `--file=x.yml` used to fall into the catch-all, `last_f`
+        // stayed unset, and the wrapper silently passed through with the GPU
+        // reservation intact. The boundary walk must recognise the inline-value
+        // form as a global flag and still insert the override before the
+        // subcommand.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let docker = fake_docker(dir.path(), "2.24.0", "web");
+
+        let output = run_wrapper(
+            dir.path(),
+            &docker,
+            &["compose", "--file=base.yml", "up", "-d"],
+        );
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let calls = logged_calls(dir.path());
+        // The services enumeration must have seen --file=base.yml too.
+        assert_eq!(
+            calls[1],
+            vec!["compose", "--file=base.yml", "config", "--services"],
+            "{calls:?}"
+        );
+        let up_call = calls.last().expect("an up call was logged");
+        assert_eq!(&up_call[..2], ["compose", "--file=base.yml"]);
+        assert_eq!(&up_call[2], "-f");
+        assert_eq!(&up_call[4..], ["up", "-d"]);
+    }
+
+    #[test]
+    fn an_old_compose_refuses_rather_than_silently_keep_the_gpu_reservation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let docker = fake_docker(dir.path(), "2.20.0", "web");
+
+        let output = run_wrapper(
+            dir.path(),
+            &docker,
+            &["compose", "-f", "base.yml", "up", "-d"],
+        );
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("2.20.0"), "{stderr}");
+        assert!(stderr.contains("2.24"), "{stderr}");
+        // Refused before enumerating services, and never reached the real `up`.
+        assert_eq!(
+            logged_calls(dir.path()).len(),
+            1,
+            "{:?}",
+            logged_calls(dir.path())
+        );
+    }
+
+    #[test]
+    fn the_generated_script_never_traps_the_override_and_writes_it_under_the_cache_dir() {
+        // The override file has to outlive this shell -- `exec` replaces the
+        // process before `docker compose` reads it -- so an EXIT trap can
+        // never correctly delete it (it does not even fire across `exec`) and
+        // must not be reintroduced. See the comment this asserts survives, in
+        // `no_gpu_wrapper_script` itself.
+        let script = no_gpu_wrapper_script(
+            Path::new("/usr/bin/docker"),
+            Path::new("/cache/no-gpu-overrides"),
+        );
+
+        // Talking about why there is no trap is fine (and expected, below);
+        // actually invoking the `trap` builtin is what must never come back.
+        assert!(
+            !script
+                .lines()
+                .any(|line| line.trim_start().starts_with("trap ")),
+            "{script}"
+        );
+        assert!(
+            script.contains(r#"override_dir="/cache/no-gpu-overrides""#),
+            "{script}"
+        );
+        assert!(
+            script.contains(r#"mktemp "$override_dir/override.XXXXXX""#),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn write_no_gpu_wrapper_is_atomic() {
+        // Defect 3: a plain `std::fs::write` to the one host-wide wrapper path
+        // lets a concurrent second `--no-gpu` launch truncate the script while
+        // a first launch's bash is mid-read of it. Follow write_options_cache's
+        // precedent: write to a `.tmp` sibling, then rename over the real path,
+        // so a reader only ever sees a complete script.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("no-gpu-docker");
+        let override_dir = dir.path().join("overrides");
+
+        write_no_gpu_wrapper(&path, Path::new("/usr/bin/docker"), &override_dir)
+            .expect("write wrapper");
+
+        assert!(path.exists());
+        // No leftover .tmp sibling once the rename has happened.
+        assert!(!path.with_extension("tmp").exists());
+        let contents = std::fs::read_to_string(&path).expect("read wrapper");
+        assert!(contents.starts_with("#!/usr/bin/env bash"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .expect("stat wrapper")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755, "{mode:o}");
+        }
+
+        // A second write (the "concurrent second launch" case, modelled
+        // sequentially since the guarantee under test is that a reader never
+        // sees a half-written file, not that two writers can run at once)
+        // still leaves one complete, executable script in place.
+        write_no_gpu_wrapper(&path, Path::new("/usr/bin/docker2"), &override_dir)
+            .expect("rewrite wrapper");
+        let contents = std::fs::read_to_string(&path).expect("read wrapper again");
+        assert!(contents.contains("/usr/bin/docker2"));
+        assert!(!path.with_extension("tmp").exists());
+    }
+
+    #[test]
+    fn a_written_no_gpu_wrapper_becomes_a_provider_option() {
+        // `--no-gpu` reaches devpod as a provider option naming the wrapper's own
+        // path, the same shape `--devcontainer-path` carries `devcontainer`'s.
+        let request = UpRequest::new(
+            "myws",
+            Naming::Known {
+                workspace_id: "myws",
+            },
+        );
+        let gpu = GpuOverride::WrapperWritten {
+            script: PathBuf::from("/cache/no-gpu-docker"),
+        };
+
+        let args = up_args(
+            &request,
+            &ContextOptions::default(),
+            &PixiCache::NotADirectory {
+                source: PathBuf::from("/nope"),
+            },
+            &ClaudeProfileMount::NotAsked,
+            &gpu,
+            true,
+            &[],
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "up".to_owned(),
+                "myws".to_owned(),
+                "--ide".to_owned(),
+                "none".to_owned(),
+                "--init-env".to_owned(),
+                "DEVLAUNCH_WORKSPACE_ID=myws".to_owned(),
+                "--provider-option".to_owned(),
+                "DOCKER_PATH=/cache/no-gpu-docker".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_resolved_real_docker_becomes_a_provider_option() {
+        // `--gpu` reaches devpod the same shape `--no-gpu` does, naming the real
+        // docker instead of the wrapper.
+        let request = UpRequest::new(
+            "myws",
+            Naming::Known {
+                workspace_id: "myws",
+            },
+        );
+        let gpu = GpuOverride::RealDocker {
+            path: PathBuf::from("/usr/bin/docker"),
+        };
+
+        let args = up_args(
+            &request,
+            &ContextOptions::default(),
+            &PixiCache::NotADirectory {
+                source: PathBuf::from("/nope"),
+            },
+            &ClaudeProfileMount::NotAsked,
+            &gpu,
+            true,
+            &[],
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "up".to_owned(),
+                "myws".to_owned(),
+                "--ide".to_owned(),
+                "none".to_owned(),
+                "--init-env".to_owned(),
+                "DEVLAUNCH_WORKSPACE_ID=myws".to_owned(),
+                "--provider-option".to_owned(),
+                "DOCKER_PATH=/usr/bin/docker".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn neither_flag_passes_no_provider_option_at_all() {
+        // The whole point of the third state: an ordinary launch that named
+        // neither flag must not pass `--provider-option DOCKER_PATH=...` at all,
+        // or it would re-affirm whatever devpod already has on the workspace and
+        // undo the reversibility `--gpu` exists for.
+        let request = UpRequest::new(
+            "myws",
+            Naming::Known {
+                workspace_id: "myws",
+            },
+        );
+
+        let args = up_args(
+            &request,
+            &ContextOptions::default(),
+            &PixiCache::NotADirectory {
+                source: PathBuf::from("/nope"),
+            },
+            &ClaudeProfileMount::NotAsked,
+            &GpuOverride::Unspecified,
+            true,
+            &[],
+        );
+
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("DOCKER_PATH=")),
+            "{args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg == "--provider-option"),
+            "{args:?}"
+        );
+    }
+
     #[test]
     fn a_workspace_devpod_already_knows_gets_no_id_flag() {
         // `--id` is passed only when creating; devpod would refuse it for a
@@ -8727,6 +9668,7 @@ mod tests {
                 source: PathBuf::from("/nope"),
             },
             &ClaudeProfileMount::NotAsked,
+            &GpuOverride::Unspecified,
             true,
             &[],
         );
@@ -8757,6 +9699,7 @@ mod tests {
                 source: PathBuf::from("/nope"),
             },
             &ClaudeProfileMount::NotAsked,
+            &GpuOverride::Unspecified,
             true,
             &[],
         );
@@ -8796,6 +9739,7 @@ mod tests {
                 &ContextOptions::default(),
                 &nothing,
                 &ClaudeProfileMount::NotAsked,
+                &GpuOverride::Unspecified,
                 true,
                 &[],
             )
@@ -8828,6 +9772,7 @@ mod tests {
                 source: PathBuf::from("/nope"),
             },
             &ClaudeProfileMount::NotAsked,
+            &GpuOverride::Unspecified,
             true,
             &[],
         );
@@ -8868,6 +9813,7 @@ mod tests {
                 source: PathBuf::from("/nope"),
             },
             &ClaudeProfileMount::NotAsked,
+            &GpuOverride::Unspecified,
             true,
             &[],
         );
@@ -8894,6 +9840,7 @@ mod tests {
                 source: PathBuf::from("/nope"),
             },
             &ClaudeProfileMount::NotAsked,
+            &GpuOverride::Unspecified,
             true,
             &[],
         );
@@ -9939,6 +10886,7 @@ mod tests {
                 source: PathBuf::from("/nope"),
             },
             &mount,
+            &GpuOverride::Unspecified,
             true,
             &[],
         );
@@ -10202,7 +11150,12 @@ mod tests {
         );
 
         let path = format!("/tmp/{workspace_id}");
-        let launched = launch.run(&path, &LaunchVerb::Attach { command: None }, None);
+        let launched = launch.run(
+            &path,
+            &LaunchVerb::Attach { command: None },
+            None,
+            GpuRequest::Unspecified,
+        );
 
         assert!(launched.is_ok(), "{launched:?}");
         drop(launch);
@@ -13208,6 +14161,7 @@ mod tests {
                 command: Some(RemoteCommand::argv(&["true"])),
             },
             None,
+            GpuRequest::Unspecified,
         );
 
         assert_eq!(
@@ -13269,6 +14223,7 @@ mod tests {
                     command: Some(RemoteCommand::argv(&["true"])),
                 },
                 None,
+                GpuRequest::Unspecified,
             );
 
             assert_eq!(
@@ -13344,6 +14299,7 @@ mod tests {
                     command: Some(RemoteCommand::argv(&["true"])),
                 },
                 None,
+                GpuRequest::Unspecified,
             );
             assert_eq!(
                 launched,
@@ -13502,6 +14458,7 @@ mod tests {
                 command: Some(RemoteCommand::argv(&["true"])),
             },
             None,
+            GpuRequest::Unspecified,
         );
 
         assert_eq!(
@@ -13590,6 +14547,7 @@ mod tests {
                 command: Some(RemoteCommand::argv(&["true"])),
             },
             None,
+            GpuRequest::Unspecified,
         );
 
         assert_eq!(
@@ -13648,6 +14606,7 @@ mod tests {
                 command: Some(RemoteCommand::argv(&["true"])),
             },
             None,
+            GpuRequest::Unspecified,
         );
 
         assert_eq!(
@@ -13703,6 +14662,7 @@ mod tests {
                 command: Some(RemoteCommand::argv(&["true"])),
             },
             None,
+            GpuRequest::Unspecified,
         );
 
         assert_eq!(
@@ -13747,6 +14707,7 @@ mod tests {
                 command: Some(RemoteCommand::argv(&["true"])),
             },
             None,
+            GpuRequest::Unspecified,
         );
 
         assert_eq!(
@@ -13865,6 +14826,7 @@ mod tests {
                 command: Some(RemoteCommand::argv(&["true"])),
             },
             None,
+            GpuRequest::Unspecified,
         );
         assert_eq!(
             launched,
@@ -13928,6 +14890,7 @@ mod tests {
                 command: Some(RemoteCommand::argv(&["true"])),
             },
             None,
+            GpuRequest::Unspecified,
         );
 
         let ssh = scene
@@ -13979,6 +14942,7 @@ mod tests {
                 command: Some(RemoteCommand::argv(&["echo", "hi"])),
             },
             None,
+            GpuRequest::Unspecified,
         );
 
         assert_eq!(
@@ -14045,6 +15009,7 @@ mod tests {
                 command: Some(RemoteCommand::argv(&["echo", "hi"])),
             },
             None,
+            GpuRequest::Unspecified,
         );
 
         assert_eq!(
@@ -14100,7 +15065,12 @@ mod tests {
                 &mut parts.said,
             )
             .recognised_as(Some(workspace.clone()));
-            let _ = launch.run(workspace.value(), &LaunchVerb::Up, None);
+            let _ = launch.run(
+                workspace.value(),
+                &LaunchVerb::Up,
+                None,
+                GpuRequest::Unspecified,
+            );
         }
 
         assert_eq!(parts.provision.titles(), vec![Some(workspace.label())]);
@@ -14132,7 +15102,12 @@ mod tests {
                 &mut parts.said,
             )
             .recognised_as(Some(switched));
-            let _ = launch.run(workspace.value(), &LaunchVerb::Up, None);
+            let _ = launch.run(
+                workspace.value(),
+                &LaunchVerb::Up,
+                None,
+                GpuRequest::Unspecified,
+            );
         }
 
         assert_eq!(
@@ -14168,6 +15143,7 @@ mod tests {
                 command: Some(RemoteCommand::argv(&["echo", "hi"])),
             },
             None,
+            GpuRequest::Unspecified,
         );
 
         assert_eq!(
@@ -14201,7 +15177,12 @@ mod tests {
             &mut parts.said,
         );
 
-        let launched = launch.run("myws", &LaunchVerb::Attach { command: None }, None);
+        let launched = launch.run(
+            "myws",
+            &LaunchVerb::Attach { command: None },
+            None,
+            GpuRequest::Unspecified,
+        );
 
         assert_eq!(
             launched,
@@ -14265,7 +15246,12 @@ mod tests {
             &mut parts.said,
         );
 
-        let _ = launch.run("myws", &LaunchVerb::Attach { command: None }, None);
+        let _ = launch.run(
+            "myws",
+            &LaunchVerb::Attach { command: None },
+            None,
+            GpuRequest::Unspecified,
+        );
 
         drop(launch);
         assert!(
@@ -14319,7 +15305,12 @@ mod tests {
             &mut parts.said,
         );
 
-        let launched = launch.run("myws", &LaunchVerb::Attach { command: None }, None);
+        let launched = launch.run(
+            "myws",
+            &LaunchVerb::Attach { command: None },
+            None,
+            GpuRequest::Unspecified,
+        );
 
         drop(launch);
         assert_eq!(
@@ -14374,7 +15365,12 @@ mod tests {
             &mut parts.said,
         );
 
-        let _ = launch.run("myws", &LaunchVerb::Attach { command: None }, None);
+        let _ = launch.run(
+            "myws",
+            &LaunchVerb::Attach { command: None },
+            None,
+            GpuRequest::Unspecified,
+        );
 
         drop(launch);
         assert_eq!(parts.provision.occasions(), [], "no pass at all");
@@ -14403,7 +15399,12 @@ mod tests {
             &mut parts.said,
         );
 
-        let launched = launch.run("myws", &LaunchVerb::Attach { command: None }, None);
+        let launched = launch.run(
+            "myws",
+            &LaunchVerb::Attach { command: None },
+            None,
+            GpuRequest::Unspecified,
+        );
 
         assert_eq!(
             launched,
@@ -14446,7 +15447,12 @@ mod tests {
             &mut parts.said,
         );
 
-        let launched = launch.run("no-such-ws", &LaunchVerb::Attach { command: None }, None);
+        let launched = launch.run(
+            "no-such-ws",
+            &LaunchVerb::Attach { command: None },
+            None,
+            GpuRequest::Unspecified,
+        );
 
         assert_eq!(
             launched,
@@ -14489,7 +15495,12 @@ mod tests {
             &mut parts.said,
         );
 
-        let launched = launch.run("broken-ws", &LaunchVerb::Attach { command: None }, None);
+        let launched = launch.run(
+            "broken-ws",
+            &LaunchVerb::Attach { command: None },
+            None,
+            GpuRequest::Unspecified,
+        );
 
         // Not a refusal: the launch goes on to `up` it, because devpod knows it —
         // and the placement says devpod described nothing rather than claiming a
@@ -14530,6 +15541,7 @@ mod tests {
             "myws",
             &LaunchVerb::Attach { command: None },
             Some(&variant),
+            GpuRequest::Unspecified,
         );
 
         drop(launch);
@@ -14541,6 +15553,141 @@ mod tests {
                     spec: "myws".to_owned(),
                 }),
             "{:?}",
+            parts.said
+        );
+    }
+
+    #[test]
+    fn a_gpu_choice_a_running_workspace_cannot_honour_is_named() {
+        // A container's `DeviceRequests` are fixed at create time, so neither
+        // flag against an already-running workspace can do anything -- and
+        // forcing a `bring_up` here would not work, whatever `DOCKER_PATH`
+        // devpod is handed for a later create. So this asks only for the
+        // notice, and asks it of both flags and of `Attach` and `Up`, the two
+        // verbs the fast-running path can short-circuit.
+        for (verb, name) in [
+            (LaunchVerb::Attach { command: None }, "attach"),
+            (LaunchVerb::Up, "up"),
+        ] {
+            for (gpu, enable) in [(GpuRequest::Disable, false), (GpuRequest::Enable, true)] {
+                let scene = Scene::new().with_running("myws");
+                let updater = SelfInvocation::new("dl");
+                let completion = scene.cache_dir().join("completion.json");
+                let mut parts = launching(&scene.runner, &updater, &completion);
+                let mut cold = NeverCold;
+                let mut launch = Launch::new(
+                    &mut parts.context,
+                    &mut parts.refresh,
+                    &mut cold,
+                    &parts.provision,
+                    &scene.host,
+                    &mut parts.chatter,
+                    &mut parts.said,
+                );
+
+                let _ = launch.run("myws", &verb, None, gpu);
+
+                drop(launch);
+                assert!(
+                    parts.said.contains(&LaunchNotice::GpuIgnoredRunning {
+                        workspace_id: "myws".to_owned(),
+                        spec: "myws".to_owned(),
+                        enable,
+                    }),
+                    "verb {name}, gpu {gpu:?}: {:?}",
+                    parts.said
+                );
+                // The whole point of the notice: this launch never asked devpod
+                // to do anything about it.
+                assert!(
+                    !scene
+                        .devpod_commands()
+                        .iter()
+                        .any(|argv| argv.first().map(String::as_str) == Some("up")),
+                    "verb {name}, gpu {gpu:?}: {:?}",
+                    scene.devpod_commands()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unspecified_gpu_choice_against_a_running_workspace_says_nothing() {
+        let scene = Scene::new().with_running("myws");
+        let updater = SelfInvocation::new("dl");
+        let completion = scene.cache_dir().join("completion.json");
+        let mut parts = launching(&scene.runner, &updater, &completion);
+        let mut cold = NeverCold;
+        let mut launch = Launch::new(
+            &mut parts.context,
+            &mut parts.refresh,
+            &mut cold,
+            &parts.provision,
+            &scene.host,
+            &mut parts.chatter,
+            &mut parts.said,
+        );
+
+        let _ = launch.run(
+            "myws",
+            &LaunchVerb::Attach { command: None },
+            None,
+            GpuRequest::Unspecified,
+        );
+
+        drop(launch);
+        assert!(
+            !parts
+                .said
+                .iter()
+                .any(|notice| matches!(notice, LaunchNotice::GpuIgnoredRunning { .. })),
+            "{:?}",
+            parts.said
+        );
+    }
+
+    #[test]
+    fn dotfiles_no_gpu_reaches_the_up_it_starts() {
+        // `dl <ws> dotfiles --no-gpu` against a *stopped* workspace has to bring
+        // it up to refresh anything, and that `up` is exactly the one this flag
+        // exists to change. Before this fix, `run_dotfiles` built its `UpRequest`
+        // with no `.with_gpu(...)` at all, so the flag never reached devpod.
+        let scene = Scene::new().with_stopped("myws");
+        let updater = SelfInvocation::new("dl");
+        let completion = scene.cache_dir().join("completion.json");
+        let mut parts = launching(&scene.runner, &updater, &completion);
+        let mut cold = NeverCold;
+        let mut launch = Launch::new(
+            &mut parts.context,
+            &mut parts.refresh,
+            &mut cold,
+            &parts.provision,
+            &scene.host,
+            &mut parts.chatter,
+            &mut parts.said,
+        );
+
+        let _ = launch.run("myws", &LaunchVerb::Dotfiles, None, GpuRequest::Disable);
+
+        drop(launch);
+        let up = scene
+            .devpod_commands()
+            .into_iter()
+            .find(|argv| argv.first().map(String::as_str) == Some("up"))
+            .expect("dotfiles against a stopped workspace brings it up");
+        // Whatever this host resolved `--no-gpu` to, it is not the silence an
+        // `UpRequest` with no gpu request at all would produce: either the
+        // wrapper's `DOCKER_PATH` reached the `up`, or `docker` was not found
+        // and the resolution said so -- both are readings of a gpu request that
+        // actually reached `workspace_up`, where "reached nothing" is not.
+        let carried_a_provider_option = up.iter().any(|arg| arg.starts_with("DOCKER_PATH="));
+        let said_docker_missing = parts
+            .said
+            .iter()
+            .any(|notice| matches!(notice, LaunchNotice::NoGpuDockerNotFound));
+        assert!(
+            carried_a_provider_option || said_docker_missing,
+            "up: {up:?}, said: {:?}",
             parts.said
         );
     }
@@ -14565,7 +15712,7 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            launch.run("myws", &LaunchVerb::Up, None)
+            launch.run("myws", &LaunchVerb::Up, None, GpuRequest::Unspecified)
         };
 
         assert_eq!(launched, Ok(Launched::AlreadyRunning));
@@ -14613,7 +15760,12 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            let _ = launch.run("blooop/devlaunch@main", &LaunchVerb::Up, None);
+            let _ = launch.run(
+                "blooop/devlaunch@main",
+                &LaunchVerb::Up,
+                None,
+                GpuRequest::Unspecified,
+            );
         }
         {
             let mut launch = Launch::new(
@@ -14625,7 +15777,12 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            let _ = launch.run(workspace.value(), &LaunchVerb::Up, None);
+            let _ = launch.run(
+                workspace.value(),
+                &LaunchVerb::Up,
+                None,
+                GpuRequest::Unspecified,
+            );
         }
 
         assert_eq!(
@@ -14668,7 +15825,12 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            launch.run("blooop/devlaunch@main\n", &LaunchVerb::Up, None)
+            launch.run(
+                "blooop/devlaunch@main\n",
+                &LaunchVerb::Up,
+                None,
+                GpuRequest::Unspecified,
+            )
         };
 
         assert_eq!(launched, Ok(Launched::AlreadyRunning));
@@ -14699,7 +15861,12 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            launch.run("blooop/devlaunch@feature/auth", &LaunchVerb::Up, None)
+            launch.run(
+                "blooop/devlaunch@feature/auth",
+                &LaunchVerb::Up,
+                None,
+                GpuRequest::Unspecified,
+            )
         };
 
         assert_eq!(launched, Ok(Launched::AlreadyRunning));
@@ -14729,7 +15896,7 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            launch.run("myws", &LaunchVerb::Up, None)
+            launch.run("myws", &LaunchVerb::Up, None, GpuRequest::Unspecified)
         };
 
         assert_eq!(launched, Ok(Launched::AlreadyRunning));
@@ -14760,7 +15927,12 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            launch.run("blooop/devlaunch@main", &LaunchVerb::Up, None)
+            launch.run(
+                "blooop/devlaunch@main",
+                &LaunchVerb::Up,
+                None,
+                GpuRequest::Unspecified,
+            )
         };
 
         assert_eq!(launched, Ok(Launched::AlreadyRunning));
@@ -14799,7 +15971,7 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            launch.run("myws", &LaunchVerb::Up, None)
+            launch.run("myws", &LaunchVerb::Up, None, GpuRequest::Unspecified)
         };
 
         assert_ne!(
@@ -14839,7 +16011,7 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            launch.run("myws", &LaunchVerb::Up, None)
+            launch.run("myws", &LaunchVerb::Up, None, GpuRequest::Unspecified)
         };
 
         assert_eq!(launched, Ok(Launched::AlreadyRunning));
@@ -14881,7 +16053,7 @@ mod tests {
                     &mut parts.chatter,
                     &mut parts.said,
                 );
-                launch.run("myws", &verb, None)
+                launch.run("myws", &verb, None, GpuRequest::Unspecified)
             };
 
             assert_eq!(
@@ -14917,7 +16089,7 @@ mod tests {
             &mut parts.said,
         );
 
-        let launched = launch.run("myws", &LaunchVerb::Code, None);
+        let launched = launch.run("myws", &LaunchVerb::Code, None, GpuRequest::Unspecified);
 
         assert_eq!(launched, Ok(Launched::Ready));
         let up = scene
@@ -14956,7 +16128,7 @@ mod tests {
             &mut parts.said,
         );
 
-        let launched = launch.run("myws", &LaunchVerb::Restart, None);
+        let launched = launch.run("myws", &LaunchVerb::Restart, None, GpuRequest::Unspecified);
 
         assert_eq!(
             launched,
@@ -14998,7 +16170,7 @@ mod tests {
             &mut parts.said,
         );
 
-        let launched = launch.run("myws", &LaunchVerb::Recreate, None);
+        let launched = launch.run("myws", &LaunchVerb::Recreate, None, GpuRequest::Unspecified);
 
         assert_eq!(
             launched,
@@ -15029,7 +16201,7 @@ mod tests {
             &mut parts.said,
         );
 
-        let launched = launch.run("myws", &LaunchVerb::Reset, None);
+        let launched = launch.run("myws", &LaunchVerb::Reset, None, GpuRequest::Unspecified);
 
         assert_eq!(
             launched,
@@ -15075,7 +16247,7 @@ mod tests {
                     &mut parts.chatter,
                     &mut parts.said,
                 );
-                launch.run("myws", &verb, None)
+                launch.run("myws", &verb, None, GpuRequest::Unspecified)
             };
 
             assert_eq!(
@@ -15123,7 +16295,7 @@ mod tests {
                     &mut parts.chatter,
                     &mut parts.said,
                 );
-                let launched = launch.run("myws", &verb, None);
+                let launched = launch.run("myws", &verb, None, GpuRequest::Unspecified);
                 assert!(launched.is_ok(), "{verb:?}: {launched:?}");
             }
 
@@ -15159,7 +16331,12 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            let _ = launch.run("nonexistent", &LaunchVerb::Attach { command: None }, None);
+            let _ = launch.run(
+                "nonexistent",
+                &LaunchVerb::Attach { command: None },
+                None,
+                GpuRequest::Unspecified,
+            );
         }
 
         assert_eq!(scene.runner.args_to("dl"), Vec::<Vec<String>>::new());
@@ -15222,6 +16399,7 @@ mod tests {
                     command: Some(RemoteCommand::argv(&["echo", "hi"])),
                 },
                 None,
+                GpuRequest::Unspecified,
             );
             assert!(launched.is_ok(), "{launched:?}");
         }
@@ -15268,6 +16446,7 @@ mod tests {
                     command: Some(RemoteCommand::argv(&["echo", "hi"])),
                 },
                 None,
+                GpuRequest::Unspecified,
             );
         }
 
@@ -15339,7 +16518,12 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            launch.run("myws", &LaunchVerb::Attach { command: None }, None)
+            launch.run(
+                "myws",
+                &LaunchVerb::Attach { command: None },
+                None,
+                GpuRequest::Unspecified,
+            )
         });
 
         assert!(launched.is_ok(), "{launched:?}");
@@ -15404,7 +16588,12 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            launch.run("myws", &LaunchVerb::Attach { command: None }, None)
+            launch.run(
+                "myws",
+                &LaunchVerb::Attach { command: None },
+                None,
+                GpuRequest::Unspecified,
+            )
         });
 
         assert_eq!(
@@ -15494,7 +16683,12 @@ mod tests {
                 &mut parts.chatter,
                 &mut parts.said,
             );
-            launch.run("myws", &LaunchVerb::Attach { command: None }, None)
+            launch.run(
+                "myws",
+                &LaunchVerb::Attach { command: None },
+                None,
+                GpuRequest::Unspecified,
+            )
         });
 
         assert_eq!(document.prewarm, None);

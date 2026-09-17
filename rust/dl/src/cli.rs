@@ -29,6 +29,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use devlaunch_core::domain::spec::{self, DevcontainerPath, DevcontainerRefError};
 use devlaunch_core::domain::workspace_state::NonEmpty;
+use devlaunch_core::flows::launch::GpuRequest;
 use devlaunch_core::flows::listing::Sizes;
 
 /// The reserved verb words, and the verb each one names.
@@ -415,6 +416,7 @@ pub(crate) enum Command {
         devcontainer: Option<DevcontainerPath>,
         claude_profile: Option<String>,
         from: Option<String>,
+        gpu: GpuRequest,
     },
     /// A workspace, and what to do with it.
     Workspace {
@@ -423,6 +425,7 @@ pub(crate) enum Command {
         devcontainer: Option<DevcontainerPath>,
         claude_profile: Option<String>,
         from: Option<String>,
+        gpu: GpuRequest,
     },
 }
 
@@ -450,6 +453,25 @@ pub(crate) enum GrammarError {
     CommandNotAllowed { verb: &'static str },
     /// `--devcontainer` on a command that opens no workspace.
     DevcontainerNotAllowed { command: &'static str },
+    /// `--no-gpu` on a command that opens no workspace.
+    ///
+    /// Refused here for the same reason [`GrammarError::DevcontainerNotAllowed`]
+    /// is: a global command has no workspace, so it has no `devpod up` for the
+    /// flag to change anything about. Merely *reported* for a workspace verb that
+    /// launches nothing — see `no_gpu_ignored` in `crate::commands`.
+    NoGpuNotAllowed { command: &'static str },
+    /// `--gpu` on a command that opens no workspace.
+    ///
+    /// [`GrammarError::NoGpuNotAllowed`]'s own reason, for its own opposite flag.
+    GpuNotAllowed { command: &'static str },
+    /// `--gpu` and `--no-gpu` together.
+    ///
+    /// The pair looks like it should compose into "whichever was typed last wins"
+    /// and must not: both are `--provider-option DOCKER_PATH=...`, so a devpod
+    /// that received both on one line would see one flag silently overwrite the
+    /// other in an argv order nobody chose on purpose. Refused rather than
+    /// guessed, the way [`GrammarError::RmForced`] refuses its own pair.
+    GpuConflict,
     /// `--claude-profile` on a command that opens no workspace.
     ///
     /// Refused here and merely *reported* for a workspace verb that forwards no
@@ -649,6 +671,23 @@ pub(crate) struct Cli {
     /// Stops at work that is nowhere else, exactly as the `rm` verb does.
     #[arg(long)]
     rm: bool,
+    /// Neutralise a compose devcontainer's GPU reservations, for a host with no
+    /// GPU. A `deploy`/`runtime` key naming a GPU driver fails container
+    /// creation outright rather than falling back, so this launches through a
+    /// wrapper that strips those keys from the compose config devpod builds.
+    /// Stored with the workspace like `--devcontainer`, so pass it once.
+    /// Mutually exclusive with `--gpu`.
+    #[arg(long = "no-gpu")]
+    no_gpu: bool,
+    /// Reset a compose devcontainer's GPU passthrough after an earlier `--no-gpu`
+    /// left `DOCKER_PATH` pointing at the wrapper: devpod persists whatever
+    /// `--provider-option` a launch gives it with the workspace, forever, so
+    /// there is otherwise no supported way off a workspace `--no-gpu` touched
+    /// once short of destroying and recreating it. Hands devpod the real,
+    /// absolute `docker`. Stored with the workspace like `--no-gpu`, so pass it
+    /// once. Mutually exclusive with `--no-gpu`.
+    #[arg(long = "gpu")]
+    gpu: bool,
 }
 
 /// The half of the grammar clap's own argument list cannot show: the verbs are
@@ -852,6 +891,12 @@ pub(crate) fn resolve(cli: Cli, argv: &[String]) -> Result<Command, GrammarError
     if let Some(retired) = cli.retired_flag() {
         return Err(GrammarError::RetiredFlag(retired));
     }
+    // Before either command shape is asked anything: the pair is wrong whether or
+    // not the line even opens a workspace, and a message about one flag meaning
+    // nothing for a global command would be true and beside the point.
+    if cli.gpu && cli.no_gpu {
+        return Err(GrammarError::GpuConflict);
+    }
     match cli.chosen() {
         Some(global) => global_command(&cli, global),
         None => workspace_command(cli, argv),
@@ -923,6 +968,12 @@ fn global_command(cli: &Cli, chosen: Chosen) -> Result<Command, GrammarError> {
     let name = flag_of(chosen);
     if cli.devcontainer.is_some() {
         return Err(GrammarError::DevcontainerNotAllowed { command: name });
+    }
+    if cli.no_gpu {
+        return Err(GrammarError::NoGpuNotAllowed { command: name });
+    }
+    if cli.gpu {
+        return Err(GrammarError::GpuNotAllowed { command: name });
     }
     if cli.claude_profile.is_some() {
         return Err(GrammarError::ClaudeProfileNotAllowed { command: name });
@@ -1027,6 +1078,15 @@ fn workspace_command(cli: Cli, argv: &[String]) -> Result<Command, GrammarError>
     // Carried as typed, same as `claude_profile`: the ref is resolved against
     // the remote at launch time, not validated as a name here.
     let from = cli.from.clone();
+    // `resolve` has already refused the pair, so at most one of the two is true
+    // here -- this is a mapping, not a second check.
+    let gpu = if cli.gpu {
+        GpuRequest::Enable
+    } else if cli.no_gpu {
+        GpuRequest::Disable
+    } else {
+        GpuRequest::Unspecified
+    };
     if cli.yes {
         return Err(GrammarError::ModifierNotAllowed {
             modifier: "--yes",
@@ -1075,6 +1135,7 @@ fn workspace_command(cli: Cli, argv: &[String]) -> Result<Command, GrammarError>
                     devcontainer,
                     claude_profile,
                     from,
+                    gpu,
                 });
             }
             ForcePlace::VerbSlot { target } => {
@@ -1171,6 +1232,7 @@ fn workspace_command(cli: Cli, argv: &[String]) -> Result<Command, GrammarError>
             devcontainer,
             claude_profile,
             from,
+            gpu,
         },
         Some(target) => Command::Workspace {
             target,
@@ -1178,6 +1240,7 @@ fn workspace_command(cli: Cli, argv: &[String]) -> Result<Command, GrammarError>
             devcontainer,
             claude_profile,
             from,
+            gpu,
         },
     })
 }
@@ -1336,6 +1399,7 @@ mod tests {
             devcontainer: None,
             claude_profile: None,
             from: None,
+            gpu: GpuRequest::Unspecified,
         }
     }
 
@@ -1354,6 +1418,7 @@ mod tests {
                     devcontainer: None,
                     claude_profile: None,
                     from: None,
+                    gpu: GpuRequest::Unspecified,
                 },
             ),
             (&["stop", "ws"], workspace("ws", Verb::Stop)),
@@ -1444,6 +1509,7 @@ mod tests {
                 devcontainer: None,
                 claude_profile: None,
                 from: None,
+                gpu: GpuRequest::Unspecified,
             })
         );
         assert!(remove_and_exit(false).several_at_once());
@@ -1661,6 +1727,7 @@ mod tests {
                 devcontainer: None,
                 claude_profile: None,
                 from: None,
+                gpu: GpuRequest::Unspecified,
             })
         );
     }
@@ -1881,6 +1948,7 @@ mod tests {
                 devcontainer: None,
                 claude_profile: None,
                 from: None,
+                gpu: GpuRequest::Unspecified,
             })
         );
     }
@@ -1921,6 +1989,170 @@ mod tests {
                 raw: " ".to_owned(),
                 why: DevcontainerRefError::Missing
             })
+        );
+    }
+
+    // ===================================================================== --no-gpu
+
+    #[test]
+    fn no_gpu_is_refused_on_a_command_that_opens_no_workspace() {
+        // The same split `--devcontainer` draws: a global command has no workspace
+        // for a launch-time flag to be about.
+        for command in [
+            "--ls",
+            "--prune",
+            "--purge",
+            "--reconcile",
+            "--install",
+            "--refresh",
+            "--version",
+        ] {
+            assert_eq!(
+                parse(&[command, "--no-gpu"]),
+                Err(GrammarError::NoGpuNotAllowed { command }),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_gpu_rides_the_workspace_forms_that_open_a_session() {
+        assert_eq!(
+            parse(&["ws", "--no-gpu"]),
+            Ok(Command::Workspace {
+                target: "ws".to_owned(),
+                verb: attach(),
+                devcontainer: None,
+                claude_profile: None,
+                from: None,
+                gpu: GpuRequest::Disable,
+            })
+        );
+        assert_eq!(
+            parse(&["--no-gpu"]),
+            Ok(Command::Select {
+                verb: attach(),
+                devcontainer: None,
+                claude_profile: None,
+                from: None,
+                gpu: GpuRequest::Disable,
+            })
+        );
+    }
+
+    #[test]
+    fn no_gpu_composes_with_a_verb_word() {
+        assert_eq!(
+            parse(&["ws", "up", "--no-gpu"]),
+            Ok(Command::Workspace {
+                target: "ws".to_owned(),
+                verb: Verb::Up,
+                devcontainer: None,
+                claude_profile: None,
+                from: None,
+                gpu: GpuRequest::Disable,
+            })
+        );
+    }
+
+    // ========================================================================= --gpu
+
+    #[test]
+    fn gpu_is_refused_on_a_command_that_opens_no_workspace() {
+        // The same split `--no-gpu` draws: a global command has no workspace for a
+        // launch-time flag to be about.
+        for command in [
+            "--ls",
+            "--prune",
+            "--purge",
+            "--reconcile",
+            "--install",
+            "--refresh",
+            "--version",
+        ] {
+            assert_eq!(
+                parse(&[command, "--gpu"]),
+                Err(GrammarError::GpuNotAllowed { command }),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_rides_the_workspace_forms_that_open_a_session() {
+        assert_eq!(
+            parse(&["ws", "--gpu"]),
+            Ok(Command::Workspace {
+                target: "ws".to_owned(),
+                verb: attach(),
+                devcontainer: None,
+                claude_profile: None,
+                from: None,
+                gpu: GpuRequest::Enable,
+            })
+        );
+        assert_eq!(
+            parse(&["--gpu"]),
+            Ok(Command::Select {
+                verb: attach(),
+                devcontainer: None,
+                claude_profile: None,
+                from: None,
+                gpu: GpuRequest::Enable,
+            })
+        );
+    }
+
+    #[test]
+    fn gpu_composes_with_a_verb_word() {
+        assert_eq!(
+            parse(&["ws", "up", "--gpu"]),
+            Ok(Command::Workspace {
+                target: "ws".to_owned(),
+                verb: Verb::Up,
+                devcontainer: None,
+                claude_profile: None,
+                from: None,
+                gpu: GpuRequest::Enable,
+            })
+        );
+    }
+
+    #[test]
+    fn neither_flag_is_unspecified_not_a_default_disable() {
+        // The three-state distinction this whole grammar exists for: a launch
+        // that named neither flag must not read as `--no-gpu`'s opposite, since
+        // devpod keeps whatever `DOCKER_PATH` the workspace already has -- and a
+        // bool could not have told these two apart.
+        assert_eq!(
+            parse(&["ws"]),
+            Ok(Command::Workspace {
+                target: "ws".to_owned(),
+                verb: attach(),
+                devcontainer: None,
+                claude_profile: None,
+                from: None,
+                gpu: GpuRequest::Unspecified,
+            })
+        );
+    }
+
+    #[test]
+    fn gpu_and_no_gpu_together_is_refused() {
+        // Refused before either command shape is even asked, the way `RmForced`
+        // is: whichever flag argv puts second must not silently win.
+        assert_eq!(
+            parse(&["ws", "--gpu", "--no-gpu"]),
+            Err(GrammarError::GpuConflict)
+        );
+        assert_eq!(
+            parse(&["ws", "--no-gpu", "--gpu"]),
+            Err(GrammarError::GpuConflict)
+        );
+        // And refused even where neither flag would otherwise apply.
+        assert_eq!(
+            parse(&["--ls", "--gpu", "--no-gpu"]),
+            Err(GrammarError::GpuConflict)
         );
     }
 
@@ -1976,6 +2208,7 @@ mod tests {
                 devcontainer: None,
                 claude_profile: Some("work".to_owned()),
                 from: None,
+                gpu: GpuRequest::Unspecified,
             })
         );
         assert_eq!(
@@ -1985,6 +2218,7 @@ mod tests {
                 devcontainer: None,
                 claude_profile: Some("work".to_owned()),
                 from: None,
+                gpu: GpuRequest::Unspecified,
             })
         );
     }
@@ -2003,6 +2237,7 @@ mod tests {
                 devcontainer: None,
                 claude_profile: Some("../../etc".to_owned()),
                 from: None,
+                gpu: GpuRequest::Unspecified,
             })
         );
     }
@@ -2041,6 +2276,7 @@ mod tests {
                 devcontainer: None,
                 claude_profile: None,
                 from: Some("develop".to_owned()),
+                gpu: GpuRequest::Unspecified,
             })
         );
         assert_eq!(
@@ -2050,6 +2286,7 @@ mod tests {
                 devcontainer: None,
                 claude_profile: None,
                 from: Some("develop".to_owned()),
+                gpu: GpuRequest::Unspecified,
             })
         );
     }
@@ -2248,6 +2485,7 @@ mod tests {
                 devcontainer: None,
                 claude_profile: None,
                 from: None,
+                gpu: GpuRequest::Unspecified,
             })
         );
     }

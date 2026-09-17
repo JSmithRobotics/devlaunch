@@ -1709,6 +1709,21 @@ pub fn devlaunch_core::flows::launch::ClaudeProfileProblem::eq(&self, &devlaunch
 impl core::fmt::Debug for devlaunch_core::flows::launch::ClaudeProfileProblem
 pub fn devlaunch_core::flows::launch::ClaudeProfileProblem::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for devlaunch_core::flows::launch::ClaudeProfileProblem
+pub enum devlaunch_core::flows::launch::GpuRequest
+pub devlaunch_core::flows::launch::GpuRequest::Disable
+pub devlaunch_core::flows::launch::GpuRequest::Enable
+pub devlaunch_core::flows::launch::GpuRequest::Unspecified
+impl core::clone::Clone for devlaunch_core::flows::launch::GpuRequest
+pub fn devlaunch_core::flows::launch::GpuRequest::clone(&self) -> devlaunch_core::flows::launch::GpuRequest
+impl core::cmp::Eq for devlaunch_core::flows::launch::GpuRequest
+impl core::cmp::PartialEq for devlaunch_core::flows::launch::GpuRequest
+pub fn devlaunch_core::flows::launch::GpuRequest::eq(&self, &devlaunch_core::flows::launch::GpuRequest) -> bool
+impl core::default::Default for devlaunch_core::flows::launch::GpuRequest
+pub fn devlaunch_core::flows::launch::GpuRequest::default() -> devlaunch_core::flows::launch::GpuRequest
+impl core::fmt::Debug for devlaunch_core::flows::launch::GpuRequest
+pub fn devlaunch_core::flows::launch::GpuRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for devlaunch_core::flows::launch::GpuRequest
+impl core::marker::StructuralPartialEq for devlaunch_core::flows::launch::GpuRequest
 pub enum devlaunch_core::flows::launch::HerdrTabRename
 pub devlaunch_core::flows::launch::HerdrTabRename::Off
 pub devlaunch_core::flows::launch::HerdrTabRename::Run

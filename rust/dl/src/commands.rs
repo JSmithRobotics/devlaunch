@@ -20,7 +20,7 @@ use devlaunch_core::flows::completion::{self, FileState, InstallError, Installed
 use devlaunch_core::flows::completion_cache::{self, Refreshed};
 use devlaunch_core::flows::kept_copies::KeptCopies;
 use devlaunch_core::flows::kill;
-use devlaunch_core::flows::launch::{ColdPath, LaunchNotice};
+use devlaunch_core::flows::launch::{ColdPath, GpuRequest, LaunchNotice};
 use devlaunch_core::flows::launch_locks::LaunchLocks;
 use devlaunch_core::flows::lifecycle::{
     self, ChildWork, DeleteStalled, Insisted, Insistence, LifecycleNotice, PruneError,
@@ -158,6 +158,11 @@ pub(crate) fn dispatch(
                         // to cut anyway: this reattaches to a workspace the sibling
                         // already opened.
                         from: None,
+                        // Per launch, like `from`: the sibling that opened this
+                        // workspace already chose it, and devpod's own record is
+                        // what keeps it in effect, not a second flag on the pane's
+                        // reattach.
+                        gpu: GpuRequest::Unspecified,
                     },
                 );
                 if pane_shell::no_session_ran(ending) {
@@ -177,6 +182,7 @@ pub(crate) fn dispatch(
             devcontainer,
             claude_profile,
             from,
+            gpu,
         } => {
             let after = verb.after_removal();
             let ending = render_select(
@@ -188,6 +194,7 @@ pub(crate) fn dispatch(
                 devcontainer.as_ref(),
                 claude_profile.as_deref(),
                 from.as_deref(),
+                gpu,
             );
             hangup::after_the_command(after, ending)
         }
@@ -197,6 +204,7 @@ pub(crate) fn dispatch(
             devcontainer,
             claude_profile,
             from,
+            gpu,
         } => {
             // The one place a typed target exists before anything has read it,
             // which is why the pull request rewrite happens here and nowhere
@@ -220,6 +228,7 @@ pub(crate) fn dispatch(
                 devcontainer.as_ref(),
                 claude_profile.as_deref(),
                 from.as_deref(),
+                gpu,
                 // A target named on the command line is resolved by the launch
                 // itself; only the picker arrives knowing more than it says.
                 None,
@@ -746,6 +755,7 @@ fn render_workspace<'r>(
     devcontainer: Option<&DevcontainerPath>,
     claude_profile: Option<&str>,
     from: Option<&str>,
+    gpu: GpuRequest,
     recognised: Option<WorkspaceId>,
 ) -> Ending {
     // The open's own notices are said where they happen, by the same printer every
@@ -763,18 +773,21 @@ fn render_workspace<'r>(
             devcontainer_ignored(devcontainer.is_some(), word);
             claude_profile_ignored(claude_profile.is_some(), word);
             from_ignored(from.is_some(), word);
+            gpu_ignored(gpu, word);
             render_stop(runner, context, refresh, &mut cold, target)
         }
         Family::Kill => {
             devcontainer_ignored(devcontainer.is_some(), word);
             claude_profile_ignored(claude_profile.is_some(), word);
             from_ignored(from.is_some(), word);
+            gpu_ignored(gpu, word);
             render_kill(runner, context, cache, refresh, &mut cold, target, word)
         }
         Family::Remove { force } => {
             devcontainer_ignored(devcontainer.is_some(), word);
             claude_profile_ignored(claude_profile.is_some(), word);
             from_ignored(from.is_some(), word);
+            gpu_ignored(gpu, word);
             render_remove(
                 runner,
                 context,
@@ -799,6 +812,7 @@ fn render_workspace<'r>(
                 devcontainer,
                 claude_profile,
                 from,
+                gpu,
                 recognised,
             );
             after_the_session(runner, context, cache, refresh, &mut cold, target, rm, ran)
@@ -947,6 +961,14 @@ fn from_ignored(given: bool, verb: &str) {
 fn devcontainer_ignored(given: bool, verb: &str) {
     if given {
         eprintln!("Ignoring --devcontainer: it does not apply to '{verb}'.");
+    }
+}
+
+fn gpu_ignored(gpu: GpuRequest, verb: &str) {
+    match gpu {
+        GpuRequest::Unspecified => {}
+        GpuRequest::Disable => eprintln!("Ignoring --no-gpu: it does not apply to '{verb}'."),
+        GpuRequest::Enable => eprintln!("Ignoring --gpu: it does not apply to '{verb}'."),
     }
 }
 
@@ -1619,6 +1641,7 @@ fn render_select<'r>(
     devcontainer: Option<&DevcontainerPath>,
     claude_profile: Option<&str>,
     from: Option<&str>,
+    gpu: GpuRequest,
 ) -> Ending {
     let workspaces = match context.workspaces() {
         Err(refused) => return refuse_listing(&refused),
@@ -1658,6 +1681,7 @@ fn render_select<'r>(
                     devcontainer,
                     claude_profile,
                     from,
+                    gpu,
                     // The picker knows what it drew: this row's clone said it is
                     // this triple, and the launch it is about to start knows only
                     // the id. See `Launch::recognised_as`.

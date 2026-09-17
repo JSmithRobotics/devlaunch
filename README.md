@@ -342,6 +342,33 @@ dl 0.49.0+fork.1
 Projects with several variants, compose sidecars, or a host-side `initializeCommand` are covered
 in [docs/devcontainer-projects.md](docs/devcontainer-projects.md).
 
+`--no-gpu` neutralises a compose-based devcontainer's GPU reservations, for a host with no GPU. A
+`deploy`/`runtime` key naming a GPU driver fails container creation outright rather than falling
+back, with no way to tell it to skip the device:
+
+```bash
+dl kinisi/kinisi_ros --no-gpu
+```
+
+`dl` writes a wrapper `docker` under its own cache directory and hands it to devpod as
+`DOCKER_PATH`, per launch and specific to this one, so nothing in your provider configuration
+changes. The wrapper forwards every call to the real `docker` unchanged, except a `compose`
+invocation, where it appends one more `-f` naming an override that deletes the GPU keys, after
+every file the caller named. Stored with the workspace like `--devcontainer`, so pass it once.
+
+devpod keeps whatever `DOCKER_PATH` a workspace was last given, forever, so `--no-gpu` on its own
+is a one-way door: there is otherwise no supported way back to GPU passthrough short of destroying
+and recreating the workspace. `--gpu` is that way back. It hands devpod the real, absolute
+`docker` instead of the wrapper, resetting a workspace an earlier `--no-gpu` touched:
+
+```bash
+dl kinisi/kinisi_ros --gpu
+```
+
+Stored with the workspace like `--no-gpu`, so pass it once, and mutually exclusive with it on one
+command line. Neither flag is `dl`'s default: a launch that gives neither one leaves whatever
+`DOCKER_PATH` the workspace already has untouched.
+
 `--claude-profile <name>` binds a Claude configuration directory into the container. For a named
 profile that replaces forwarding your host's login, for workspaces where you want a different
 account than the one `claude` on your host is signed in to:

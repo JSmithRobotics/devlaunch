@@ -38,8 +38,8 @@ use devlaunch_core::domain::workspace_id::WorkspaceId;
 use devlaunch_core::flows::completion_cache;
 use devlaunch_core::flows::launch::RemoteCommand;
 use devlaunch_core::flows::launch::{
-    self, ColdPath, Host, Launch, LaunchAborted, LaunchRefusal, LaunchVerb, Launched, Plan,
-    Session, ToolProvisioning,
+    self, ColdPath, GpuRequest, Host, Launch, LaunchAborted, LaunchRefusal, LaunchVerb, Launched,
+    Plan, Session, ToolProvisioning,
 };
 use devlaunch_core::flows::lifecycle::Refresh;
 use devlaunch_core::flows::listing::CommandContext;
@@ -139,6 +139,7 @@ pub(crate) fn render_launch<'r>(
     devcontainer: Option<&DevcontainerPath>,
     claude_profile: Option<&str>,
     from_ref: Option<&str>,
+    gpu: GpuRequest,
     recognised: Option<WorkspaceId>,
 ) -> Ran {
     // A path or git source whose derived id is empty — `dl /`, `//`, `/.`, `/..`,
@@ -195,7 +196,7 @@ pub(crate) fn render_launch<'r>(
         )
         .recognised_as(recognised)
         .from_ref(from_ref.map(str::to_owned));
-        launch.run(target, verb, devcontainer)
+        launch.run(target, verb, devcontainer, gpu)
     };
     ran(outcome, cache)
 }

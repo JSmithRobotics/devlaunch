@@ -2607,7 +2607,12 @@ fn is_executable_file(path: &Path) -> bool {
 
 /// The first executable named `program` on PATH — `shutil.which`, as the gh
 /// resolver asks it.
-fn which(program: &str) -> Option<PathBuf> {
+///
+/// `pub(crate)` rather than private: [`crate::flows::launch::GpuOverride`]
+/// resolves the real `docker` binary the same way, and a second copy of
+/// `shutil.which` would be exactly the kind of duplicated fact
+/// `CLAUDE.md`'s "second copies of a fact" rule warns against.
+pub(crate) fn which(program: &str) -> Option<PathBuf> {
     if program.contains('/') {
         let path = PathBuf::from(program);
         return is_executable_file(&path).then_some(path);

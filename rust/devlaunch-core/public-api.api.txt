@@ -84,6 +84,11 @@ pub devlaunch_core::api::LaunchNotice::DotfilesForwarded
 pub devlaunch_core::api::LaunchNotice::DotfilesForwarded::script: core::option::Option<alloc::string::String>
 pub devlaunch_core::api::LaunchNotice::DotfilesForwarded::url: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::DotfilesNotConfigured
+pub devlaunch_core::api::LaunchNotice::GpuDockerNotFound
+pub devlaunch_core::api::LaunchNotice::GpuIgnoredRunning
+pub devlaunch_core::api::LaunchNotice::GpuIgnoredRunning::enable: bool
+pub devlaunch_core::api::LaunchNotice::GpuIgnoredRunning::spec: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::GpuIgnoredRunning::workspace_id: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::HerdrTab(devlaunch_core::flows::launch::HerdrTabRename)
 pub devlaunch_core::api::LaunchNotice::LaunchLockUnavailable
 pub devlaunch_core::api::LaunchNotice::LaunchLockUnavailable::reason: alloc::string::String
@@ -96,6 +101,10 @@ pub devlaunch_core::api::LaunchNotice::NoDevpodSshConfig
 pub devlaunch_core::api::LaunchNotice::NoDevpodSshConfig::looked_in: std::path::PathBuf
 pub devlaunch_core::api::LaunchNotice::NoDevpodSshConfig::workspace_id: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::NoGitHubToken(devlaunch_core::clients::gh::GhEvent)
+pub devlaunch_core::api::LaunchNotice::NoGpuDockerNotFound
+pub devlaunch_core::api::LaunchNotice::NoGpuWrapperNotWritten
+pub devlaunch_core::api::LaunchNotice::NoGpuWrapperNotWritten::path: std::path::PathBuf
+pub devlaunch_core::api::LaunchNotice::NoGpuWrapperNotWritten::reason: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::NoSshAgent
 pub devlaunch_core::api::LaunchNotice::NoSshAgent::named: core::option::Option<alloc::string::String>
 pub devlaunch_core::api::LaunchNotice::NoTerminalAlias
@@ -393,7 +402,7 @@ impl<'a, 'r, 'l> devlaunch_core::flows::launch::Launch<'a, 'r, 'l>
 pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::from_ref(self, core::option::Option<alloc::string::String>) -> Self
 pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::new(&'a mut devlaunch_core::flows::listing::CommandContext<'r>, &'a mut devlaunch_core::flows::lifecycle::Refresh<'l>, &'a mut dyn devlaunch_core::flows::launch::ColdMachinery<'r>, &'a dyn devlaunch_core::flows::launch::Provision, &'a devlaunch_core::flows::launch::Host, &'a mut dyn core::ops::function::FnMut(&str), &'a mut dyn devlaunch_core::notices::Notices<devlaunch_core::flows::launch::LaunchNotice>) -> Self
 pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::recognised_as(self, core::option::Option<devlaunch_core::domain::workspace_id::WorkspaceId>) -> Self
-pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::run(&mut self, &str, &devlaunch_core::flows::launch::LaunchVerb, core::option::Option<&devlaunch_core::domain::spec::DevcontainerPath>) -> core::result::Result<devlaunch_core::flows::launch::Launched, devlaunch_core::flows::launch::LaunchAborted>
+pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::run(&mut self, &str, &devlaunch_core::flows::launch::LaunchVerb, core::option::Option<&devlaunch_core::domain::spec::DevcontainerPath>, devlaunch_core::flows::launch::GpuRequest) -> core::result::Result<devlaunch_core::flows::launch::Launched, devlaunch_core::flows::launch::LaunchAborted>
 pub struct devlaunch_core::api::MetadataStorage
 impl devlaunch_core::domain::metadata::MetadataStorage
 pub fn devlaunch_core::domain::metadata::MetadataStorage::default_path() -> core::result::Result<std::path::PathBuf, devlaunch_core::domain::xdg::NoHomeDirectory>
@@ -627,6 +636,11 @@ pub devlaunch_core::flows::launch::LaunchNotice::DotfilesForwarded
 pub devlaunch_core::flows::launch::LaunchNotice::DotfilesForwarded::script: core::option::Option<alloc::string::String>
 pub devlaunch_core::flows::launch::LaunchNotice::DotfilesForwarded::url: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::DotfilesNotConfigured
+pub devlaunch_core::flows::launch::LaunchNotice::GpuDockerNotFound
+pub devlaunch_core::flows::launch::LaunchNotice::GpuIgnoredRunning
+pub devlaunch_core::flows::launch::LaunchNotice::GpuIgnoredRunning::enable: bool
+pub devlaunch_core::flows::launch::LaunchNotice::GpuIgnoredRunning::spec: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::GpuIgnoredRunning::workspace_id: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::HerdrTab(devlaunch_core::flows::launch::HerdrTabRename)
 pub devlaunch_core::flows::launch::LaunchNotice::LaunchLockUnavailable
 pub devlaunch_core::flows::launch::LaunchNotice::LaunchLockUnavailable::reason: alloc::string::String
@@ -639,6 +653,10 @@ pub devlaunch_core::flows::launch::LaunchNotice::NoDevpodSshConfig
 pub devlaunch_core::flows::launch::LaunchNotice::NoDevpodSshConfig::looked_in: std::path::PathBuf
 pub devlaunch_core::flows::launch::LaunchNotice::NoDevpodSshConfig::workspace_id: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::NoGitHubToken(devlaunch_core::clients::gh::GhEvent)
+pub devlaunch_core::flows::launch::LaunchNotice::NoGpuDockerNotFound
+pub devlaunch_core::flows::launch::LaunchNotice::NoGpuWrapperNotWritten
+pub devlaunch_core::flows::launch::LaunchNotice::NoGpuWrapperNotWritten::path: std::path::PathBuf
+pub devlaunch_core::flows::launch::LaunchNotice::NoGpuWrapperNotWritten::reason: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::NoSshAgent
 pub devlaunch_core::flows::launch::LaunchNotice::NoSshAgent::named: core::option::Option<alloc::string::String>
 pub devlaunch_core::flows::launch::LaunchNotice::NoTerminalAlias
@@ -728,7 +746,7 @@ impl<'a, 'r, 'l> devlaunch_core::flows::launch::Launch<'a, 'r, 'l>
 pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::from_ref(self, core::option::Option<alloc::string::String>) -> Self
 pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::new(&'a mut devlaunch_core::flows::listing::CommandContext<'r>, &'a mut devlaunch_core::flows::lifecycle::Refresh<'l>, &'a mut dyn devlaunch_core::flows::launch::ColdMachinery<'r>, &'a dyn devlaunch_core::flows::launch::Provision, &'a devlaunch_core::flows::launch::Host, &'a mut dyn core::ops::function::FnMut(&str), &'a mut dyn devlaunch_core::notices::Notices<devlaunch_core::flows::launch::LaunchNotice>) -> Self
 pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::recognised_as(self, core::option::Option<devlaunch_core::domain::workspace_id::WorkspaceId>) -> Self
-pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::run(&mut self, &str, &devlaunch_core::flows::launch::LaunchVerb, core::option::Option<&devlaunch_core::domain::spec::DevcontainerPath>) -> core::result::Result<devlaunch_core::flows::launch::Launched, devlaunch_core::flows::launch::LaunchAborted>
+pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::run(&mut self, &str, &devlaunch_core::flows::launch::LaunchVerb, core::option::Option<&devlaunch_core::domain::spec::DevcontainerPath>, devlaunch_core::flows::launch::GpuRequest) -> core::result::Result<devlaunch_core::flows::launch::Launched, devlaunch_core::flows::launch::LaunchAborted>
 pub struct devlaunch_core::flows::launch::ToolProvisioning<'e>
 impl<'e> devlaunch_core::flows::launch::ToolProvisioning<'e>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'e>::for_verb(self, &devlaunch_core::flows::launch::LaunchVerb) -> Self

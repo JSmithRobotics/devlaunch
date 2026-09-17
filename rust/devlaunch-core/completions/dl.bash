@@ -69,7 +69,7 @@ _dl_completion() {
     # The retired spellings (--stop, --autorm) are absent by rule rather than by
     # hand: the grammar marks them `hide = true`, and the test drops every hidden
     # flag, so a spelling this build only still answers for is never offered.
-    local global_opts="--ls --install --refresh --prune --reconcile --purge --herdr-shell --rm --devcontainer --claude-profile --from --claude-profiles --help -h --version"
+    local global_opts="--ls --install --refresh --prune --reconcile --purge --herdr-shell --rm --devcontainer --claude-profile --from --no-gpu --gpu --claude-profiles --help -h --version"
     if [[ "$cmd" == aid ]]; then
         global_opts="--claude --codex --gemini --devcontainer --claude-profile --from --help -h --version"
     fi
@@ -106,7 +106,7 @@ _dl_completion() {
     # would mean a second exception rather than a wider `spec_follows` -- the
     # thing that follows is not a spec, and the branch below that handles `./`
     # is inside the spec position.
-    local spec_follows="--rm --devcontainer --claude-profile --from"
+    local spec_follows="--rm --devcontainer --claude-profile --from --no-gpu --gpu"
     if [[ "$cmd" == aid ]]; then
         # aid's own, from `parse_aid_args`: it reads an agent flag, a remote
         # control flag or a dl value option and keeps looking for the spec. The
