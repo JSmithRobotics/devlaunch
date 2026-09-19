@@ -112,7 +112,7 @@ pub(crate) fn dispatch(
         Command::Version => render_version(),
         Command::List { output, sizes } => render_list(runner, &mut context, cache, output, sizes),
         Command::Repos => render_repos(&mut context, cache),
-        Command::ClaudeProfiles => render_claude_profiles(),
+        Command::ClaudeProfiles { output } => render_claude_profiles(output),
         Command::CompletionData => render_completion_data(&mut context, cache),
         Command::UpdateCache { force } => render_update_cache(runner, &mut context, cache, force),
         Command::Refresh => render_refresh(&mut context, cache),
@@ -389,24 +389,42 @@ fn render_json(
 // the completion commands
 // ---------------------------------------------------------------------------
 
-/// `dl --claude-profiles`: the logins `--claude-profile` can name, and who each is.
+/// `dl --claude-profiles [--json]`: the logins `--claude-profile` can name, and who
+/// each is.
 ///
-/// Plumbing only. The columns, the two absences the account column distinguishes and
-/// the shared-account footnote are `render::claude_profile_lines`, which is where the
-/// rest of dl's rendering lives and where it is tested.
+/// Plumbing only, for either rendering. The table's columns, the two absences the
+/// account column distinguishes and the shared-account footnote are
+/// `render::claude_profile_lines`; the JSON document is
+/// `claude_profiles::json_document`. Both read the same `rows`, so the two cannot
+/// disagree about what a profile is — corral, which is why `--json` exists here at
+/// all, parses the second rather than screen-scraping the first.
 ///
 /// Nothing here reads a token. "authed" is the credential file's existence, so a
-/// listing has never touched a secret.
-fn render_claude_profiles() -> Ending {
+/// listing has never touched a secret, in either rendering.
+fn render_claude_profiles(output: cli::ListOutput) -> Ending {
     let rows = claude_profiles::from_process();
     warn_if_the_profiles_root_could_not_be_read();
-    if rows.is_empty() {
-        // stderr, because it is the reason there is no listing rather than a listing.
-        eprintln!("{}", render::no_claude_profiles());
-        return Ending::Done;
-    }
-    for line in render::claude_profile_lines(&rows) {
-        println!("{line}");
+    match output {
+        cli::ListOutput::Json => {
+            // No empty-listing sentinel here: `[]` already says "no profiles" to a
+            // parser, where the sentence below is for a person who would otherwise
+            // read silence as a hang.
+            println!(
+                "{}",
+                render::python_json_document(&claude_profiles::json_document(&rows))
+            );
+        }
+        cli::ListOutput::Table => {
+            if rows.is_empty() {
+                // stderr, because it is the reason there is no listing rather than a
+                // listing.
+                eprintln!("{}", render::no_claude_profiles());
+            } else {
+                for line in render::claude_profile_lines(&rows) {
+                    println!("{line}");
+                }
+            }
+        }
     }
     Ending::Done
 }

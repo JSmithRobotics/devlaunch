@@ -1308,6 +1308,7 @@ pub fn devlaunch_core::flows::claude_profiles::ProfileSummary::fmt(&self, &mut c
 impl core::marker::StructuralPartialEq for devlaunch_core::flows::claude_profiles::ProfileSummary
 pub const devlaunch_core::flows::claude_profiles::DEFAULT_PROFILE: &str
 pub fn devlaunch_core::flows::claude_profiles::from_process() -> alloc::vec::Vec<devlaunch_core::flows::claude_profiles::ProfileSummary>
+pub fn devlaunch_core::flows::claude_profiles::json_document(&[devlaunch_core::flows::claude_profiles::ProfileSummary]) -> serde_json::value::Value
 pub fn devlaunch_core::flows::claude_profiles::summarise(core::option::Option<&std::path::Path>, core::option::Option<&std::path::Path>) -> alloc::vec::Vec<devlaunch_core::flows::claude_profiles::ProfileSummary>
 pub mod devlaunch_core::flows::completion
 pub enum devlaunch_core::flows::completion::FileState

@@ -317,6 +317,7 @@ instead. [docs/cli.md](docs/cli.md) has the full `--rm` contract, including whic
 | `dl --install` | Install shell completions, and the `dl-herdr-shell` name a herdr pane opens through |
 | `dl --refresh` | Rebuild the completion cache now |
 | `dl --claude-profiles` | List the Claude logins `--claude-profile` can name, and the account each is signed in as |
+| `dl --claude-profiles --json` | The same, machine-readable, for a caller (such as corral) asking this host what it actually has rather than trusting its own copy of the list |
 | `dl --version` | Print the version |
 | `dl --herdr-shell` | The shell a new [herdr](https://herdr.dev) pane opens: inside the workspace its tab holds, or on this host |
 | `dl --help`, `-h` | Print help |
@@ -382,7 +383,9 @@ holding the `.credentials.json` that a `claude` login writes. Each is a `CLAUDE_
 own, which is what makes the logins independent. `dl` reads that layout rather than inventing one,
 so profiles you already have work with no re-login, and it never writes there: creating and
 deleting them stays with whatever made the directory. By hand it is
-`CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude`, then log in.
+`CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude`, then log in. `dl --claude-profiles --json`
+answers the same question machine-readably, so a tool that names a profile can check this host
+actually has it before asking for it.
 
 The whole directory is bound in, not just the credential: any `CLAUDE.md`, agents, skills or
 hooks living beside it reach the container too, and a token refresh in there lands back in
