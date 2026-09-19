@@ -26,6 +26,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::clients::claude;
 
 /// The account behind a profile, at a path a caller outside this crate can name.
@@ -235,6 +237,93 @@ fn row(name: String, path: PathBuf) -> ProfileSummary {
         // fact about a row's neighbours, so no row can answer it alone.
         shares_account_with: Vec::new(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// the JSON document -- what corral parses instead of trusting its own list
+// ---------------------------------------------------------------------------
+
+/// `dl --claude-profiles --json`.
+///
+/// One row per [`ProfileSummary`] the human listing prints, over the same `rows` --
+/// this reads no filesystem of its own, so the table and the document cannot
+/// disagree about what a profile is, and there is nothing here for a second
+/// listing's worth of drift to hide in.
+///
+/// Written for corral's gateway (see the module doc): it kept an allowlist of
+/// profile names while the directories live here, the two drifted, and a launch
+/// naming a profile the gateway offered but this host no longer had fell back to
+/// forwarding the host login instead of refusing. Reading this document is the
+/// fix, so its three fields are the three things that answer that:
+///
+/// - `name` is the row at all. A profile the gateway remembers and this host does
+///   not is not a row here to begin with -- `summarise` only lists directories
+///   [`std::fs::read_dir`] actually found -- so a name missing from this array
+///   answers "gone" without a state to interpret.
+/// - `state` and `account` together are the three readings the human columns
+///   already carry, spelled for a parser instead of a person: `"authed"` with an
+///   `account` object is signed in and nameably so; `"authed"` with `account: null`
+///   is signed in as somebody this could not name (Claude Code's state file was
+///   absent or has moved on from the shape this reads); `"not-logged-in"` (always
+///   paired with `account: null`) is a directory nobody has logged in to yet. The
+///   pairing is [`ProfileSummary::state`] and [`ProfileSummary::account`]
+///   unmodified, not a fourth value invented for the wire.
+/// - `default` is true for exactly the row named [`DEFAULT_PROFILE`], which
+///   `summarise` pushes whether or not its directory exists at all
+///   (`$CLAUDE_CONFIG_DIR`, else `~/.claude`) -- the one row here that is not
+///   backed by an entry `read_dir` found. A caller that treated every row as "a
+///   directory dl walked" would treat `default`'s absence of one as a fact about
+///   the login instead of a fact about how the name resolves; this field says so
+///   rather than leaving it to be inferred from the string `"default"`.
+///
+/// `sharesAccountWith` carries [`ProfileSummary::shares_account_with`] unmodified,
+/// for the same reason it is a field there: which names are spare copies of one
+/// login is a fact about the whole listing, not about a name alone.
+pub fn json_document(rows: &[ProfileSummary]) -> serde_json::Value {
+    serde_json::Value::Array(rows.iter().map(json_row).collect())
+}
+
+/// The four fields every row carries, in the order the wire carries them.
+#[derive(Debug, Serialize)]
+struct RowWire {
+    name: String,
+    default: bool,
+    /// `"authed"` or `"not-logged-in"` -- [`ProfileState`], spelled for the wire
+    /// rather than for `--help`.
+    state: &'static str,
+    account: Option<AccountWire>,
+    #[serde(rename = "sharesAccountWith")]
+    shares_account_with: Vec<String>,
+}
+
+/// [`Account`], on the wire. No `accountUuid`: it exists to tell two profiles of
+/// one login apart from two that merely look alike, which [`ProfileSummary`]
+/// already did on this listing's behalf (`shares_account_with`), so repeating the
+/// id here would hand a caller a second, weaker way to reach the same fact.
+#[derive(Debug, Serialize)]
+struct AccountWire {
+    email: Option<String>,
+    organization: Option<String>,
+    #[serde(rename = "seatTier")]
+    seat_tier: Option<String>,
+}
+
+fn json_row(row: &ProfileSummary) -> serde_json::Value {
+    let wire = RowWire {
+        name: row.name.clone(),
+        default: row.name == DEFAULT_PROFILE,
+        state: match row.state {
+            ProfileState::Authed => "authed",
+            ProfileState::NoCredential => "not-logged-in",
+        },
+        account: row.account.as_ref().map(|account| AccountWire {
+            email: account.email.clone(),
+            organization: account.organization.clone(),
+            seat_tier: account.seat_tier.clone(),
+        }),
+        shares_account_with: row.shares_account_with.clone(),
+    };
+    serde_json::to_value(wire).expect("RowWire holds only strings, bools and options of them")
 }
 
 #[cfg(test)]
