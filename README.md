@@ -19,7 +19,7 @@ one argument instead of a clone, a config file and a build command.
 [![GitHub pull-requests merged](https://badgen.net/github/merged-prs/blooop/devlaunch)](https://github.com/blooop/devlaunch/pulls?q=is%3Amerged)
 [![GitHub release](https://img.shields.io/github/release/blooop/devlaunch.svg)](https://GitHub.com/blooop/devlaunch/releases/)
 [![PyPI](https://img.shields.io/pypi/v/devlaunch)](https://pypi.org/project/devlaunch/)
-[![Conda](https://img.shields.io/badge/conda-v0.49.0+fork.2-brightgreen?logo=anaconda)](https://prefix.dev/channels/@jsmithrobotics/jsmithrobotics/packages/devlaunch)
+[![Conda](https://img.shields.io/badge/conda-v0.49.0+fork.3-brightgreen?logo=anaconda)](https://prefix.dev/channels/@jsmithrobotics/jsmithrobotics/packages/devlaunch)
 [![License](https://img.shields.io/github/license/blooop/devlaunch)](https://opensource.org/license/mit/)
 [![Platform](https://img.shields.io/badge/platform-linux--64-blue)](https://github.com/blooop/devlaunch/releases)
 [![Pixi Badge](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/prefix-dev/pixi/main/assets/badge/v0.json)](https://pixi.sh)
@@ -36,7 +36,7 @@ one argument instead of a clone, a config file and a build command.
 Needs [Docker](https://docs.docker.com/engine/install/) on the machine, usable without `sudo`.
 
 ```bash
-pixi global install --channel https://prefix.dev/jsmithrobotics/jsmithrobotics --channel https://prefix.dev/blooop --channel conda-forge devlaunch=0.49.0+fork.2
+pixi global install --channel https://prefix.dev/jsmithrobotics/jsmithrobotics --channel https://prefix.dev/blooop --channel conda-forge devlaunch=0.49.0+fork.3
 dl --install && source ~/.bashrc
 ```
 
@@ -126,7 +126,7 @@ GitHub still works from inside either way, over HTTPS with the `gh` token `dl` f
 ### pixi (recommended)
 
 ```bash
-pixi global install --channel https://prefix.dev/jsmithrobotics/jsmithrobotics --channel https://prefix.dev/blooop --channel conda-forge devlaunch=0.49.0+fork.2
+pixi global install --channel https://prefix.dev/jsmithrobotics/jsmithrobotics --channel https://prefix.dev/blooop --channel conda-forge devlaunch=0.49.0+fork.3
 ```
 
 That is the minimal install, and it is deliberately minimal: `dl`, `aid`, and the `devpod` they
@@ -335,7 +335,7 @@ clone, and [docs/cleanup.md](docs/cleanup.md) says what it carries one past and 
 
 ```bash
 $ dl --version
-dl 0.49.0+fork.2
+dl 0.49.0+fork.3
 ```
 
 `--devcontainer <variant|path>` picks a non-default `devcontainer.json`. A bare name means
