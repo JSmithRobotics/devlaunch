@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! dl owner/repo@branch -- claude --dangerously-skip-permissions \
-//!     --remote-control=owner/repo@branch 'fix the flaky test'
+//!     --remote-control=repo-branch-5uoe 'fix the flaky test'
 //! ```
 //!
 //! Everything that decides how a workspace is obtained — the bare repo cache, the
@@ -107,9 +107,12 @@ fn run(argv: &[String]) -> i32 {
     // No arguments is the help *and* a failure, which is Python's pair of endings for
     // one body: somebody who typed `aid` asked for a workspace and named none, and
     // somebody who typed `aid --help` got what they asked for.
-    let asked_for_help = argv
-        .first()
-        .is_some_and(|word| word == "--help" || word == "-h");
+    let is_help = |word: &String| word == "--help" || word == "-h";
+    let asked_for_help = match argv {
+        [first, second, ..] if first == rewrite::RESUME_WORD => is_help(second),
+        [first, ..] => is_help(first),
+        [] => false,
+    };
     // A bare `aid` on a terminal picks a workspace below, as a bare `dl` does. The
     // help is for a run with nobody at a terminal to pick.
     let picks = argv.is_empty() && dl::interactive_terminal();
@@ -142,13 +145,21 @@ fn run(argv: &[String]) -> i32 {
         agent: agent.as_deref(),
         remote_control: remote_control.as_deref(),
     };
-    // A line with no workspace, on a terminal, gets dl's workspace picker, and the
-    // id it answers is added to the end of the line: after the leading flags, which
-    // is where a typed spec goes. From here on the line is that longer one, because
-    // the agent picker parses it again.
+    // A line with no workspace, on a terminal, gets dl's workspace picker. For
+    // `aid resume` the pick completes the line it parsed to. For any other line the
+    // id is added to the end of the line, after the leading flags, which is where a
+    // typed spec goes, and from here on the line is that longer one, because the
+    // agent picker parses it again.
     let with_pick: Vec<String>;
     let (argv, parsed) = match rewrite::parse_aid_args(argv, environment) {
-        Ok(parsed) => (argv, parsed),
+        Ok(rewrite::Line::Ready(parsed)) => (argv, parsed),
+        // `aid resume` with no workspace. The pick comes before everything below,
+        // which is all about one named workspace, so from here on this line is an
+        // `aid resume <id>` like any other.
+        Ok(rewrite::Line::Unpicked(unpicked)) => match dl::pick_workspace() {
+            Ok(workspace_id) => (argv, unpicked.picked(workspace_id)),
+            Err(code) => return code,
+        },
         Err(UsageError::NoWorkspace) if dl::interactive_terminal() => {
             let spec = match dl::pick_workspace() {
                 Ok(spec) => spec,
@@ -156,7 +167,12 @@ fn run(argv: &[String]) -> i32 {
             };
             with_pick = argv.iter().cloned().chain([spec]).collect();
             match rewrite::parse_aid_args(&with_pick, environment) {
-                Ok(parsed) => (with_pick.as_slice(), parsed),
+                Ok(rewrite::Line::Ready(parsed)) => (with_pick.as_slice(), parsed),
+                // A line that names its workspace is never unpicked.
+                Ok(rewrite::Line::Unpicked(_)) => {
+                    eprintln!("{}", refusal(&UsageError::NoWorkspace));
+                    return 1;
+                }
                 Err(refused) => {
                     eprintln!("{}", refusal(&refused));
                     return 1;
@@ -190,7 +206,7 @@ fn run(argv: &[String]) -> i32 {
             return 130;
         }
     };
-    let Some(dl_args) = rewrite::build_dl_args(&parsed) else {
+    let Some(dl_args) = rewrite::build_dl_args(&parsed, &dl::workspace_id_of) else {
         // Unreachable by a command line: the parse only ever answers with an agent
         // from the table, and a line that starts no agent cannot fail to build one.
         // Reported rather than panicked on, in the words the refusal for an invented
@@ -306,6 +322,11 @@ fn refusal(refused: &UsageError) -> String {
                 .collect::<Vec<String>>()
                 .join(", ")
         ),
+        UsageError::ResumeTakesNoPrompt { words } => format!(
+            "aid resume takes a workspace and nothing after it, not {}: the agent's own \
+             picker chooses the session. Use aid resume [<workspace>].",
+            dl::python_repr(words)
+        ),
     }
 }
 
@@ -340,6 +361,14 @@ Usage:
     aid                                    Pick a workspace, then start the agent
     aid <user/repo>[@branch] [prompt...]   Open the workspace and start the agent
     aid <workspace> [prompt...]            Same, for an existing workspace or ./path
+    aid resume [<workspace>]               Reopen an earlier agent session in the
+                                           workspace. With no workspace, pick one
+                                           from dl's picker first
+
+`aid resume` starts the agent the way a fresh launch does (same agent flag,
+full-auto, Remote Control named after the workspace) and hands it its own
+resume words: claude and codex open their session picker, and gemini
+reopens its latest session.
 
 With no workspace on a terminal, aid lets you pick one of your workspaces, as
 dl does.
@@ -354,6 +383,7 @@ Then type the prompt free of shell quoting and press Enter to launch. A paste
 keeps its line breaks, and Alt-Enter or Ctrl-J adds a line. An empty Enter
 (or Ctrl-D) starts the agent's plain session. Esc in a picker, or Ctrl-C at
 the prompt, stops the boot and launches nothing.
+
 Piping stdin or setting DEVLAUNCH_NO_TTY=1 skips the question and launches
 one-shot, as a prompt on the command line always has.
 
@@ -379,7 +409,7 @@ Options:
     --no-remote-control, --no-remote
                                      Start a plain local session. Remote Control is
                                      on by default: claude is started under the
-                                     workspace you typed as the session name, so the
+                                     workspace id as the session name, so the
                                      session in this terminal is also readable and
                                      steerable from claude.ai/code and the Claude
                                      app. It is claude only, and it needs a
@@ -414,6 +444,8 @@ Examples:
     aid --no-remote blooop/devlaunch           # Nothing but the session in front of you
     aid --model opus --effort max blooop/devlaunch
                                                # Pick the model and how hard it thinks
+    aid resume                                 # Pick a workspace, then a session in it
+    aid resume blooop/devlaunch@fix/42         # Pick a session in that workspace
     aid blooop/devlaunch@fix/42 fix the bug --rm
                                                # The line above, recalled, with the
                                                # workspace deleted once the agent is
@@ -602,6 +634,14 @@ mod tests {
         );
         assert!(help.contains("empty Enter"), "{help}");
         assert!(help.contains("DEVLAUNCH_NO_TTY=1"), "{help}");
+    }
+
+    #[test]
+    fn the_help_names_resume_and_what_it_opens() {
+        let help = help();
+
+        assert!(help.contains("aid resume [<workspace>]"), "{help}");
+        assert!(help.contains("from dl's picker"), "{help}");
     }
 
     #[test]

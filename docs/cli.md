@@ -101,6 +101,27 @@ that clone last fetched, the attach says how far behind before it hands over the
 shell. [How fresh a launch is](workspaces.md#how-fresh-a-launch-is) is the whole
 of the freshness rules, and the section under it names which verb moves what.
 
+## A branch link as the spec
+
+The link a browser shows for a branch is accepted as the spec itself:
+
+```bash
+dl https://github.com/owner/repo/tree/feature/x
+```
+
+It is read as `owner/repo@feature/x`, with no lookup, so it opens the same
+workspace that spec does. The scheme and `www.` are optional, and a trailing
+slash, a query or a fragment is ignored. Every segment after `tree/` is taken as
+the branch, because GitHub spells a branch with a slash in it as more segments.
+So a link to a directory inside a branch, `.../tree/main/docs`, asks for a branch
+named `main/docs`, and the checkout reports that no such branch exists. Only
+`github.com` links are read this way, since `owner/repo` expands to a GitHub
+remote. A link to any other host is handed to devpod as typed.
+
+The link is not accepted after `owner/repo@` the way a pull request link is.
+`dl owner/repo@https://github.com/owner/repo/tree/main` is read as a URL and the
+clone fails. Name the whole link instead.
+
 ## A pull request where a branch goes
 
 A review request arrives as a link, not as a branch name, and turning one into the
@@ -590,7 +611,7 @@ type differently per agent:
 
 The flag and not the whole command line, which is longer than one column: a default
 `claude` launch also carries `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` and a
-`--remote-control=<workspace>`, and gemini takes its initial prompt through
+`--remote-control=<workspace id>`, and gemini takes its initial prompt through
 `--prompt-interactive`.
 
 One rule, three spellings, and the table in `rust/aid/src/rewrite.rs` is where they
@@ -642,10 +663,26 @@ machine. Remote Control is what also makes it readable and steerable from
 claude.ai/code and the Claude mobile app, so you can send it the next thing from a
 phone without the workspace being anywhere but where it was.
 
-**The session is named after the workspace you typed**, so the list on claude.ai reads
-as the workspaces you opened rather than as a row of untitled sessions. `aid` always
-sends a name, because `claude --remote-control [name]` takes an optional one and a bare
-flag would read the first word of your prompt as the name instead.
+**The session is named after the workspace id**, the name `dl --ls` prints, so the list
+on claude.ai reads as the workspaces you opened rather than as a row of untitled
+sessions. `aid` always sends a name, because `claude --remote-control [name]` takes an
+optional one and a bare flag would read the first word of your prompt as the name
+instead.
+
+The id and not the spec you typed, because the session name is also the address other
+agents message it by. Claude Code's `SendMessage` refuses any address with a `/` in it
+("to must be a bare teammate name"), so a session named `blooop/devlaunch@fix/42` was
+listed in every other agent's `ListAgents` and could be messaged by none of them.
+`devlaunch-fix-42-eshv` has no `/`, is unique, and is the name devpod, the hostname
+stage and `dl --ls` already use. `aid` asks dl which workspace the spec names the way
+`dl <ws> kill` does: a bare id costs nothing, and a triple costs one `devpod status`
+with a five second limit, after which the id derived from the triple is used.
+
+This needs Remote Control to connect, which needs a full claude.ai login in the
+container. A repo whose devcontainer mounts your `~/.claude` has one. A repo with no
+devcontainer gets the forwarded `CLAUDE_CODE_OAUTH_TOKEN`, which Claude Code limits to
+inference, so Remote Control does not start there until you run `claude auth login`
+inside the workspace.
 
 ### Turning it off
 
@@ -797,6 +834,48 @@ a moment late went on to the agent as keystrokes.
 A prompt taller than the screen shows its last lines under a line that counts the
 ones not shown. All of it is sent. Keys typed after the Enter are not read, so
 they reach the agent.
+
+## `aid resume`: back into a session after a restart
+
+```bash
+aid resume [<workspace>]
+```
+
+A machine that turns off ends every agent session and stops every container. The
+conversation is not lost: the agent keeps it on disk inside the container, and a
+stopped container keeps its disk.
+`aid resume` is the way back in, in one command. With no workspace it opens the same
+picker `dl` does. Then it starts the workspace and hands the agent its own resume
+words, so for claude it is exactly
+
+```bash
+dl <picked-id> -- CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude --dangerously-skip-permissions --remote-control=<picked-id> --resume
+```
+
+and claude's picker lists the sessions that were run in that workspace. Everything a
+fresh `aid` launch does still happens: the same full-auto flag, the same Remote Control
+name, `--no-remote` and `--rm` from either end of the line, and the agent flags. The
+words per agent are these:
+
+| Agent | Words | What the agent does |
+|---|---|---|
+| `claude` | `--resume` | Opens its session picker |
+| `codex` | `resume` | Opens its session picker |
+| `gemini` | `--resume` | Reopens its latest session. Its picker is `/resume`, inside the session |
+
+The claude row was checked against `claude --help`. The codex and gemini rows follow
+those CLIs' documentation and were not run.
+
+`resume` is a verb only in the first positional slot, the way `dl stop` is. After the
+workspace it is prompt text like any other word, so `aid owner/repo resume the work`
+still sends a prompt. A workspace that is itself called `resume` is `aid resume
+resume`. Words after the workspace on a resume line are refused before anything
+boots, because the three agents would each read them as something different: a
+search term, a session id, a session index.
+
+The picker is asked for before the line is built, not handed to `dl -- <command>` to
+open. The line names the Remote Control session after the workspace id, and the id is
+not known until the pick is made.
 
 ## `kill`: the workspace that will not answer
 

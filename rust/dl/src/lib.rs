@@ -376,19 +376,50 @@ pub fn pull_request_spec(word: &str) -> Result<String, i32> {
     commands::resolve_pull_request(&ProcessRunner, word.to_owned()).map_err(commands::Ending::code)
 }
 
-/// Let the person pick one workspace, for `aid` with none named: the workspace id,
-/// or the code to exit with when there is nothing to launch (a quit picker, no
-/// workspaces, no devpod).
+/// The workspace id `spec` names, the way `dl <spec> kill` works it out.
 ///
-/// **Public for `aid`, and for that one reason.** A bare `dl` picks and launches in
-/// one call. `aid` has to hold the workspace itself before anything launches,
-/// because the agent, model and effort pickers, the banner and the background boot
-/// all come between the pick and the launch.
+/// **Public for `aid`, which names Claude Code's Remote Control session with it.**
+/// The session used to be named after the spec as typed, and `blooop/bencher@fix`
+/// is a name no other agent can message: Claude Code's `SendMessage` reads a `/` in
+/// its `to` as `team/member` and refuses the address before it looks for a peer
+/// ("to must be a bare teammate name"). The id has no `/`, is unique, and is the
+/// name `dl --ls`, devpod and the container's hostname already use, so the session
+/// takes a name that exists rather than a fourth rendering of the triple.
+///
+/// Resolved through [`target::resolve`] under [`target::Vetting::Unnecessary`]
+/// rather than derived from the spec, because an `owner/repo` with no ref has no id
+/// until its default branch is known, and a workspace made under an older id
+/// scheme is called what its record says. That is the resolution `kill` uses: a
+/// bare id costs no round trip, a triple costs one bounded `devpod status`, and a
+/// devpod that does not answer in time leaves the derived id. Nothing is cloned
+/// or created, and the notices it would say are dropped, because the launch that
+/// follows says them.
+///
+/// `None` is a spec no workspace id can be found for: one `plan` refuses, or dl's
+/// records could not be opened. The launch refuses the first itself.
+pub fn workspace_id_of(spec: &str) -> Option<String> {
+    target::workspace_id_of(&ProcessRunner, spec)
+}
+
+/// The id of one workspace the user picks from dl's own picker, or the exit code
+/// to end on.
+///
+/// **Public for `aid resume`, which needs the id before it can build its line.**
+/// `dl -- <command>` with no workspace already opens this picker, and a plain
+/// `aid resume` could have ridden on that. It does not, because the agent line
+/// names Claude Code's Remote Control session after the workspace id
+/// ([`workspace_id_of`]), and inside dl's picker the line is already built. So aid
+/// asks for the pick first and builds a line for a named workspace, which is the
+/// path every other aid launch takes.
+///
+/// A bare `aid`, and a line of flags with no workspace, take the same pick for the
+/// same reason: the agent, model and effort pickers, the banner and the background
+/// boot all come between the pick and the launch.
+///
+/// A pick that never came (Esc, an empty list, no terminal) is `Err(1)`, with the
+/// reason on stderr where there is one.
 pub fn pick_workspace() -> Result<String, i32> {
-    let Ok(cache) = session::cache_dir() else {
-        return Err(commands::Ending::Refused.code());
-    };
-    commands::pick_one_workspace(&ProcessRunner, &cache).map_err(commands::Ending::code)
+    commands::pick_one(&ProcessRunner).map_err(commands::Ending::code)
 }
 
 /// What `spec` states it is called, without resolving anything.
@@ -836,6 +867,13 @@ mod early_name_tests {
         assert_eq!(
             early_name("blooop/devlaunch@feature/auth", no_records()).as_deref(),
             Some("devlaunch@feature/auth")
+        );
+        assert_eq!(
+            early_name(
+                "https://github.com/blooop/devlaunch/tree/feature/auth",
+                no_records()
+            ),
+            early_name("blooop/devlaunch@feature/auth", no_records())
         );
         // Measured on live herdr 0.8.2: `aid blooop/rocker@nb1` named the tab
         // `rocker@nb1` during the editor and the launch afterwards named it

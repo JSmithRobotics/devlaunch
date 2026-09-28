@@ -92,6 +92,15 @@ const TAG_REFS_QUERY: [&str; 3] = [
     "refs/tags/",
 ];
 
+/// The refs `--all` reaches that hold no work of their own, as the `--exclude`s
+/// that take them out of the `--all` right after them.
+///
+/// Written once because the two queries that use it are compared to each other:
+/// [`Git::commits_only_tags_reach`] subtracts from what [`Git::unpushed_commits`]
+/// counts, and two lists would let a commit be counted by one and not the other.
+/// See [`Git::unpushed_commits`] for why each is here.
+const NOT_WORK: [&str; 2] = ["--exclude=refs/tags/*", "--exclude=refs/original/*"];
+
 /// What git answered, or that it did not.
 ///
 /// `Said` carries the output shaped the way the verb that asked for it needs —
@@ -456,24 +465,67 @@ impl<'r> Git<'r> {
     /// short. Untracked entries start `??` and were unharmed, which is exactly
     /// why the tests missed it.
     fn about(&self, repo: &Path, args: &[&str]) -> GitAnswer<String> {
-        let root = pinned_root(repo);
-        let mut argv = vec![
-            format!("--git-dir={}", root.join(".git").display()),
-            format!("--work-tree={}", root.display()),
-        ];
-        argv.extend(args.iter().map(|arg| (*arg).to_owned()));
-        let spec = SpawnSpec::new(
-            Invocation::new(PROGRAM)
-                .with_args(argv)
-                .with_cwd(repo.to_path_buf()),
-        )
-        .with_timeout(ABOUT_ONE_REPO);
+        let spec = SpawnSpec::new(pinned(repo, args)).with_timeout(ABOUT_ONE_REPO);
         // Named by the whole argument list rather than by a verb: this family's
         // fallback message is `workspace_state._git`'s, which spells out what was
         // asked ("git status --porcelain exited 128"), where every other site
         // names the subcommand alone.
         self.captured(&args.join(" "), &spec)
             .map(|stdout| stdout.trim_end_matches('\n').to_owned())
+    }
+
+    /// Bring *clone*'s remote-tracking refs up to what its `origin` has now.
+    ///
+    /// The one network call the delete guard makes, and only when it is about to
+    /// refuse over unpushed commits alone (devlaunch#638). A workspace clone is
+    /// cut from the bare cache with no fetch of its own, and a push to a URL
+    /// rather than through `origin` moves nothing in `refs/remotes/origin/*`, so
+    /// the clone can say `ahead 4` about four commits the forge already has.
+    ///
+    /// Pinned like every other question asked of a workspace clone, for
+    /// [`Git::about`]'s reason: a fetch into an *ancestor* repository would write
+    /// into somebody's dotfiles, and a guard reading the ancestor's refs
+    /// afterwards is devlaunch#171 again.
+    ///
+    /// The flags are chosen so the fetch can take commits *out* of the unpushed
+    /// count and cannot quietly add them:
+    ///
+    /// - `--no-prune`, spelled out. A branch merged and deleted upstream leaves
+    ///   its remote-tracking ref behind, and that ref is what keeps its commits
+    ///   counted as pushed. Pruning it would turn every squash-merged branch
+    ///   into unpushed work. Leaving `--prune` off is not enough: a host with
+    ///   `fetch.prune` or `remote.origin.prune` set prunes anyway, and the
+    ///   command-line flag beats both.
+    /// - `--no-tags`. Which tags came off the remote is the bare cache's to say
+    ///   (#487), and a tag the remote moved is rejected with
+    ///   `would clobber existing tag`, which fails the whole fetch.
+    /// - The refspec `+refs/heads/*:refs/remotes/origin/*` on the command line,
+    ///   with an empty `--refmap=`. It is what `git clone` wrote, but the
+    ///   clone's `remote.origin.fetch` is config the container can edit, and a
+    ///   `+refs/heads/*:refs/heads/*` there would force-move local branches. A
+    ///   command-line refspec alone does not stop that, because git still
+    ///   applies the configured one as the refmap. The empty `--refmap=` turns
+    ///   it off.
+    ///
+    /// The refspec forces. So a branch the remote rewrote does move its tracking
+    /// ref off the old commits, and those commits then count. That is the truth
+    /// about the remote, not a regression: the old commits are no longer on it.
+    ///
+    /// `GIT_TERMINAL_PROMPT=0` because this runs under *limit*: a credential
+    /// prompt would eat the deadline and then be killed. A remote that asks for
+    /// one is a refusal, and the caller keeps the clone.
+    pub(crate) fn fetch_origin(&self, clone: &Path, limit: Duration) -> GitAnswer<String> {
+        let args = [
+            "fetch",
+            "--no-tags",
+            "--no-prune",
+            "--refmap=",
+            "origin",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ];
+        let spec = SpawnSpec::new(pinned(clone, &args).with_var("GIT_TERMINAL_PROMPT", "0"))
+            .with_timeout(limit);
+        self.captured("fetch", &spec)
     }
 
     /// The branch *clone* has checked out, as `rev-parse --abbrev-ref HEAD`.
@@ -556,7 +608,7 @@ impl<'r> Git<'r> {
     /// `--remotes` rather than any branch's upstream, so work pushed under another
     /// name, or merged and fetched back, is correctly not counted as lost.
     ///
-    /// **`refs/tags` is the one thing `--all` reaches that is excluded, and #485
+    /// **`refs/tags` is the first thing `--all` reaches that is excluded, and #485
     /// is why.** A tag the remote carries but no remote *branch* reaches any more
     /// reads as unpushed, and that is the ordinary state of a repository which
     /// tags releases on branches it then deletes: one such repository carries 265
@@ -568,9 +620,18 @@ impl<'r> Git<'r> {
     /// for safety. It teaches `--force` as the ordinary way to delete a workspace,
     /// and a habit of `--force` is exactly the clone with real work in it going.
     ///
-    /// `--exclude` binds to the `--all` that follows it and drops the tags out of
-    /// it alone, so every other ref `--all` reaches is still asked about: local
+    /// `--exclude` binds to the `--all` that follows it and drops the excluded refs
+    /// out of it, so every other ref `--all` reaches is still asked about: local
     /// branches, every worktree's HEAD including detached ones, and `refs/stash`.
+    ///
+    /// **`refs/original` is excluded as well, for the same reason.** It is where
+    /// `git filter-branch` keeps the old tips of the refs it rewrote: a backup,
+    /// like the reflog, which `--all` never reached. After a rewrite that was
+    /// pushed, every commit under it reads as unpushed although the work is on
+    /// the remote in its rewritten form. That is how a kinisi_ros workspace
+    /// refused `rm` over five commits that were all pushed. A rewrite that was
+    /// *not* pushed loses nothing by this: the rewritten branch is an ordinary
+    /// local branch, and its own commits still count.
     ///
     /// **The tags that are local come back in by name, and #487 is why.** A
     /// blanket exclusion gives up one shape of work: a commit reachable *only*
@@ -596,7 +657,9 @@ impl<'r> Git<'r> {
         clone: &Path,
         local_tags: &[String],
     ) -> GitAnswer<String> {
-        let mut args: Vec<&str> = vec!["log", "--oneline", "--exclude=refs/tags/*", "--all"];
+        let mut args: Vec<&str> = vec!["log", "--oneline"];
+        args.extend(NOT_WORK);
+        args.push("--all");
         args.extend(local_tags.iter().map(String::as_str));
         args.extend(["--not", "--remotes"]);
         self.about(clone, &args)
@@ -648,7 +711,9 @@ impl<'r> Git<'r> {
     ) -> GitAnswer<String> {
         let mut args: Vec<&str> = vec!["log", "--oneline"];
         args.extend(local_tags.iter().map(String::as_str));
-        args.extend(["--not", "--remotes", "--exclude=refs/tags/*", "--all"]);
+        args.extend(["--not", "--remotes"]);
+        args.extend(NOT_WORK);
+        args.push("--all");
         self.about(clone, &args)
     }
 
@@ -1501,6 +1566,19 @@ fn pinned_root(repo: &Path) -> PathBuf {
     std::fs::canonicalize(repo)
         .or_else(|_| std::path::absolute(repo))
         .unwrap_or_else(|_| repo.to_path_buf())
+}
+
+/// git, told that *repo* is the whole of what it may touch. See [`Git::about`].
+fn pinned(repo: &Path, args: &[&str]) -> Invocation {
+    let root = pinned_root(repo);
+    let mut argv = vec![
+        format!("--git-dir={}", root.join(".git").display()),
+        format!("--work-tree={}", root.display()),
+    ];
+    argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+    Invocation::new(PROGRAM)
+        .with_args(argv)
+        .with_cwd(repo.to_path_buf())
 }
 
 /// The environment for the two verbs whose failure is read from words git

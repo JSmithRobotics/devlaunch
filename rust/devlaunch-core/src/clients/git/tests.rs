@@ -138,13 +138,15 @@ fn the_pinned_verbs_ask_exactly_what_python_asked() {
     // `--all` comes first: `log --oneline --not --remotes --all` is silently
     // always empty, which would report every clone as safe to delete. And
     // `--exclude` binds to the *next* ref-set option, so it has to sit
-    // immediately before `--all` to take the tags out of it (#485).
+    // immediately before `--all` to take the tags out of it (#485), and
+    // filter-branch's `refs/original` backups with them.
     assert_eq!(
         strs(&argv(&fake))[3..],
         [
             "log",
             "--oneline",
             "--exclude=refs/tags/*",
+            "--exclude=refs/original/*",
             "--all",
             "--not",
             "--remotes"
@@ -162,6 +164,7 @@ fn the_pinned_verbs_ask_exactly_what_python_asked() {
             "log",
             "--oneline",
             "--exclude=refs/tags/*",
+            "--exclude=refs/original/*",
             "--all",
             "refs/tags/backup",
             "--not",
@@ -191,6 +194,7 @@ fn the_attribution_query_is_the_unpushed_one_with_the_sides_swapped() {
             "--not",
             "--remotes",
             "--exclude=refs/tags/*",
+            "--exclude=refs/original/*",
             "--all"
         ]
     );
@@ -660,6 +664,43 @@ fn the_background_sweep_s_bound_reaches_the_spawn() {
     Git::new(&fake).fetch_all(Path::new("/cache/o/r/.bare"), Some(Duration::from_secs(60)));
 
     assert_eq!(timeout(&fake), Some(Duration::from_secs(60)));
+}
+
+#[test]
+fn the_guard_s_fetch_is_pinned_bounded_and_cannot_prompt() {
+    // devlaunch#638. Pinned, because a fetch into an ancestor repository is a
+    // write to somebody's dotfiles. `--no-prune`, because pruning a merged branch
+    // puts its commits back into the unpushed count and a host's `fetch.prune`
+    // would otherwise do it. `--no-tags`, because a moved tag fails the whole
+    // fetch. The refspec on the command line with an empty `--refmap=`, so the
+    // clone's own `remote.origin.fetch` cannot aim the fetch at local branches.
+    // The bound is the caller's, and no prompt, because a prompt under a bound
+    // eats it.
+    let fake = ScriptedRunner::new();
+
+    Git::new(&fake).fetch_origin(Path::new("/ws"), Duration::from_secs(30));
+
+    assert_eq!(
+        strs(&argv(&fake)),
+        [
+            "git",
+            "--git-dir=/ws/.git",
+            "--work-tree=/ws",
+            "fetch",
+            "--no-tags",
+            "--no-prune",
+            "--refmap=",
+            "origin",
+            "+refs/heads/*:refs/remotes/origin/*"
+        ]
+    );
+    assert_eq!(cwd(&fake).as_deref(), Some(Path::new("/ws")));
+    assert_eq!(timeout(&fake), Some(Duration::from_secs(30)));
+    assert!(
+        env_entries(&fake).contains(&("GIT_TERMINAL_PROMPT".to_owned(), "0".to_owned())),
+        "{:?}",
+        env_entries(&fake)
+    );
 }
 
 #[test]
@@ -1170,8 +1211,9 @@ fn nothing_here_spawns_more_than_once_per_verb() {
     git.tags_in_clone(Path::new("/ws"));
     git.tags_in_bare(Path::new("/cache/.bare"));
     git.commits_only_tags_reach(Path::new("/ws"), &[]);
+    git.fetch_origin(Path::new("/ws"), Duration::from_secs(30));
 
-    assert_eq!(fake.call_count(), 31, "one spawn per verb, 31 verbs");
+    assert_eq!(fake.call_count(), 32, "one spawn per verb, 32 verbs");
     assert!(
         fake.calls()
             .iter()

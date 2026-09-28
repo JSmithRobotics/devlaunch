@@ -45,6 +45,21 @@ struct Agent {
     /// Whether this agent signs in with the host's Claude login, which is what
     /// `--claude-profile` chooses. The account picker is offered for these only.
     claude_login: bool,
+    /// The words that reopen one of this agent's earlier sessions instead of
+    /// starting a new one: what `aid resume` appends in place of a prompt.
+    ///
+    /// Words rather than a flag, because the agents do not agree on the shape.
+    /// claude takes a flag, and a bare `--resume` opens its session picker. codex
+    /// takes a subcommand, and a bare `resume` opens its picker too. gemini takes a
+    /// flag, and a bare `--resume` reopens the latest session, since gemini keeps
+    /// its picker inside the session (`/resume`). The words go last on the line,
+    /// because claude's `--resume [value]` takes an optional value and would read
+    /// any word after it as a search term.
+    ///
+    /// The claude row was read off `claude --help` (2.1.x). The codex and gemini
+    /// rows are those CLIs' documented spellings and were not run where this was
+    /// written, because neither was installed there.
+    resume: &'static [&'static str],
 }
 
 /// How one agent is told one setting: a flag word, then the value behind a prefix.
@@ -82,6 +97,15 @@ impl Spelling {
         [self.flag.to_owned(), format!("{}{value}", self.prefix)]
     }
 }
+
+/// The word that makes a line reopen an earlier session: `aid resume [workspace]`.
+///
+/// A verb and not a flag, for dl's reason: `dl stop` is the verb with no
+/// workspace, and a verb in the first slot is what the picker hangs off. Only the
+/// first positional word is read this way, so `aid owner/repo resume the work` is
+/// still a prompt, and `aid ./resume` still names a directory. The cost is dl's
+/// cost too: a workspace called `resume` has to be written `aid resume resume`.
+pub(crate) const RESUME_WORD: &str = "resume";
 
 /// The agent this build starts when nothing picks one.
 pub(crate) const DEFAULT_AGENT: &str = "claude";
@@ -180,6 +204,7 @@ const AGENTS: &[(&str, Agent)] = &[
                 offered: CLAUDE_EFFORTS,
             }),
             claude_login: true,
+            resume: &["--resume"],
         },
     ),
     (
@@ -201,6 +226,7 @@ const AGENTS: &[(&str, Agent)] = &[
                 offered: CODEX_EFFORTS,
             }),
             claude_login: false,
+            resume: &["resume"],
         },
     ),
     (
@@ -217,6 +243,7 @@ const AGENTS: &[(&str, Agent)] = &[
             },
             effort: None,
             claude_login: false,
+            resume: &["--resume"],
         },
     ),
 ];
@@ -462,7 +489,12 @@ pub(crate) fn relaunched(
 ) -> Result<AidArgs, UsageError> {
     let mut line = launcher.words();
     line.extend(argv.iter().cloned());
-    parse_aid_args(&line, environment)
+    match parse_aid_args(&line, environment)? {
+        Line::Ready(parsed) => Ok(parsed),
+        // Only a line with no workspace is unpicked, and the picker only runs for a
+        // line that named one.
+        Line::Unpicked(_) => Err(UsageError::NoWorkspace),
+    }
 }
 
 /// Whether `agent` signs in with the host's Claude login.
@@ -525,6 +557,13 @@ pub(crate) enum UsageError {
     /// Carries the agent for the reason [`Self::RemoteControlUnsupported`] does:
     /// `DEVLAUNCH_AID_AGENT` can be what chose it.
     EffortUnsupported { agent: String },
+    /// `aid resume <workspace>` with words after the workspace.
+    ///
+    /// Refused rather than handed on, because the words have no one place to go:
+    /// claude would read them as a search term for its picker, codex as a session
+    /// id, and gemini as a session index. A line that means three things by agent
+    /// is a line nobody can predict.
+    ResumeTakesNoPrompt { words: String },
 }
 
 /// The variables aid reads, resolved by the caller.
@@ -575,8 +614,9 @@ pub(crate) enum RemoteControlRequest {
 /// than by anything downstream re-checking.
 ///
 /// No session name is carried, because the name is not a second thing to decide: it
-/// is always the spec the person typed, which [`AidArgs`] already holds, and two
-/// fields that must agree are two fields that can disagree.
+/// is always the id of the workspace the spec names, which [`build_dl_args`] asks
+/// for when it builds the line, and a field holding it beside the spec would be two
+/// fields that must agree and so two fields that can disagree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RemoteControl {
     /// Started with the agent's Remote Control flag, named after the workspace.
@@ -661,6 +701,19 @@ pub(crate) enum Task {
         /// agent: an effort is only ever here beside an agent that can take one.
         tuning: Tuning,
     },
+    /// Reopen one of the agent's earlier sessions in the workspace: `aid resume`.
+    ///
+    /// Its own arm and not an [`Task::Agent`] with a flag, because it has no prompt.
+    /// The agent's own picker is what chooses the session, so a prompt beside it
+    /// would be a field to ignore, and the interactive editor, which asks for a
+    /// prompt, must not open for it.
+    Resume {
+        agent: String,
+        /// As on [`Task::Agent`]: settled against the agent's table row.
+        remote_control: RemoteControl,
+        /// As on [`Task::Agent`]: a resumed session can run another model.
+        tuning: Tuning,
+    },
     /// A line spelling a flag this build has retired ([`SUFFIX_RETIRED`]).
     ///
     /// Carries nothing: what it asks dl for is the *refusal*, which is dl's sentence
@@ -689,7 +742,7 @@ impl AidArgs {
     /// caller needs when reporting an agent name the environment invented.
     pub(crate) fn agent(&self) -> Option<&str> {
         match &self.task {
-            Task::Agent { agent, .. } => Some(agent),
+            Task::Agent { agent, .. } | Task::Resume { agent, .. } => Some(agent),
             Task::Retired => None,
         }
     }
@@ -709,7 +762,7 @@ impl AidArgs {
     /// The model and effort an agent line asked for.
     pub(crate) fn tuning(&self) -> Option<&Tuning> {
         match &self.task {
-            Task::Agent { tuning, .. } => Some(tuning),
+            Task::Agent { tuning, .. } | Task::Resume { tuning, .. } => Some(tuning),
             Task::Retired => None,
         }
     }
@@ -717,7 +770,7 @@ impl AidArgs {
     /// The same line with the model and effort the pickers settled. A line that
     /// starts no agent is returned unchanged, as [`Self::with_prompt`] does.
     pub(crate) fn with_tuning(mut self, settled: Tuning) -> Self {
-        if let Task::Agent { tuning, .. } = &mut self.task {
+        if let Task::Agent { tuning, .. } | Task::Resume { tuning, .. } = &mut self.task {
             *tuning = settled;
         }
         self
@@ -748,6 +801,54 @@ impl AidArgs {
     pub(crate) fn with_spec(mut self, spec: String) -> Self {
         self.spec = spec;
         self
+    }
+}
+
+/// What the parse settled: a line that names its workspace, or one that asks for
+/// the picker first.
+///
+/// Two arms rather than an `Option` spec on [`AidArgs`], because only one line can
+/// be missing its workspace — `aid resume` on its own — and everything downstream
+/// of the parse (the pull request lookup, the banner, the boot, the dl line) needs
+/// a workspace to act on. Keeping the gap out here is what lets [`AidArgs::spec`]
+/// stay a `String` that is always there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Line {
+    Ready(AidArgs),
+    /// `aid resume` with no workspace: pick one, then [`Unpicked::picked`].
+    Unpicked(Unpicked),
+}
+
+/// An `aid resume` line waiting for the workspace the picker will choose.
+///
+/// Everything [`AidArgs`] holds except the spec, with the task's fields in place
+/// of a [`Task`], because the only task a line with no workspace can reach is
+/// [`Task::Resume`]. Private fields and one way out, so the only thing that can be
+/// done with it is to name the workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Unpicked {
+    dl_options: Vec<String>,
+    spec_options: Vec<String>,
+    agent: String,
+    remote_control: RemoteControl,
+    tuning: Tuning,
+    agent_typed: bool,
+}
+
+impl Unpicked {
+    /// The same line, for the workspace that was picked.
+    pub(crate) fn picked(self, spec: String) -> AidArgs {
+        AidArgs {
+            spec,
+            dl_options: self.dl_options,
+            spec_options: self.spec_options,
+            agent_typed: self.agent_typed,
+            task: Task::Resume {
+                agent: self.agent,
+                remote_control: self.remote_control,
+                tuning: self.tuning,
+            },
+        }
     }
 }
 
@@ -922,10 +1023,15 @@ fn peel_suffix(argv: &[String]) -> Option<Suffix<'_>> {
 /// A `--rm` can also arrive *before* the spec (`aid --rm owner/repo fix it`), which
 /// is the same request written the other way round: an unrecognised leading flag is
 /// passed through to dl, and dl takes it in either position.
+///
+/// [`RESUME_WORD`] in the spec's place makes it a resume line, and the next
+/// positional word is the spec. With none, the answer is [`Line::Unpicked`] and
+/// the caller asks the picker, unless the line spells a retired flag: that is
+/// [`UsageError::NoWorkspace`], as it is on any other line with no spec.
 pub(crate) fn parse_aid_args(
     argv: &[String],
     environment: Environment<'_>,
-) -> Result<AidArgs, UsageError> {
+) -> Result<Line, UsageError> {
     // Resolved before anything else, and kept even for a line that turns out to
     // start no agent: a `DEVLAUNCH_AID_AGENT` naming an agent that does not exist
     // is broken regardless of what this particular line asked for. Same for a
@@ -940,6 +1046,7 @@ pub(crate) fn parse_aid_args(
     };
     let mut dl_options: Vec<String> = Vec::new();
     let mut spec: Option<String> = None;
+    let mut resuming = false;
     let mut at = 0;
     while at < line.len() {
         let word = line[at].as_str();
@@ -986,13 +1093,29 @@ pub(crate) fn parse_aid_args(
             at += 1;
             continue;
         }
+        // Once, so that `aid resume resume` still reaches a workspace called that.
+        if word == RESUME_WORD && !resuming {
+            resuming = true;
+            at += 1;
+            continue;
+        }
         spec = Some(word.to_owned());
         at += 1;
         break;
     }
-    let Some(spec) = spec else {
+    // The words after the spec, which are a prompt everywhere but a resume line.
+    let rest = &line[at.min(line.len())..];
+    if resuming && !rest.is_empty() {
+        return Err(UsageError::ResumeTakesNoPrompt {
+            words: rest.join(" "),
+        });
+    }
+    // dl is what refuses a retired spelling, and it needs a workspace to be asked
+    // about, so a resume line carrying one goes no further than `aid --stop` does.
+    let retired = names_a_retired_spelling(&trailing);
+    if spec.is_none() && (!resuming || retired) {
         return Err(UsageError::NoWorkspace);
-    };
+    }
     // A run at the end of the line was typed after everything before it, so it wins
     // for the same reason the last of two leading flags does. This is the position
     // the off switch is actually typed in: appending to a recalled line is the cheap
@@ -1009,24 +1132,39 @@ pub(crate) fn parse_aid_args(
     if tuning.effort.is_some() && agent_row(&agent).is_some_and(|row| row.effort.is_none()) {
         return Err(UsageError::EffortUnsupported { agent });
     }
-    let prompt = line[at.min(line.len())..].join(" ");
-    let retired = names_a_retired_spelling(&trailing);
-    Ok(AidArgs {
+    let Some(spec) = spec else {
+        return Ok(Line::Unpicked(Unpicked {
+            dl_options,
+            spec_options: trailing,
+            agent,
+            remote_control,
+            tuning,
+            agent_typed,
+        }));
+    };
+    let task = if retired {
+        Task::Retired
+    } else if resuming {
+        Task::Resume {
+            agent,
+            remote_control,
+            tuning,
+        }
+    } else {
+        Task::Agent {
+            agent,
+            prompt: rest.join(" "),
+            remote_control,
+            tuning,
+        }
+    };
+    Ok(Line::Ready(AidArgs {
         spec,
         dl_options,
         spec_options: trailing,
         agent_typed,
-        task: if retired {
-            Task::Retired
-        } else {
-            Task::Agent {
-                agent,
-                prompt,
-                remote_control,
-                tuning,
-            }
-        },
-    })
+        task,
+    }))
 }
 
 /// The table row for `agent`, when it has one.
@@ -1105,6 +1243,37 @@ pub(crate) fn build_agent_command(
     remote_control: Option<&str>,
     tuning: &Tuning,
 ) -> Option<NonEmpty<String>> {
+    agent_line(agent, Opening::Prompt(prompt), remote_control, tuning)
+}
+
+/// The argv that reopens one of the agent's earlier sessions inside the workspace.
+///
+/// [`build_agent_command`]'s line with the agent's [`Agent::resume`] words where
+/// the prompt would go: the same variables, the same full-auto flag and the same
+/// Remote Control name, so a resumed session is started exactly as the one it
+/// resumes was.
+pub(crate) fn build_resume_command(
+    agent: &str,
+    remote_control: Option<&str>,
+    tuning: &Tuning,
+) -> Option<NonEmpty<String>> {
+    agent_line(agent, Opening::Resume, remote_control, tuning)
+}
+
+/// How a session begins: with a prompt (empty for none), or by reopening one.
+#[derive(Clone, Copy)]
+enum Opening<'a> {
+    Prompt(&'a str),
+    Resume,
+}
+
+/// The one builder behind [`build_agent_command`] and [`build_resume_command`].
+fn agent_line(
+    agent: &str,
+    opening: Opening<'_>,
+    remote_control: Option<&str>,
+    tuning: &Tuning,
+) -> Option<NonEmpty<String>> {
     let started = agent_row(agent)?;
     // No prompt to be interactive about: start the agent's plain session, without
     // the flags that only make sense alongside one.
@@ -1135,9 +1304,13 @@ pub(crate) fn build_agent_command(
     if let Some(named_session) = &named_session {
         words.push(named_session.as_str());
     }
-    if !prompt.is_empty() {
-        words.extend(started.prompt_flags.iter().copied());
-        words.push(prompt);
+    match opening {
+        Opening::Prompt("") => {}
+        Opening::Prompt(prompt) => {
+            words.extend(started.prompt_flags.iter().copied());
+            words.push(prompt);
+        }
+        Opening::Resume => words.extend(started.resume.iter().copied()),
     }
     // Assignments prefixing a command set the variables for that command only, so
     // the agent is the one process that sees them and nothing in the login shell dl
@@ -1175,34 +1348,53 @@ pub(crate) fn build_agent_command(
 /// thing to complain about ahead of the spelling that is the actual problem. The
 /// options still go *after* the spec so that a `--force` among them lands where dl
 /// reads it as the modifier rather than as the workspace's name.
-pub(crate) fn build_dl_args(parsed: &AidArgs) -> Option<Vec<String>> {
+///
+/// `workspace_id_of` answers which workspace the spec names, and is asked only
+/// for a session started with Remote Control, which is named after that id. A
+/// function rather than the answer, because the answer costs a `devpod status` for
+/// a triple and a line with Remote Control off has no use for it; `main` hands in
+/// [`dl::workspace_id_of`], and a test hands in a table.
+pub(crate) fn build_dl_args(
+    parsed: &AidArgs,
+    workspace_id_of: &dyn Fn(&str) -> Option<String>,
+) -> Option<Vec<String>> {
     let mut args = parsed.dl_options.clone();
     args.push(parsed.spec.clone());
     // Behind the spec and ahead of the verb flags, which is where dl reads them as
     // modifiers rather than as the workspace's name.
     args.extend(parsed.spec_options.iter().cloned());
-    match &parsed.task {
+    // The session is named after the workspace, so the list on claude.ai reads as
+    // the workspaces they opened, and by its id rather than the spec as typed,
+    // because the id is a name another agent can message. Claude Code's
+    // `SendMessage` refuses any `to` holding a `/` ("to must be a bare teammate
+    // name"), which every `owner/repo` spec does, and the id is the name `dl --ls`,
+    // devpod and the hostname already use.
+    //
+    // The spec is the fallback only for a spec no id can be found for, which the
+    // launch below then refuses itself. A resumed session takes the same name, so
+    // it is listed on claude.ai where the session it resumes was.
+    let session = |remote_control: &RemoteControl| match remote_control {
+        RemoteControl::On => {
+            Some(workspace_id_of(&parsed.spec).unwrap_or_else(|| parsed.spec.clone()))
+        }
+        RemoteControl::Off => None,
+    };
+    let command = match &parsed.task {
         Task::Agent {
             agent,
             prompt,
             remote_control,
             tuning,
-        } => {
-            args.push("--".to_owned());
-            // The session is named after the spec the person typed, so the list on
-            // claude.ai reads as the workspaces they opened.
-            let session = match remote_control {
-                RemoteControl::On => Some(parsed.spec.as_str()),
-                RemoteControl::Off => None,
-            };
-            args.extend(
-                build_agent_command(agent, prompt, session, tuning)?
-                    .iter()
-                    .cloned(),
-            );
-        }
-        Task::Retired => {}
-    }
+        } => build_agent_command(agent, prompt, session(remote_control).as_deref(), tuning)?,
+        Task::Resume {
+            agent,
+            remote_control,
+            tuning,
+        } => build_resume_command(agent, session(remote_control).as_deref(), tuning)?,
+        Task::Retired => return Some(args),
+    };
+    args.push("--".to_owned());
+    args.extend(command.iter().cloned());
     Some(args)
 }
 
@@ -1214,8 +1406,29 @@ mod tests {
 
     use super::*;
 
+    /// What `dl::workspace_id_of` answers for every spec in these tests, which
+    /// never ask devpod anything.
+    const WORKSPACE_ID: &str = "ws-id";
+
+    fn id_of(_spec: &str) -> Option<String> {
+        Some(WORKSPACE_ID.to_owned())
+    }
+
     fn words(argv: &[&str]) -> Vec<String> {
         argv.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    /// [`super::parse_aid_args`] for a line that names its workspace, which is
+    /// every line these tests parse but the ones that ask for the picker. Those
+    /// call [`super::parse_aid_args`] by its full path.
+    fn parse_aid_args(
+        argv: &[String],
+        environment: Environment<'_>,
+    ) -> Result<AidArgs, UsageError> {
+        super::parse_aid_args(argv, environment).map(|line| match line {
+            Line::Ready(parsed) => parsed,
+            Line::Unpicked(unpicked) => panic!("{argv:?} asked for the picker: {unpicked:?}"),
+        })
     }
 
     fn parsed(argv: &[&str]) -> AidArgs {
@@ -1238,12 +1451,13 @@ mod tests {
         }
     }
 
-    /// The prompt an agent line carries. Panics on a retired-spelling line, which
-    /// carries none.
+    /// The prompt an agent line carries. Panics on a retired-spelling line or a
+    /// resume line, which carry none.
     fn prompt(parsed: &AidArgs) -> &str {
         match &parsed.task {
             Task::Agent { prompt, .. } => prompt,
             Task::Retired => panic!("a retired-spelling line has no prompt"),
+            Task::Resume { .. } => panic!("a resume line has no prompt"),
         }
     }
 
@@ -1251,7 +1465,9 @@ mod tests {
     /// which starts no session to drive.
     fn remote_control(parsed: &AidArgs) -> RemoteControl {
         match &parsed.task {
-            Task::Agent { remote_control, .. } => *remote_control,
+            Task::Agent { remote_control, .. } | Task::Resume { remote_control, .. } => {
+                *remote_control
+            }
             Task::Retired => panic!("a retired-spelling line starts no agent"),
         }
     }
@@ -1279,7 +1495,12 @@ mod tests {
             .with_spec("blooop/devlaunch@pr_link".to_owned());
 
         assert_eq!(parsed.spec, "blooop/devlaunch@pr_link");
-        let launch = build_dl_args(&parsed).expect("an agent line builds");
+        // The id is asked of the spec the reference resolved to, never of the
+        // reference itself.
+        let resolved = |spec: &str| {
+            (spec == "blooop/devlaunch@pr_link").then(|| "devlaunch-pr-link-ab12".to_owned())
+        };
+        let launch = build_dl_args(&parsed, &resolved).expect("an agent line builds");
         assert_eq!(
             launch.first().map(String::as_str),
             Some("blooop/devlaunch@pr_link")
@@ -1289,7 +1510,7 @@ mod tests {
         assert!(
             launch
                 .iter()
-                .any(|word| word == "--remote-control=blooop/devlaunch@pr_link"),
+                .any(|word| word == "--remote-control=devlaunch-pr-link-ab12"),
             "{launch:?}"
         );
         assert_eq!(build_boot_args(&parsed), ["blooop/devlaunch@pr_link", "up"]);
@@ -1410,18 +1631,15 @@ mod tests {
             Task::Retired
         );
         assert_eq!(
-            build_dl_args(&parsed(&["owner/repo", "fix the bug", "--autorm"]))
+            build_dl_args(&parsed(&["owner/repo", "fix the bug", "--autorm"]), &id_of)
                 .expect("a retired-spelling line needs no agent"),
             ["owner/repo", "--autorm"]
         );
         assert_eq!(
-            build_dl_args(&parsed(&[
-                "--devcontainer",
-                "robot",
-                "owner/repo",
-                "hi",
-                "--stop",
-            ]))
+            build_dl_args(
+                &parsed(&["--devcontainer", "robot", "owner/repo", "hi", "--stop",]),
+                &id_of
+            )
             .expect("a retired-spelling line needs no agent"),
             ["--devcontainer", "robot", "owner/repo", "--stop"]
         );
@@ -1636,7 +1854,8 @@ mod tests {
     #[test]
     fn the_dl_command_line_is_options_then_spec_then_the_command() {
         assert_eq!(
-            build_dl_args(&parsed(&["owner/repo@branch", "fix", "it"])).expect("a known agent"),
+            build_dl_args(&parsed(&["owner/repo@branch", "fix", "it"]), &id_of)
+                .expect("a known agent"),
             [
                 "owner/repo@branch",
                 "--",
@@ -1644,12 +1863,12 @@ mod tests {
                 "IS_SANDBOX=1",
                 "claude",
                 "--dangerously-skip-permissions",
-                "--remote-control=owner/repo@branch",
+                "--remote-control=ws-id",
                 "fix it",
             ]
         );
         assert_eq!(
-            build_dl_args(&parsed(&["--devcontainer", "robot", "owner/repo"]))
+            build_dl_args(&parsed(&["--devcontainer", "robot", "owner/repo"]), &id_of)
                 .expect("a known agent"),
             [
                 "--devcontainer",
@@ -1660,7 +1879,7 @@ mod tests {
                 "IS_SANDBOX=1",
                 "claude",
                 "--dangerously-skip-permissions",
-                "--remote-control=owner/repo",
+                "--remote-control=ws-id",
             ]
         );
     }
@@ -1673,8 +1892,11 @@ mod tests {
         // property worth holding is that the prompt is *one* word of it however
         // many words were typed -- dl quotes each one on the way to the remote
         // shell, so a word that survives here survives all the way.
-        let args = build_dl_args(&parsed(&["owner/repo", "fix", "the", "flaky", "test"]))
-            .expect("a known agent");
+        let args = build_dl_args(
+            &parsed(&["owner/repo", "fix", "the", "flaky", "test"]),
+            &id_of,
+        )
+        .expect("a known agent");
         let after = args
             .iter()
             .position(|word| word == "--")
@@ -1687,7 +1909,7 @@ mod tests {
                 "IS_SANDBOX=1",
                 "claude",
                 "--dangerously-skip-permissions",
-                "--remote-control=owner/repo",
+                "--remote-control=ws-id",
                 "fix the flaky test",
             ]
         );
@@ -1729,7 +1951,7 @@ mod tests {
         // Behind the spec, because that is where dl reads a flag as a modifier
         // rather than as the workspace's name, and ahead of the `--`, because
         // everything after that belongs to the workspace's command.
-        let built = build_dl_args(&parsed(&["owner/repo", "fix it", "--rm"]))
+        let built = build_dl_args(&parsed(&["owner/repo", "fix it", "--rm"]), &id_of)
             .expect("an agent line builds");
 
         assert_eq!(
@@ -1742,7 +1964,7 @@ mod tests {
                 "IS_SANDBOX=1",
                 "claude",
                 "--dangerously-skip-permissions",
-                "--remote-control=owner/repo",
+                "--remote-control=ws-id",
                 "fix it",
             ]
         );
@@ -1752,8 +1974,8 @@ mod tests {
     fn rm_before_the_spec_is_the_same_request() {
         // An unknown leading flag is passed through to dl, which is all `--rm`
         // needs: dl accepts it in any position, unlike `--force`.
-        let built =
-            build_dl_args(&parsed(&["--rm", "owner/repo", "fix it"])).expect("an agent line");
+        let built = build_dl_args(&parsed(&["--rm", "owner/repo", "fix it"]), &id_of)
+            .expect("an agent line");
 
         assert_eq!(built[0], "--rm");
         assert_eq!(built[1], "owner/repo");
@@ -1865,7 +2087,7 @@ mod tests {
 
         assert_eq!(chosen.dl_options, ["--rm", "--force"]);
         assert_eq!(prompt(&chosen), "fix it");
-        let built = build_dl_args(&chosen).expect("an agent line");
+        let built = build_dl_args(&chosen, &id_of).expect("an agent line");
         assert_eq!(
             &built[..3],
             ["--rm", "--force", "owner/repo"],
@@ -1910,7 +2132,7 @@ mod tests {
 
         assert_eq!(typed_backwards.spec_options, ["--rm", "--force"]);
         assert_eq!(prompt(&typed_backwards), "fix it");
-        let built = build_dl_args(&typed_backwards).expect("an agent line");
+        let built = build_dl_args(&typed_backwards, &id_of).expect("an agent line");
         assert_eq!(
             built.iter().position(|word| word == "--force"),
             Some(2),
@@ -1928,7 +2150,7 @@ mod tests {
         assert_eq!(chosen.task, Task::Retired);
         assert_eq!(chosen.spec_options, ["--rm", "--autorm"]);
         assert_eq!(
-            build_dl_args(&chosen).expect("a retired-spelling line"),
+            build_dl_args(&chosen, &id_of).expect("a retired-spelling line"),
             ["owner/repo", "--rm", "--autorm"]
         );
     }
@@ -1953,13 +2175,10 @@ mod tests {
         // piece of it is load-bearing — the flag, the `=`, the unquoted command
         // substitution, and where it sits relative to the prompt.
         assert_eq!(
-            build_dl_args(&parsed(&[
-                "owner/repo@branch",
-                "fix",
-                "the",
-                "flaky",
-                "test"
-            ]))
+            build_dl_args(
+                &parsed(&["owner/repo@branch", "fix", "the", "flaky", "test"]),
+                &id_of
+            )
             .expect("a known agent"),
             [
                 "owner/repo@branch",
@@ -1968,14 +2187,14 @@ mod tests {
                 "IS_SANDBOX=1",
                 "claude",
                 "--dangerously-skip-permissions",
-                "--remote-control=owner/repo@branch",
+                "--remote-control=ws-id",
                 "fix the flaky test",
             ]
         );
         // And with no prompt, which is the launch this most often is: the flag is
         // not one of the ones that only make sense beside a prompt.
         assert_eq!(
-            build_dl_args(&parsed(&["owner/repo@branch"])).expect("a known agent"),
+            build_dl_args(&parsed(&["owner/repo@branch"]), &id_of).expect("a known agent"),
             [
                 "owner/repo@branch",
                 "--",
@@ -1983,7 +2202,7 @@ mod tests {
                 "IS_SANDBOX=1",
                 "claude",
                 "--dangerously-skip-permissions",
-                "--remote-control=owner/repo@branch",
+                "--remote-control=ws-id",
             ]
         );
     }
@@ -1999,7 +2218,8 @@ mod tests {
             assert_eq!(remote_control(&chosen), RemoteControl::Off, "{agent}");
         }
         assert_eq!(
-            build_dl_args(&parsed(&["--codex", "owner/repo", "hi"])).expect("a known agent"),
+            build_dl_args(&parsed(&["--codex", "owner/repo", "hi"]), &id_of)
+                .expect("a known agent"),
             [
                 "owner/repo",
                 "--",
@@ -2009,7 +2229,8 @@ mod tests {
             ]
         );
         assert_eq!(
-            build_dl_args(&parsed(&["--gemini", "owner/repo", "hi"])).expect("a known agent"),
+            build_dl_args(&parsed(&["--gemini", "owner/repo", "hi"]), &id_of)
+                .expect("a known agent"),
             [
                 "owner/repo",
                 "--",
@@ -2081,7 +2302,7 @@ mod tests {
         // that turned it off "mostly" would be a session on claude.ai that nobody
         // meant to publish.
         for flag in ["--no-remote-control", "--no-remote"] {
-            let built = build_dl_args(&parsed(&[flag, "owner/repo@fix/x", "fix", "it"]))
+            let built = build_dl_args(&parsed(&[flag, "owner/repo@fix/x", "fix", "it"]), &id_of)
                 .expect("a known agent");
 
             assert_eq!(
@@ -2407,7 +2628,7 @@ mod tests {
 
         assert_eq!(prompt(&chosen), "fix the bug");
         assert_eq!(
-            build_dl_args(&chosen).expect("an agent line"),
+            build_dl_args(&chosen, &id_of).expect("an agent line"),
             [
                 "owner/repo",
                 "--rm",
@@ -2416,7 +2637,7 @@ mod tests {
                 "IS_SANDBOX=1",
                 "claude",
                 "--dangerously-skip-permissions",
-                "--remote-control=owner/repo",
+                "--remote-control=ws-id",
                 "fix the bug",
             ]
         );
@@ -2429,7 +2650,7 @@ mod tests {
             .with_prompt("explain this".to_owned());
 
         assert_eq!(
-            build_dl_args(&chosen).expect("an agent line"),
+            build_dl_args(&chosen, &id_of).expect("an agent line"),
             [
                 "owner/repo",
                 "--",
@@ -2451,7 +2672,7 @@ mod tests {
 
         assert_eq!(remote_control(&on), RemoteControl::On);
         assert_eq!(
-            build_dl_args(&on).expect("an agent line"),
+            build_dl_args(&on, &id_of).expect("an agent line"),
             [
                 "owner/repo@fix/x",
                 "--",
@@ -2459,7 +2680,7 @@ mod tests {
                 "IS_SANDBOX=1",
                 "claude",
                 "--dangerously-skip-permissions",
-                "--remote-control=owner/repo@fix/x",
+                "--remote-control=ws-id",
                 "fix the bug",
             ]
         );
@@ -2469,7 +2690,7 @@ mod tests {
 
         assert_eq!(remote_control(&off), RemoteControl::Off);
         assert_eq!(
-            build_dl_args(&off).expect("an agent line"),
+            build_dl_args(&off, &id_of).expect("an agent line"),
             [
                 "owner/repo@fix/x",
                 "--",
@@ -2487,7 +2708,7 @@ mod tests {
         let chosen = parsed(&["owner/repo"]).with_prompt(String::new());
 
         assert_eq!(
-            build_dl_args(&chosen).expect("an agent line"),
+            build_dl_args(&chosen, &id_of).expect("an agent line"),
             [
                 "owner/repo",
                 "--",
@@ -2495,7 +2716,7 @@ mod tests {
                 "IS_SANDBOX=1",
                 "claude",
                 "--dangerously-skip-permissions",
-                "--remote-control=owner/repo",
+                "--remote-control=ws-id",
             ]
         );
     }
@@ -2504,7 +2725,7 @@ mod tests {
 
     /// The words the agent is started with, off the dl line: everything after `--`.
     fn agent_words(argv: &[&str]) -> Vec<String> {
-        let dl = build_dl_args(&parsed(argv)).expect("an agent line");
+        let dl = build_dl_args(&parsed(argv), &id_of).expect("an agent line");
         let at = dl
             .iter()
             .position(|word| word == "--")
@@ -2530,7 +2751,7 @@ mod tests {
                 "--dangerously-skip-permissions",
                 "--model",
                 "opus",
-                "--remote-control=owner/repo",
+                "--remote-control=ws-id",
                 "fix it",
             ]
         );
@@ -2572,7 +2793,7 @@ mod tests {
                 "--dangerously-skip-permissions",
                 "--effort",
                 "high",
-                "--remote-control=owner/repo",
+                "--remote-control=ws-id",
             ]
         );
         assert_eq!(
@@ -2693,7 +2914,7 @@ mod tests {
             },
         )
         .expect("a usable command line");
-        let dl = build_dl_args(&chosen).expect("an agent line");
+        let dl = build_dl_args(&chosen, &id_of).expect("an agent line");
         assert_eq!(dl[..3], ["--claude-profile", "work", "owner/repo"]);
     }
 
@@ -2818,5 +3039,248 @@ mod tests {
     fn a_row_is_kept_by_its_agent_and_login() {
         assert_eq!(launcher("claude", None).key(), "claude");
         assert_eq!(launcher("claude", Some("work")).key(), "claude/work");
+    }
+
+    #[test]
+    fn a_remote_control_session_is_named_after_the_workspace_id_not_the_spec() {
+        // Claude Code's `SendMessage` refuses any `to` with a `/` in it ("to must be
+        // a bare teammate name"), so a session named `owner/repo@feat/x` showed up
+        // in every other agent's `ListAgents` and could not be messaged by any of
+        // them. The id has no `/` and is the name `dl --ls` prints.
+        let asked = std::cell::RefCell::new(Vec::new());
+        let id_of = |spec: &str| {
+            asked.borrow_mut().push(spec.to_owned());
+            Some("repo-feat-x-ab12".to_owned())
+        };
+
+        let built = build_dl_args(&parsed(&["owner/repo@feat/x", "fix it"]), &id_of)
+            .expect("an agent line");
+
+        assert!(
+            built
+                .iter()
+                .any(|word| word == "--remote-control=repo-feat-x-ab12"),
+            "{built:?}"
+        );
+        assert!(
+            !built
+                .iter()
+                .any(|word| word.starts_with("--remote-control=owner/"))
+        );
+        // The spec is still what dl is handed: the id names the session, not the
+        // launch.
+        assert_eq!(built.first().map(String::as_str), Some("owner/repo@feat/x"));
+        assert_eq!(*asked.borrow(), ["owner/repo@feat/x"]);
+    }
+
+    #[test]
+    fn a_session_with_remote_control_off_never_asks_for_the_id() {
+        // The id costs a `devpod status` for a triple, which a line that names no
+        // session has no use for.
+        let never = |spec: &str| -> Option<String> { panic!("asked for the id of {spec}") };
+
+        let built = build_dl_args(&parsed(&["owner/repo", "fix it", "--no-remote"]), &never)
+            .expect("an agent line");
+
+        assert!(
+            !built
+                .iter()
+                .any(|word| word.starts_with("--remote-control")),
+            "{built:?}"
+        );
+    }
+
+    #[test]
+    fn a_spec_with_no_id_keeps_the_spec_as_the_session_name() {
+        // Only a spec the launch refuses has no id, and the launch then says why;
+        // the session line it would have started is left as it always was.
+        let built =
+            build_dl_args(&parsed(&["owner/repo", "fix it"]), &|_| None).expect("an agent line");
+
+        assert!(
+            built
+                .iter()
+                .any(|word| word == "--remote-control=owner/repo"),
+            "{built:?}"
+        );
+    }
+
+    // ------------------------------------------------------- aid resume
+
+    /// A resume line that names no workspace, waiting for the picker.
+    fn unpicked(argv: &[&str]) -> Unpicked {
+        match super::parse_aid_args(&words(argv), Environment::default()) {
+            Ok(Line::Unpicked(unpicked)) => unpicked,
+            other => panic!("{argv:?} did not ask for the picker: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resume_alone_asks_for_the_picker_and_then_resumes_claude_in_the_pick() {
+        // The whole feature, end to end on the aid side: the picked id becomes the
+        // spec, and the line is a fresh launch's with `--resume` where the prompt
+        // would be. `--resume` is last because claude reads a word after it as a
+        // search term.
+        let parsed = unpicked(&["resume"]).picked("devlaunch-main-3j1t".to_owned());
+
+        assert_eq!(
+            build_dl_args(&parsed, &id_of).expect("a known agent"),
+            [
+                "devlaunch-main-3j1t",
+                "--",
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=ws-id",
+                "--resume",
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_with_a_workspace_needs_no_picker() {
+        let parsed = parsed(&["resume", "owner/repo@branch"]);
+
+        assert_eq!(parsed.spec, "owner/repo@branch");
+        assert_eq!(
+            parsed.task,
+            Task::Resume {
+                agent: "claude".to_owned(),
+                remote_control: RemoteControl::On,
+                tuning: Tuning::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn every_agent_resumes_with_its_own_words_at_the_end_of_the_line() {
+        for (name, agent) in AGENTS {
+            let flag = format!("--{name}");
+            let built =
+                build_dl_args(&parsed(&[&flag, "resume", "ws"]), &id_of).expect("a known agent");
+
+            assert!(!agent.resume.is_empty(), "{name} has no way to resume");
+            assert!(built.ends_with(&words(agent.resume)), "{name}: {built:?}");
+            // Still full auto: a resumed session is started as a fresh one is.
+            for word in agent.command {
+                assert!(built.iter().any(|built| built == word), "{name}: {built:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_agent_flag_and_the_off_switch_work_on_either_side_of_resume() {
+        for argv in [["--codex", "resume", "ws"], ["resume", "--codex", "ws"]] {
+            assert_eq!(parsed(&argv).agent(), Some("codex"), "{argv:?}");
+        }
+        for argv in [
+            ["--no-remote", "resume", "ws"],
+            ["resume", "ws", "--no-remote"],
+        ] {
+            let built = build_dl_args(&parsed(&argv), &id_of).expect("a known agent");
+            assert!(
+                !built
+                    .iter()
+                    .any(|word| word.starts_with("--remote-control")),
+                "{argv:?}: {built:?}"
+            );
+            assert_eq!(built.last().map(String::as_str), Some("--resume"));
+        }
+    }
+
+    #[test]
+    fn words_after_the_workspace_on_a_resume_line_are_refused() {
+        assert_eq!(
+            super::parse_aid_args(
+                &words(&["resume", "owner/repo", "fix", "it"]),
+                Environment::default()
+            ),
+            Err(UsageError::ResumeTakesNoPrompt {
+                words: "fix it".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn resume_is_a_verb_only_in_the_first_slot() {
+        // After the spec it is prompt text, as every word there is.
+        assert_eq!(
+            prompt(&parsed(&["owner/repo", "resume", "the", "work"])),
+            "resume the work"
+        );
+        // And said twice, the second is a workspace called `resume`.
+        let twice = parsed(&["resume", "resume"]);
+        assert_eq!(twice.spec, "resume");
+        assert!(matches!(twice.task, Task::Resume { .. }));
+    }
+
+    #[test]
+    fn rm_rides_a_resume_line_from_either_end() {
+        let leading = unpicked(&["--rm", "resume"]).picked("ws".to_owned());
+        let trailing = parsed(&["resume", "ws", "--rm"]);
+
+        for built in [leading, trailing].map(|line| build_dl_args(&line, &id_of)) {
+            let built = built.expect("a known agent");
+            let separator = built.iter().position(|word| word == "--").expect("a --");
+            assert!(built[..separator].contains(&"--rm".to_owned()), "{built:?}");
+            assert_eq!(built.last().map(String::as_str), Some("--resume"));
+        }
+    }
+
+    #[test]
+    fn a_retired_spelling_on_a_resume_line_with_no_workspace_asks_for_one_before_any_picker() {
+        for retired in ["--stop", "--autorm"] {
+            assert_eq!(
+                super::parse_aid_args(&words(&["resume", retired]), Environment::default()),
+                Err(UsageError::NoWorkspace),
+                "{retired}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retired_spelling_on_a_resume_line_with_a_workspace_is_left_for_dl_to_refuse() {
+        assert_eq!(parsed(&["resume", "ws", "--autorm"]).task, Task::Retired);
+    }
+
+    #[test]
+    fn a_resumed_session_takes_the_model_and_effort_too() {
+        // Ahead of Remote Control, and the resume words stay last, where claude's
+        // `--resume [value]` needs them.
+        let dl = build_dl_args(
+            &parsed(&["--model", "opus", "--effort", "max", "resume", "ws"]),
+            &id_of,
+        )
+        .expect("a resume line");
+        let at = dl
+            .iter()
+            .position(|word| word == "--")
+            .expect("a `--` tail");
+        assert_eq!(
+            dl[at + 1..],
+            [
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--model",
+                "opus",
+                "--effort",
+                "max",
+                "--remote-control=ws-id",
+                "--resume",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_effort_on_a_resume_line_for_gemini_is_refused_like_any_other() {
+        assert_eq!(
+            refused(&["--gemini", "--effort", "high", "resume", "ws"]),
+            UsageError::EffortUnsupported {
+                agent: "gemini".to_owned()
+            }
+        );
     }
 }

@@ -798,6 +798,7 @@ pub struct devlaunch_core::domain::workspace_state::NonEmpty<T>
 impl devlaunch_core::domain::workspace_state::NonEmpty<devlaunch_core::domain::workspace_state::Loss>
 pub fn devlaunch_core::domain::workspace_state::NonEmpty<devlaunch_core::domain::workspace_state::Loss>::describe(&self) -> alloc::string::String
 impl<T> devlaunch_core::domain::workspace_state::NonEmpty<T>
+pub fn devlaunch_core::domain::workspace_state::NonEmpty<T>::first(&self) -> &T
 pub fn devlaunch_core::domain::workspace_state::NonEmpty<T>::iter(&self) -> impl core::iter::traits::iterator::Iterator<Item = &T>
 pub fn devlaunch_core::domain::workspace_state::NonEmpty<T>::of(impl core::iter::traits::collect::IntoIterator<Item = T>) -> core::option::Option<Self>
 impl<T: core::clone::Clone> core::clone::Clone for devlaunch_core::domain::workspace_state::NonEmpty<T>

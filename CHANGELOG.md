@@ -7,6 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`aid --model` and `aid --effort`.** Each agent is told them in its own spelling:
+  `claude --model/--effort`, `codex --model` and `-c model_reasoning_effort=`, and
+  `gemini --model`. The values are passed on as typed, since the agents add models
+  faster than `aid` is released. `--effort` beside `--gemini` is refused, as gemini has
+  no such setting. Both work with `aid resume` too.
+- **`aid` asks for the agent, the model and the effort before the prompt.** Each is a
+  picker that lists the recent choices first, so one Enter repeats the last launch. The
+  agent picker has one row per Claude login that `dl --claude-profiles` lists, then
+  `codex` and `gemini`. A name that is not listed can be typed. A flag on the line
+  skips its picker, and Esc stops the background boot.
+- **A bare `aid` picks a workspace,** as a bare `dl` does. So does a line of flags with
+  no workspace, such as `aid --codex`.
+
+### Fixed
+
+- **A pasted prompt arrives whole.** The prompt editor read the terminal in line mode,
+  which cut a paste off at 4096 bytes, submitted at its first line break, and left
+  lines that arrived late for the agent to read as keystrokes. It is now a raw-mode
+  editor with bracketed paste: a paste keeps its line breaks, Alt-Enter or Ctrl-J adds
+  a line, and Enter submits.
+- **The pickers no longer panic** on a terminal with no `TERM` or a size of zero. They
+  are skipped, and the prompt editor still opens.
+
+## [0.57.0] - 2026-09-28
+
+### Added
+
+- **`aid resume` reopens an agent session in one command.** After a restart, `aid resume`
+  opens the workspace picker, starts the workspace, and starts the agent with its own
+  resume words: `claude --resume` and `codex resume` open their session pickers, and
+  `gemini --resume` reopens the latest session. The agent is started as a fresh `aid`
+  launch starts it, so full auto, Remote Control named after the workspace id, `--rm`
+  and `--no-remote` all still apply. `aid resume <workspace>` skips the workspace picker.
+
+## [0.56.0] - 2026-09-28
+
+### Added
+
+- **A GitHub branch link is a spec.** `dl https://github.com/owner/repo/tree/feature/x`
+  opens `owner/repo@feature/x`, the same workspace with the same id. It used to go to
+  devpod as a clone URL, and GitHub refused it as "not a valid repository name". The
+  scheme and `www.` are optional, and a trailing slash, query or fragment is ignored.
+  Every segment after `tree/` is the branch, because a link cannot say where a branch
+  with a slash in it stops. Only `github.com` links are read this way. `aid` takes the
+  link too, and names its Remote Control session after the workspace id.
+
+## [0.55.1] - 2026-09-28
+
+### Fixed
+
+- **`rm` no longer refuses over a `git filter-branch` backup** (#642). The
+  unpushed-commit probe asked `git log --all --not --remotes`, and `--all` reaches
+  `refs/original/`, where filter-branch keeps the old tip of each ref it rewrote.
+  After a rewrite that was pushed, every pre-rewrite commit read as unpushed: a
+  kinisi_ros workspace refused `rm` over "5 unpushed commit(s)", and all five were on
+  the remote in their rewritten form. The probe now excludes `refs/original/*` beside
+  `refs/tags/*`. The query that names commits only a local tag reaches uses the same
+  exclusions, so a backup ref no longer hides a tagged commit from that attribution
+  either. A rewrite that was not pushed still refuses, because the rewritten branch is
+  a local branch like any other.
+
+## [0.55.0] - 2026-09-28
+
+### Fixed
+
+- **An agent `aid` started can be messaged by other agents** (#640). `aid` named each
+  Remote Control session after the spec as typed, `--remote-control=blooop/bencher@msg-b`,
+  and Claude Code's `SendMessage` refuses any address with a `/` in it: "to must be a
+  bare teammate name - there is only one team per session". Every `aid` session was in
+  every other agent's `ListAgents` and none of them could send it a word. The session
+  is now named after the workspace id, `bencher-msg-b-r49i`, which is the name
+  `dl --ls`, devpod and the hostname stage already use, so there is no new name to
+  learn. `aid` asks dl for it the way `dl <ws> kill` does, through a new
+  `dl::workspace_id_of`: a bare id costs nothing, and a triple costs one `devpod status`
+  with a five second limit before the derived id is used. Only a line with Remote
+  Control on asks.
+- **A `claude --remote-control` you start yourself is named after the workspace
+  too.** Claude Code names such a session after the hostname, and the hostname stage
+  cannot set one in most containers, so the session was named after the container
+  (`76e99b699a40-tender-snowflake`). A new `session-name` setup stage writes
+  `export CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX=<workspace id>` to the login
+  profile, on every launch and whatever `DEVLAUNCH_NO_TITLE` says, so the name starts
+  with the workspace id. Claude Code still replaces it with a title from the
+  conversation after the first message, since dl does not add flags to your command.
+
+## [0.54.0] - 2026-09-25
+
+### Fixed
+
+- **`dl <ws> rm` asks the remote before it refuses over unpushed commits**
+  (#638). A workspace clone's `refs/remotes/origin/*` moves only when something
+  in the workspace fetches or pushes through `origin`, so commits pushed to the
+  URL instead (what an agent falls back to when SSH fails in the container) left
+  the clone reading `ahead 4` and `rm` refusing over work the forge already had.
+  The only ways past were a manual fetch in the clone or `--force`, which skips
+  the guard entirely.
+
+  When unpushed commits are the only thing standing, `rm` now runs one
+  `git fetch --no-tags --no-prune origin` in the clone under a 30 second deadline
+  and asks again. Commits the remote has drop out of the count; the rest still
+  refuse. A clean clone, a dirty tree, `kill` and `rm --force` never fetch. The
+  fetch never prunes, whatever the host's `fetch.prune` says, so a merged and
+  deleted branch keeps counting as pushed. A fetch that fails, times out or cannot
+  authenticate keeps the refusal and says the remote could not be reached.
+
+  `RemovalRefused` in `devlaunch_core::api` gained a `remote: RemoteCheck` field
+  saying whether the remote was asked, and `LifecycleNotice` a `CheckingRemote`
+  arm said before the fetch.
+
 ## [0.53.0] - 2026-09-18
 
 ### Changed

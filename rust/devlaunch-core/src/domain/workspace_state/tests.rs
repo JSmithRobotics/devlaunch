@@ -455,6 +455,45 @@ fn a_commit_only_an_unpushed_local_tag_reaches_is_unsaved() {
 }
 
 #[test]
+fn a_rewrite_backup_ref_does_not_hide_a_tagged_commit_from_the_attribution() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["checkout", "-q", "-b", "feat/x"]);
+    write(&clone.join("an-hour.txt"), "an hour of work\n");
+    commit(&clone, "about to be rewritten");
+    git(&clone, &["tag", "backup"]);
+    git(
+        &clone,
+        &["update-ref", "refs/original/refs/heads/feat/x", "HEAD"],
+    );
+    git(
+        &clone,
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--amend",
+            "-m",
+            "reworded",
+        ],
+    );
+
+    assert_eq!(
+        git(&clone, &["rev-parse", "refs/original/refs/heads/feat/x"]),
+        git(&clone, &["rev-parse", "backup^{commit}"])
+    );
+    assert_eq!(git(&fixture.remote, &["tag", "--list"]), "");
+
+    assert_eq!(
+        would_lose(&held_against(&clone, &fixture.remote)),
+        "2 unpushed commit(s), 1 reachable only from local tag(s) (backup)"
+    );
+}
+
+#[test]
 fn a_local_tag_the_bare_holds_at_another_object_is_unsaved() {
     // The middle case, and the one a name-only comparison would get wrong: the
     // bare has a tag by this name, so "does the mirror have `v1`" says yes — but it
