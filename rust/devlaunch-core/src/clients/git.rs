@@ -608,7 +608,7 @@ impl<'r> Git<'r> {
     /// `--remotes` rather than any branch's upstream, so work pushed under another
     /// name, or merged and fetched back, is correctly not counted as lost.
     ///
-    /// **`refs/tags` is the one thing `--all` reaches that is excluded, and #485
+    /// **`refs/tags` is the first thing `--all` reaches that is excluded, and #485
     /// is why.** A tag the remote carries but no remote *branch* reaches any more
     /// reads as unpushed, and that is the ordinary state of a repository which
     /// tags releases on branches it then deletes: one such repository carries 265
@@ -620,8 +620,8 @@ impl<'r> Git<'r> {
     /// for safety. It teaches `--force` as the ordinary way to delete a workspace,
     /// and a habit of `--force` is exactly the clone with real work in it going.
     ///
-    /// `--exclude` binds to the `--all` that follows it and drops the tags out of
-    /// it alone, so every other ref `--all` reaches is still asked about: local
+    /// `--exclude` binds to the `--all` that follows it and drops the excluded refs
+    /// out of it, so every other ref `--all` reaches is still asked about: local
     /// branches, every worktree's HEAD including detached ones, and `refs/stash`.
     ///
     /// **`refs/original` is excluded as well, for the same reason.** It is where
