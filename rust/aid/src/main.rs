@@ -564,6 +564,14 @@ mod tests {
     }
 
     #[test]
+    fn the_help_names_resume_and_what_it_opens() {
+        let help = help();
+
+        assert!(help.contains("aid resume [<workspace>]"), "{help}");
+        assert!(help.contains("from dl's picker"), "{help}");
+    }
+
+    #[test]
     fn the_help_names_remote_control_and_what_it_needs() {
         let help = help();
 
