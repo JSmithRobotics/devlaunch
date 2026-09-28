@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A GitHub branch link is a spec.** `dl https://github.com/owner/repo/tree/feature/x`
+  opens `owner/repo@feature/x`, the same workspace with the same id. It used to go to
+  devpod as a clone URL, and GitHub refused it as "not a valid repository name". The
+  scheme and `www.` are optional, and a trailing slash, query or fragment is ignored.
+  Every segment after `tree/` is the branch, because a link cannot say where a branch
+  with a slash in it stops. Only `github.com` links are read this way. `aid` takes the
+  link too, and names its Remote Control session after the workspace id.
+
 ## [0.55.1] - 2026-09-28
 
 ### Fixed
