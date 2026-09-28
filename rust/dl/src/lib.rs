@@ -883,6 +883,13 @@ mod early_name_tests {
             early_name("blooop/devlaunch@feature/auth", no_records()).as_deref(),
             Some("devlaunch@feature/auth")
         );
+        assert_eq!(
+            early_name(
+                "https://github.com/blooop/devlaunch/tree/feature/auth",
+                no_records()
+            ),
+            early_name("blooop/devlaunch@feature/auth", no_records())
+        );
         // Measured on live herdr 0.8.2: `aid blooop/rocker@nb1` named the tab
         // `rocker@nb1` during the editor and the launch afterwards named it
         // `rocker@nb1` again, so nothing moved.

@@ -375,6 +375,16 @@ mod tests {
         assert!(!id.contains('/'), "{id}");
     }
 
+    #[test]
+    fn a_tree_link_names_the_workspace_id_of_its_triple() {
+        let fake = FakeRunner::new();
+
+        let id = workspace_id_of(&fake, "https://github.com/blooop/bencher/tree/feat/x");
+
+        assert!(id.is_some());
+        assert_eq!(id, workspace_id_of(&fake, "blooop/bencher@feat/x"));
+    }
+
     /// A bare id is the id, and finding that out costs nothing, as it does for
     /// `kill`: aid asks this on every Remote Control launch.
     #[test]
