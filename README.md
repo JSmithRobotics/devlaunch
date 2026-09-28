@@ -385,7 +385,12 @@ so profiles you already have work with no re-login, and it never writes there: c
 deleting them stays with whatever made the directory. By hand it is
 `CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude`, then log in. `dl --claude-profiles --json`
 answers the same question machine-readably, so a tool that names a profile can check this host
-actually has it before asking for it.
+actually has it before asking for it. Each authed row also carries `usageSnapshot`: the exact
+bytes of a `usage-snapshot.json` sitting beside the credential, or `null` when there is none, so a
+gateway can read a profile's usage over the same round trip instead of a second one. The key is
+always present, even when its value is `null`, because a missing key and a `null` value mean
+different things: missing says this `dl` predates the field, `null` says it looked and found
+nothing.
 
 The whole directory is bound in, not just the credential: any `CLAUDE.md`, agents, skills or
 hooks living beside it reach the container too, and a token refresh in there lands back in

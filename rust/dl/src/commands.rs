@@ -403,7 +403,7 @@ fn render_json(
 /// listing has never touched a secret, in either rendering.
 fn render_claude_profiles(output: cli::ListOutput) -> Ending {
     let rows = claude_profiles::from_process();
-    warn_if_the_profiles_root_could_not_be_read();
+    let root_unreadable = warn_if_the_profiles_root_could_not_be_read();
     match output {
         cli::ListOutput::Json => {
             // No empty-listing sentinel here: `[]` already says "no profiles" to a
@@ -426,10 +426,29 @@ fn render_claude_profiles(output: cli::ListOutput) -> Ending {
             }
         }
     }
+    claude_profiles_ending(output, root_unreadable)
+}
+
+/// Whether `render_claude_profiles` should exit non-zero.
+///
+/// Only `--json` can: a caller parsing that document has no other way to tell "I
+/// looked and there is nothing" from "I could not look" -- both print `[]` on stdout,
+/// since `claude_profiles::summarise` is pure and has no channel of its own to say
+/// which. The table rendering already has [`render::no_claude_profiles`] on stderr for
+/// a person reading it, and does not change here.
+///
+/// Split from [`render_claude_profiles`] so the decision is a function of the two
+/// facts it is actually made from, tested without a filesystem or a process
+/// environment in the way.
+fn claude_profiles_ending(output: cli::ListOutput, root_unreadable: bool) -> Ending {
+    if matches!(output, cli::ListOutput::Json) && root_unreadable {
+        return Ending::Refused;
+    }
     Ending::Done
 }
 
-/// Say so when the profiles root is there and could not be read.
+/// Say so when the profiles root is there and could not be read, and report whether it
+/// was.
 ///
 /// `claude_profiles::summarise` is pure and returns a list, so every reason it found
 /// no profiles looks the same from the outside: a root that was never created, and one
@@ -440,22 +459,42 @@ fn render_claude_profiles(output: cli::ListOutput) -> Ending {
 ///
 /// So the reason is asked for here, where there is a stderr to put it on, rather than
 /// widening the return type of a pure function for a case only the binary can report.
-/// `NotFound` is the silent arm; a directory that reads fine says nothing either.
-fn warn_if_the_profiles_root_could_not_be_read() {
+/// `NotFound` is the silent arm; a directory that reads fine says nothing either. The
+/// `bool` this returns is [`claude_profiles_ending`]'s way of turning the same fact
+/// into an exit code, since a script reading stdout alone never sees the line printed
+/// here.
+fn warn_if_the_profiles_root_could_not_be_read() -> bool {
     let Ok(root) = xdg::claude_profiles_root() else {
-        return;
+        return false;
     };
-    let Err(error) = std::fs::read_dir(&root) else {
-        return;
+    let Some(error) = profiles_root_read_error(&root) else {
+        return false;
     };
-    if error.kind() == std::io::ErrorKind::NotFound {
-        return;
-    }
     eprintln!(
         "Could not read the Claude profiles directory {} ({error}), so any profiles in it are \
          missing from this listing.",
         root.display()
     );
+    true
+}
+
+/// The error [`std::fs::read_dir`] gives for `root`, unless it is the one that means
+/// "there is nothing here at all" rather than "I could not look".
+///
+/// `NotFound` is that ordinary absence: most hosts have never made this directory,
+/// and that is not a failure to read it. Every other error -- permissions, a plain
+/// file where a directory should be -- is a real "I could not look" and this is `Some`
+/// of it.
+///
+/// Split out so a test can hand this a path it built (a plain file where a directory
+/// should be) instead of shaping a process environment every other test in the binary
+/// shares.
+fn profiles_root_read_error(root: &Path) -> Option<std::io::Error> {
+    match std::fs::read_dir(root) {
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => Some(error),
+    }
 }
 
 /// The known `owner/repo` strings, one per line.
@@ -1870,5 +1909,58 @@ pub(crate) fn report(records: &Records<'_>) {
         for line in render::records_notice(notice) {
             eprintln!("{line}");
         }
+    }
+}
+
+#[cfg(test)]
+mod claude_profiles_ending_tests {
+    use super::{Ending, claude_profiles_ending, profiles_root_read_error};
+    use crate::cli::ListOutput;
+
+    #[test]
+    fn json_mode_exits_non_zero_when_the_root_could_not_be_read() {
+        assert_eq!(
+            claude_profiles_ending(ListOutput::Json, true).code(),
+            Ending::Refused.code()
+        );
+    }
+
+    #[test]
+    fn json_mode_is_done_when_the_root_read_fine() {
+        assert_eq!(
+            claude_profiles_ending(ListOutput::Json, false).code(),
+            Ending::Done.code()
+        );
+    }
+
+    #[test]
+    fn table_mode_never_refuses_over_an_unreadable_root() {
+        // The table already has `render::no_claude_profiles` on stderr for a person;
+        // this command's exit code does not change for it.
+        assert_eq!(
+            claude_profiles_ending(ListOutput::Table, true).code(),
+            Ending::Done.code()
+        );
+    }
+
+    #[test]
+    fn a_root_that_was_never_created_is_not_a_read_error() {
+        let root = tempfile::tempdir().expect("a scratch dir");
+        let never_created = root.path().join("does-not-exist");
+        assert!(profiles_root_read_error(&never_created).is_none());
+    }
+
+    #[test]
+    fn a_root_that_reads_fine_is_not_a_read_error() {
+        let root = tempfile::tempdir().expect("a scratch dir");
+        assert!(profiles_root_read_error(root.path()).is_none());
+    }
+
+    #[test]
+    fn a_plain_file_where_a_directory_should_be_is_a_read_error() {
+        let root = tempfile::tempdir().expect("a scratch dir");
+        let not_a_directory = root.path().join("profiles");
+        std::fs::write(&not_a_directory, "not a directory").expect("a plain file");
+        assert!(profiles_root_read_error(&not_a_directory).is_some());
     }
 }
