@@ -207,10 +207,20 @@ pub fn identity(spec: &str) -> Result<SpecIdentity<'_>, UnsafeName> {
         // legibility, suffix for identity, capped. The old rule here deleted `_`
         // while the owner/repo path turned it into `-`, so one repo derived two
         // ids; applying only the slug rule instead swapped that for a collision,
-        // since `my_repo`, `my-repo` and `my.repo` slug alike.
-        _ => Ok(SpecIdentity::Workspace(source_workspace_id(
-            &normalise_source(&base_spec.expanded()),
-        ))),
+        // since `my_repo`, `my-repo` and `my.repo` slug alike. A base that reads
+        // as an owner/repo with a branch is a tree link whose full spec did not
+        // parse as one; it is hashed over its raw text, as the URL it still is.
+        _ => {
+            let source = match base_spec {
+                WorkspaceSpec::OwnerRepo {
+                    branch: Some(_), ..
+                } => Cow::Borrowed(base),
+                _ => base_spec.expanded(),
+            };
+            Ok(SpecIdentity::Workspace(source_workspace_id(
+                &normalise_source(&source),
+            )))
+        }
     }
 }
 
@@ -825,6 +835,14 @@ mod tests {
         assert_eq!(
             parse("https://github.com/owner/repo/tree/main").expanded(),
             "git@github.com:owner/repo.git@main"
+        );
+    }
+
+    #[test]
+    fn a_tree_link_with_an_at_after_the_branch_keeps_its_old_id() {
+        assert_eq!(
+            observed("https://github.com/o/r/tree/release@2"),
+            Expect::Workspace("github-com-o-r-tree-release-1i6g")
         );
     }
 
