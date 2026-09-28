@@ -101,6 +101,23 @@ that clone last fetched, the attach says how far behind before it hands over the
 shell. [How fresh a launch is](workspaces.md#how-fresh-a-launch-is) is the whole
 of the freshness rules, and the section under it names which verb moves what.
 
+## A branch link where a branch goes
+
+The link a browser shows for a branch is accepted as the spec itself:
+
+```bash
+dl https://github.com/owner/repo/tree/feature/x
+```
+
+It is read as `owner/repo@feature/x`, with no lookup, so it opens the same
+workspace that spec does. The scheme and `www.` are optional, and a trailing
+slash, a query or a fragment is ignored. Every segment after `tree/` is taken as
+the branch, because GitHub spells a branch with a slash in it as more segments.
+So a link to a directory inside a branch, `.../tree/main/docs`, asks for a branch
+named `main/docs`, and the checkout reports that no such branch exists. Only
+`github.com` links are read this way, since `owner/repo` expands to a GitHub
+remote. A link to any other host is handed to devpod as typed.
+
 ## A pull request where a branch goes
 
 A review request arrives as a link, not as a branch name, and turning one into the

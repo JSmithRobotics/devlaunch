@@ -10368,6 +10368,16 @@ mod tests {
     }
 
     #[test]
+    fn a_github_tree_link_is_planned_as_the_triple_it_names() {
+        // Not handed to devpod as a URL: devpod clones `.../tree/<branch>` as a
+        // repository name and GitHub refuses it.
+        assert_eq!(
+            plan("https://github.com/owner/repo/tree/feature/x"),
+            plan("owner/repo@feature/x")
+        );
+    }
+
+    #[test]
     fn a_url_is_planned_as_something_devpod_clones_itself() {
         let planned = plan("https://github.com/blooop/devlaunch").expect("a plan");
 

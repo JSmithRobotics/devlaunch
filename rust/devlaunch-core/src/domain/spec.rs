@@ -3,7 +3,9 @@
 //! `dl <spec>` accepts six unrelated things behind one argument: a directory on
 //! this machine, `owner/repo[@branch]`, a bare `github.com/...` host path, a full
 //! URL, an `ssh://`-less `user@host:path`, and — as the fallback — the name of a
-//! workspace that already exists. Python asked that question again at every use
+//! workspace that already exists. A GitHub branch link,
+//! `https://github.com/owner/repo/tree/<branch>`, is one more spelling of the
+//! second: it parses to the same arm, so it is the same workspace. Python asked that question again at every use
 //! site (`is_path_spec`, `is_git_spec`, `parse_owner_repo_branch`,
 //! `expand_workspace_spec`, `spec_to_workspace_id` each re-tested the string),
 //! which is how the shapes drifted apart. Here the string is classified once,
@@ -81,6 +83,13 @@ pub enum WorkspaceSpec<'a> {
 pub fn parse(spec: &str) -> WorkspaceSpec<'_> {
     if is_path(spec) {
         return WorkspaceSpec::Path(spec);
+    }
+    if let Some((owner, repo, branch)) = match_tree_link(spec) {
+        return WorkspaceSpec::OwnerRepo {
+            owner,
+            repo,
+            branch: Some(branch),
+        };
     }
     if spec.contains("://") {
         return WorkspaceSpec::Url(spec);
@@ -298,6 +307,48 @@ fn match_owner_repo(spec: &str) -> Option<(&str, &str, Option<&str>)> {
     };
     let (owner, repo) = owner_repo.split_once('/')?;
     Some((owner, repo, branch))
+}
+
+/// A GitHub branch link, `https://github.com/<owner>/<repo>/tree/<branch>`, as
+/// the browser's address bar hands it over.
+///
+/// Accepted with or without a scheme (`http` or `https` only), with or without
+/// `www.`, and with a trailing slash, a query or a fragment, which all name a view
+/// of the branch rather than a different one. Every segment after `tree/` is the
+/// branch: GitHub spells `feature/x` as two segments, and a link cannot say where
+/// a branch stops and a directory in it starts, so a link to a directory reads as
+/// a branch that does not exist and the checkout says so. Owner, repo and branch
+/// are held to the character classes `owner/repo@branch` uses, so a link parses
+/// to nothing that spec could not spell.
+///
+/// Only `github.com`, because [`WorkspaceSpec::OwnerRepo`] expands to a GitHub
+/// remote. Anything else answers `None` and keeps the reading it had before.
+fn match_tree_link(spec: &str) -> Option<(&str, &str, &str)> {
+    let without_scheme = match spec.split_once("://") {
+        Some((scheme, rest))
+            if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http") =>
+        {
+            rest
+        }
+        Some(_) => return None,
+        None => spec,
+    };
+    let host_path =
+        strip_prefix_ignore_ascii_case(without_scheme, "www.").unwrap_or(without_scheme);
+    let path = strip_prefix_ignore_ascii_case(host_path, "github.com/")?;
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let path = path.strip_suffix('/').unwrap_or(path);
+    let (owner, rest) = path.split_once('/')?;
+    let (repo, rest) = rest.split_once('/')?;
+    let branch = rest.strip_prefix("tree/")?;
+    (is_name_part(owner) && is_name_part(repo) && is_branch_part(branch))
+        .then_some((owner, repo, branch))
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &text[prefix.len()..])
 }
 
 pub(crate) fn is_name_part(part: &str) -> bool {
@@ -724,6 +775,75 @@ mod tests {
             assert!(matches!(parse(spec), WorkspaceSpec::SshUrl(_)), "{spec}");
         }
         assert!(!matches!(parse("x@a/b"), WorkspaceSpec::SshUrl(_)));
+    }
+
+    #[test]
+    fn a_github_tree_link_is_owner_repo_at_that_branch() {
+        for spec in [
+            "https://github.com/owner/repo/tree/main",
+            "http://github.com/owner/repo/tree/main",
+            "https://www.github.com/owner/repo/tree/main",
+            "HTTPS://GitHub.com/owner/repo/tree/main",
+            "github.com/owner/repo/tree/main",
+            "https://github.com/owner/repo/tree/main/",
+            "https://github.com/owner/repo/tree/main?tab=readme",
+            "https://github.com/owner/repo/tree/main#readme",
+        ] {
+            assert_eq!(
+                parse(spec),
+                WorkspaceSpec::OwnerRepo {
+                    owner: "owner",
+                    repo: "repo",
+                    branch: Some("main"),
+                },
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tree_link_keeps_every_segment_after_tree_as_the_branch() {
+        // GitHub spells a branch with a slash in it as more path segments, and a
+        // link cannot say where the branch stops and a directory starts. The
+        // branch reading is the one that opens a branch named with a slash.
+        assert_eq!(
+            parse("https://github.com/owner/repo/tree/feature/my-branch"),
+            WorkspaceSpec::OwnerRepo {
+                owner: "owner",
+                repo: "repo",
+                branch: Some("feature/my-branch"),
+            }
+        );
+    }
+
+    #[test]
+    fn a_tree_link_names_the_same_workspace_as_owner_repo_at_branch() {
+        assert_eq!(
+            observed("https://github.com/owner/repo/tree/feature/my-branch"),
+            observed("owner/repo@feature/my-branch")
+        );
+        assert_eq!(
+            parse("https://github.com/owner/repo/tree/main").expanded(),
+            "git@github.com:owner/repo.git@main"
+        );
+    }
+
+    #[test]
+    fn a_link_that_is_not_a_usable_tree_link_keeps_its_old_reading() {
+        for spec in [
+            "https://github.com/owner/repo/tree/",
+            "https://github.com/owner/repo/tree",
+            "https://github.com/owner/repo/blob/main/README.md",
+            "https://github.com/owner/repo/tree/a b",
+            "https://gitlab.com/owner/repo/tree/main",
+            "ssh://github.com/owner/repo/tree/main",
+        ] {
+            assert!(matches!(parse(spec), WorkspaceSpec::Url(_)), "{spec}");
+        }
+        assert!(matches!(
+            parse("gitlab.com/owner/repo/tree/main"),
+            WorkspaceSpec::HostPath(_)
+        ));
     }
 
     #[test]

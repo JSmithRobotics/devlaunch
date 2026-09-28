@@ -187,6 +187,7 @@ dl                               # pick a workspace interactively
 dl <user/repo>                   # open it, on its default branch
 dl <user/repo>@<branch>          # open it, on that branch
 dl <user/repo>@<pr-link>         # open the branch a GitHub pull request is on
+dl <branch-link>                 # github.com/<user>/<repo>/tree/<branch>, the same as <user/repo>@<branch>
 dl ./my-project                  # open a local folder
 dl <user/repo> <verb>            # apply a verb (stop, code, rm, ...)
 dl <verb> <user/repo>            # the same, verb first
