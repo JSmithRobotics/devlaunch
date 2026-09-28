@@ -77,6 +77,29 @@ impl World {
     /// `DEVLAUNCH_AID_AGENT` holding undecodable bytes is the case the reader used
     /// to report as unset, and it cannot be written as one.
     fn aid_with(&self, args: &[&str], extra: &[(&str, &OsStr)]) -> Run {
+        let mut command = self.command(args, extra);
+        Run::of(&command.output().expect("the aid binary runs"), &self.root)
+    }
+
+    /// `aid` in a session of its own with stdin closed: no controlling terminal, so
+    /// a developer's terminal can never be handed a real picker.
+    fn aid_detached(&self, args: &[&str]) -> Run {
+        use std::os::unix::process::CommandExt as _;
+        let mut command = self.command(args, &[]);
+        command.stdin(std::process::Stdio::null());
+        // SAFETY: `setsid` is async-signal-safe and touches no memory of ours.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Run::of(&command.output().expect("the aid binary runs"), &self.root)
+    }
+
+    fn command(&self, args: &[&str], extra: &[(&str, &OsStr)]) -> Command {
         let root = self.root.display().to_string();
         let mut command = Command::new(env!("CARGO_BIN_EXE_aid"));
         command
@@ -104,7 +127,7 @@ impl World {
         for (name, value) in extra {
             command.env(name, value);
         }
-        Run::of(&command.output().expect("the aid binary runs"), &self.root)
+        command
     }
 
     /// The devpod calls made so far, in order, with `devpod list` left out — the
@@ -721,6 +744,43 @@ fn resume_reopens_a_session_in_the_named_workspace_through_dls_own_launch() {
                  --dangerously-skip-permissions --remote-control={MAIN} --resume'"
             ),
         ]
+    );
+}
+
+#[test]
+fn resume_with_no_terminal_says_why_nothing_was_picked_and_what_to_type() {
+    let world = World::with(&["--warm"]);
+    let run = world.aid_detached(&["resume"]);
+    run.exited(1);
+    assert!(
+        run.err.contains(
+            "aid resume needs a terminal to pick a workspace. Name one instead: aid resume <workspace>"
+        ),
+        "{:?}",
+        run.err
+    );
+    assert!(
+        world.devpod_calls().is_empty(),
+        "{:?}",
+        world.devpod_calls()
+    );
+}
+
+#[test]
+fn resume_with_no_workspaces_says_how_to_make_one() {
+    let world = World::with(&["--no-workspaces"]);
+    let run = world.aid_detached(&["resume"]);
+    run.exited(1);
+    assert!(
+        run.err
+            .contains("No workspaces found. Create one with: dl owner/repo or dl ./path"),
+        "{:?}",
+        run.err
+    );
+    assert!(
+        world.devpod_calls().is_empty(),
+        "{:?}",
+        world.devpod_calls()
     );
 }
 

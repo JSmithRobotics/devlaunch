@@ -1688,8 +1688,10 @@ fn render_select<'r>(
 /// The same picker, the same listing and the same `Picked <row> -> <id>` line as
 /// [`render_select`], and one thing left out: the help a pick that never came ends
 /// on. That help is dl's, and somebody who typed `aid resume` did not ask for dl's
-/// grammar. The sentences for an empty list and for a run with no terminal stay,
-/// because they say why nothing was offered.
+/// grammar. An empty list keeps dl's sentence, which says how to make a workspace.
+/// A run with no terminal gets one of its own in place of the invitation, which
+/// would ask for a pick nobody can make: it says a terminal is missing and how to
+/// name the workspace instead.
 pub(crate) fn pick_one(runner: &dyn Runner) -> Result<String, Ending> {
     // The picker reads each row's clone under the cache for its columns. With no
     // cache there is nothing to draw, and the refusal is every other command's.
@@ -1718,7 +1720,9 @@ pub(crate) fn pick_one(runner: &dyn Runner) -> Result<String, Ending> {
             Err(Ending::Refused)
         }
         select::Pick::NoTerminal => {
-            eprintln!("{}", select::invitation(select::Arity::One));
+            eprintln!(
+                "aid resume needs a terminal to pick a workspace. Name one instead: aid resume <workspace>"
+            );
             Err(Ending::Refused)
         }
     }

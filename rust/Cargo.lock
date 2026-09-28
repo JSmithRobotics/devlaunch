@@ -17,6 +17,7 @@ version = "0.56.0"
 dependencies = [
  "devlaunch-test-support",
  "dl",
+ "libc",
  "portable-pty",
  "serde_json",
  "tempfile",
