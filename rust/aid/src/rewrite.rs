@@ -34,7 +34,31 @@ struct Agent {
     /// line asking for Remote Control is a launch or a refusal, so the capability is
     /// stated once and consulted from both ends.
     remote_control: Option<&'static str>,
+    /// The words that reopen one of this agent's earlier sessions instead of
+    /// starting a new one: what `aid resume` appends in place of a prompt.
+    ///
+    /// Words rather than a flag, because the agents do not agree on the shape.
+    /// claude takes a flag, and a bare `--resume` opens its session picker. codex
+    /// takes a subcommand, and a bare `resume` opens its picker too. gemini takes a
+    /// flag, and a bare `--resume` reopens the latest session, since gemini keeps
+    /// its picker inside the session (`/resume`). The words go last on the line,
+    /// because claude's `--resume [value]` takes an optional value and would read
+    /// any word after it as a search term.
+    ///
+    /// The claude row was read off `claude --help` (2.1.x). The codex and gemini
+    /// rows are those CLIs' documented spellings and were not run where this was
+    /// written, because neither was installed there.
+    resume: &'static [&'static str],
 }
+
+/// The word that makes a line reopen an earlier session: `aid resume [workspace]`.
+///
+/// A verb and not a flag, for dl's reason: `dl stop` is the verb with no
+/// workspace, and a verb in the first slot is what the picker hangs off. Only the
+/// first positional word is read this way, so `aid owner/repo resume the work` is
+/// still a prompt, and `aid ./resume` still names a directory. The cost is dl's
+/// cost too: a workspace called `resume` has to be written `aid resume resume`.
+pub(crate) const RESUME_WORD: &str = "resume";
 
 /// The agent this build starts when nothing picks one.
 pub(crate) const DEFAULT_AGENT: &str = "claude";
@@ -122,6 +146,7 @@ const AGENTS: &[(&str, Agent)] = &[
                 ("IS_SANDBOX", "1"),
             ],
             remote_control: Some("--remote-control"),
+            resume: &["--resume"],
         },
     ),
     (
@@ -131,6 +156,7 @@ const AGENTS: &[(&str, Agent)] = &[
             prompt_flags: &[],
             env: &[],
             remote_control: None,
+            resume: &["resume"],
         },
     ),
     (
@@ -140,6 +166,7 @@ const AGENTS: &[(&str, Agent)] = &[
             prompt_flags: &["--prompt-interactive"],
             env: &[],
             remote_control: None,
+            resume: &["--resume"],
         },
     ),
 ];
@@ -281,6 +308,13 @@ pub(crate) enum UsageError {
     /// who thinks they turned something off, and silently meaning *off* is a person
     /// who thinks they turned something on.
     UnknownRemoteControlInEnvironment { value: String },
+    /// `aid resume <workspace>` with words after the workspace.
+    ///
+    /// Refused rather than handed on, because the words have no one place to go:
+    /// claude would read them as a search term for its picker, codex as a session
+    /// id, and gemini as a session index. A line that means three things by agent
+    /// is a line nobody can predict.
+    ResumeTakesNoPrompt { words: String },
 }
 
 /// The variables aid reads, resolved by the caller.
@@ -411,6 +445,17 @@ pub(crate) enum Task {
         /// had, and no later stage has to ask again.
         remote_control: RemoteControl,
     },
+    /// Reopen one of the agent's earlier sessions in the workspace: `aid resume`.
+    ///
+    /// Its own arm and not an [`Task::Agent`] with a flag, because it has no prompt.
+    /// The agent's own picker is what chooses the session, so a prompt beside it
+    /// would be a field to ignore, and the interactive editor, which asks for a
+    /// prompt, must not open for it.
+    Resume {
+        agent: String,
+        /// As on [`Task::Agent`]: settled against the agent's table row.
+        remote_control: RemoteControl,
+    },
     /// A line spelling a flag this build has retired ([`SUFFIX_RETIRED`]).
     ///
     /// Carries nothing: what it asks dl for is the *refusal*, which is dl's sentence
@@ -427,7 +472,7 @@ impl AidArgs {
     /// caller needs when reporting an agent name the environment invented.
     pub(crate) fn agent(&self) -> Option<&str> {
         match &self.task {
-            Task::Agent { agent, .. } => Some(agent),
+            Task::Agent { agent, .. } | Task::Resume { agent, .. } => Some(agent),
             Task::Retired => None,
         }
     }
@@ -455,6 +500,50 @@ impl AidArgs {
     pub(crate) fn with_spec(mut self, spec: String) -> Self {
         self.spec = spec;
         self
+    }
+}
+
+/// What the parse settled: a line that names its workspace, or one that asks for
+/// the picker first.
+///
+/// Two arms rather than an `Option` spec on [`AidArgs`], because only one line can
+/// be missing its workspace — `aid resume` on its own — and everything downstream
+/// of the parse (the pull request lookup, the banner, the boot, the dl line) needs
+/// a workspace to act on. Keeping the gap out here is what lets [`AidArgs::spec`]
+/// stay a `String` that is always there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Line {
+    Ready(AidArgs),
+    /// `aid resume` with no workspace: pick one, then [`Unpicked::picked`].
+    Unpicked(Unpicked),
+}
+
+/// An `aid resume` line waiting for the workspace the picker will choose.
+///
+/// Everything [`AidArgs`] holds except the spec, with the task's fields in place
+/// of a [`Task`], because the only task a line with no workspace can reach is
+/// [`Task::Resume`]. Private fields and one way out, so the only thing that can be
+/// done with it is to name the workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Unpicked {
+    dl_options: Vec<String>,
+    spec_options: Vec<String>,
+    agent: String,
+    remote_control: RemoteControl,
+}
+
+impl Unpicked {
+    /// The same line, for the workspace that was picked.
+    pub(crate) fn picked(self, spec: String) -> AidArgs {
+        AidArgs {
+            spec,
+            dl_options: self.dl_options,
+            spec_options: self.spec_options,
+            task: Task::Resume {
+                agent: self.agent,
+                remote_control: self.remote_control,
+            },
+        }
     }
 }
 
@@ -629,10 +718,15 @@ fn peel_suffix(argv: &[String]) -> Option<Suffix<'_>> {
 /// A `--rm` can also arrive *before* the spec (`aid --rm owner/repo fix it`), which
 /// is the same request written the other way round: an unrecognised leading flag is
 /// passed through to dl, and dl takes it in either position.
+///
+/// [`RESUME_WORD`] in the spec's place makes it a resume line, and the next
+/// positional word is the spec. With none, the answer is [`Line::Unpicked`] and
+/// the caller asks the picker, unless the line spells a retired flag: that is
+/// [`UsageError::NoWorkspace`], as it is on any other line with no spec.
 pub(crate) fn parse_aid_args(
     argv: &[String],
     environment: Environment<'_>,
-) -> Result<AidArgs, UsageError> {
+) -> Result<Line, UsageError> {
     // Resolved before anything else, and kept even for a line that turns out to
     // start no agent: a `DEVLAUNCH_AID_AGENT` naming an agent that does not exist
     // is broken regardless of what this particular line asked for. Same for a
@@ -645,6 +739,7 @@ pub(crate) fn parse_aid_args(
     };
     let mut dl_options: Vec<String> = Vec::new();
     let mut spec: Option<String> = None;
+    let mut resuming = false;
     let mut at = 0;
     while at < line.len() {
         let word = line[at].as_str();
@@ -680,13 +775,29 @@ pub(crate) fn parse_aid_args(
             at += 1;
             continue;
         }
+        // Once, so that `aid resume resume` still reaches a workspace called that.
+        if word == RESUME_WORD && !resuming {
+            resuming = true;
+            at += 1;
+            continue;
+        }
         spec = Some(word.to_owned());
         at += 1;
         break;
     }
-    let Some(spec) = spec else {
+    // The words after the spec, which are a prompt everywhere but a resume line.
+    let rest = &line[at.min(line.len())..];
+    if resuming && !rest.is_empty() {
+        return Err(UsageError::ResumeTakesNoPrompt {
+            words: rest.join(" "),
+        });
+    }
+    // dl is what refuses a retired spelling, and it needs a workspace to be asked
+    // about, so a resume line carrying one goes no further than `aid --stop` does.
+    let retired = names_a_retired_spelling(&trailing);
+    if spec.is_none() && (!resuming || retired) {
         return Err(UsageError::NoWorkspace);
-    };
+    }
     // A run at the end of the line was typed after everything before it, so it wins
     // for the same reason the last of two leading flags does. This is the position
     // the off switch is actually typed in: appending to a recalled line is the cheap
@@ -699,22 +810,34 @@ pub(crate) fn parse_aid_args(
     // looks like. Settled before the task is built, so the `RemoteControl` the task
     // carries is one an agent row supplied the flag for.
     let remote_control = remote_control.settle(&agent)?;
-    let prompt = line[at.min(line.len())..].join(" ");
-    let retired = names_a_retired_spelling(&trailing);
-    Ok(AidArgs {
+    let Some(spec) = spec else {
+        return Ok(Line::Unpicked(Unpicked {
+            dl_options,
+            spec_options: trailing,
+            agent,
+            remote_control,
+        }));
+    };
+    let task = if retired {
+        Task::Retired
+    } else if resuming {
+        Task::Resume {
+            agent,
+            remote_control,
+        }
+    } else {
+        Task::Agent {
+            agent,
+            prompt: rest.join(" "),
+            remote_control,
+        }
+    };
+    Ok(Line::Ready(AidArgs {
         spec,
         dl_options,
         spec_options: trailing,
-        task: if retired {
-            Task::Retired
-        } else {
-            Task::Agent {
-                agent,
-                prompt,
-                remote_control,
-            }
-        },
-    })
+        task,
+    }))
 }
 
 /// Which agent `--gemini` and friends name.
@@ -754,6 +877,35 @@ pub(crate) fn build_agent_command(
     prompt: &str,
     remote_control: Option<&str>,
 ) -> Option<NonEmpty<String>> {
+    agent_line(agent, Opening::Prompt(prompt), remote_control)
+}
+
+/// The argv that reopens one of the agent's earlier sessions inside the workspace.
+///
+/// [`build_agent_command`]'s line with the agent's [`Agent::resume`] words where
+/// the prompt would go: the same variables, the same full-auto flag and the same
+/// Remote Control name, so a resumed session is started exactly as the one it
+/// resumes was.
+pub(crate) fn build_resume_command(
+    agent: &str,
+    remote_control: Option<&str>,
+) -> Option<NonEmpty<String>> {
+    agent_line(agent, Opening::Resume, remote_control)
+}
+
+/// How a session begins: with a prompt (empty for none), or by reopening one.
+#[derive(Clone, Copy)]
+enum Opening<'a> {
+    Prompt(&'a str),
+    Resume,
+}
+
+/// The one builder behind [`build_agent_command`] and [`build_resume_command`].
+fn agent_line(
+    agent: &str,
+    opening: Opening<'_>,
+    remote_control: Option<&str>,
+) -> Option<NonEmpty<String>> {
     let (_, started) = AGENTS.iter().find(|(name, _)| *name == agent)?;
     // No prompt to be interactive about: start the agent's plain session, without
     // the flags that only make sense alongside one.
@@ -765,9 +917,13 @@ pub(crate) fn build_agent_command(
     if let Some(named_session) = &named_session {
         words.push(named_session.as_str());
     }
-    if !prompt.is_empty() {
-        words.extend(started.prompt_flags.iter().copied());
-        words.push(prompt);
+    match opening {
+        Opening::Prompt("") => {}
+        Opening::Prompt(prompt) => {
+            words.extend(started.prompt_flags.iter().copied());
+            words.push(prompt);
+        }
+        Opening::Resume => words.extend(started.resume.iter().copied()),
     }
     // Assignments prefixing a command set the variables for that command only, so
     // the agent is the one process that sees them and nothing in the login shell dl
@@ -820,36 +976,36 @@ pub(crate) fn build_dl_args(
     // Behind the spec and ahead of the verb flags, which is where dl reads them as
     // modifiers rather than as the workspace's name.
     args.extend(parsed.spec_options.iter().cloned());
-    match &parsed.task {
+    // The session is named after the workspace, so the list on claude.ai reads as
+    // the workspaces they opened, and by its id rather than the spec as typed,
+    // because the id is a name another agent can message. Claude Code's
+    // `SendMessage` refuses any `to` holding a `/` ("to must be a bare teammate
+    // name"), which every `owner/repo` spec does, and the id is the name `dl --ls`,
+    // devpod and the hostname already use.
+    //
+    // The spec is the fallback only for a spec no id can be found for, which the
+    // launch below then refuses itself. A resumed session takes the same name, so
+    // it is listed on claude.ai where the session it resumes was.
+    let session = |remote_control: &RemoteControl| match remote_control {
+        RemoteControl::On => {
+            Some(workspace_id_of(&parsed.spec).unwrap_or_else(|| parsed.spec.clone()))
+        }
+        RemoteControl::Off => None,
+    };
+    let command = match &parsed.task {
         Task::Agent {
             agent,
             prompt,
             remote_control,
-        } => {
-            args.push("--".to_owned());
-            // The session is named after the workspace, so the list on claude.ai
-            // reads as the workspaces they opened, and by its id rather than the
-            // spec as typed, because the id is a name another agent can message.
-            // Claude Code's `SendMessage` refuses any `to` holding a `/` ("to must
-            // be a bare teammate name"), which every `owner/repo` spec does, and
-            // the id is the name `dl --ls`, devpod and the hostname already use.
-            //
-            // The spec is the fallback only for a spec no id can be found for,
-            // which the launch below then refuses itself.
-            let session = match remote_control {
-                RemoteControl::On => {
-                    Some(workspace_id_of(&parsed.spec).unwrap_or_else(|| parsed.spec.clone()))
-                }
-                RemoteControl::Off => None,
-            };
-            args.extend(
-                build_agent_command(agent, prompt, session.as_deref())?
-                    .iter()
-                    .cloned(),
-            );
-        }
-        Task::Retired => {}
-    }
+        } => build_agent_command(agent, prompt, session(remote_control).as_deref())?,
+        Task::Resume {
+            agent,
+            remote_control,
+        } => build_resume_command(agent, session(remote_control).as_deref())?,
+        Task::Retired => return Some(args),
+    };
+    args.push("--".to_owned());
+    args.extend(command.iter().cloned());
     Some(args)
 }
 
@@ -873,6 +1029,19 @@ mod tests {
         argv.iter().map(|word| (*word).to_owned()).collect()
     }
 
+    /// [`super::parse_aid_args`] for a line that names its workspace, which is
+    /// every line these tests parse but the ones that ask for the picker. Those
+    /// call [`super::parse_aid_args`] by its full path.
+    fn parse_aid_args(
+        argv: &[String],
+        environment: Environment<'_>,
+    ) -> Result<AidArgs, UsageError> {
+        super::parse_aid_args(argv, environment).map(|line| match line {
+            Line::Ready(parsed) => parsed,
+            Line::Unpicked(unpicked) => panic!("{argv:?} asked for the picker: {unpicked:?}"),
+        })
+    }
+
     fn parsed(argv: &[&str]) -> AidArgs {
         parse_aid_args(&words(argv), Environment::default()).expect("a usable command line")
     }
@@ -893,12 +1062,13 @@ mod tests {
         }
     }
 
-    /// The prompt an agent line carries. Panics on a retired-spelling line, which
-    /// carries none.
+    /// The prompt an agent line carries. Panics on a retired-spelling line or a
+    /// resume line, which carry none.
     fn prompt(parsed: &AidArgs) -> &str {
         match &parsed.task {
             Task::Agent { prompt, .. } => prompt,
             Task::Retired => panic!("a retired-spelling line has no prompt"),
+            Task::Resume { .. } => panic!("a resume line has no prompt"),
         }
     }
 
@@ -906,7 +1076,9 @@ mod tests {
     /// which starts no session to drive.
     fn remote_control(parsed: &AidArgs) -> RemoteControl {
         match &parsed.task {
-            Task::Agent { remote_control, .. } => *remote_control,
+            Task::Agent { remote_control, .. } | Task::Resume { remote_control, .. } => {
+                *remote_control
+            }
             Task::Retired => panic!("a retired-spelling line starts no agent"),
         }
     }
@@ -2216,5 +2388,143 @@ mod tests {
                 .any(|word| word == "--remote-control=owner/repo"),
             "{built:?}"
         );
+    }
+
+    // ------------------------------------------------------- aid resume
+
+    /// A resume line that names no workspace, waiting for the picker.
+    fn unpicked(argv: &[&str]) -> Unpicked {
+        match super::parse_aid_args(&words(argv), Environment::default()) {
+            Ok(Line::Unpicked(unpicked)) => unpicked,
+            other => panic!("{argv:?} did not ask for the picker: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resume_alone_asks_for_the_picker_and_then_resumes_claude_in_the_pick() {
+        // The whole feature, end to end on the aid side: the picked id becomes the
+        // spec, and the line is a fresh launch's with `--resume` where the prompt
+        // would be. `--resume` is last because claude reads a word after it as a
+        // search term.
+        let parsed = unpicked(&["resume"]).picked("devlaunch-main-3j1t".to_owned());
+
+        assert_eq!(
+            build_dl_args(&parsed, &id_of).expect("a known agent"),
+            [
+                "devlaunch-main-3j1t",
+                "--",
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--remote-control=ws-id",
+                "--resume",
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_with_a_workspace_needs_no_picker() {
+        let parsed = parsed(&["resume", "owner/repo@branch"]);
+
+        assert_eq!(parsed.spec, "owner/repo@branch");
+        assert_eq!(
+            parsed.task,
+            Task::Resume {
+                agent: "claude".to_owned(),
+                remote_control: RemoteControl::On,
+            }
+        );
+    }
+
+    #[test]
+    fn every_agent_resumes_with_its_own_words_at_the_end_of_the_line() {
+        for (name, agent) in AGENTS {
+            let flag = format!("--{name}");
+            let built =
+                build_dl_args(&parsed(&[&flag, "resume", "ws"]), &id_of).expect("a known agent");
+
+            assert!(!agent.resume.is_empty(), "{name} has no way to resume");
+            assert!(built.ends_with(&words(agent.resume)), "{name}: {built:?}");
+            // Still full auto: a resumed session is started as a fresh one is.
+            for word in agent.command {
+                assert!(built.iter().any(|built| built == word), "{name}: {built:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_agent_flag_and_the_off_switch_work_on_either_side_of_resume() {
+        for argv in [["--codex", "resume", "ws"], ["resume", "--codex", "ws"]] {
+            assert_eq!(parsed(&argv).agent(), Some("codex"), "{argv:?}");
+        }
+        for argv in [
+            ["--no-remote", "resume", "ws"],
+            ["resume", "ws", "--no-remote"],
+        ] {
+            let built = build_dl_args(&parsed(&argv), &id_of).expect("a known agent");
+            assert!(
+                !built
+                    .iter()
+                    .any(|word| word.starts_with("--remote-control")),
+                "{argv:?}: {built:?}"
+            );
+            assert_eq!(built.last().map(String::as_str), Some("--resume"));
+        }
+    }
+
+    #[test]
+    fn words_after_the_workspace_on_a_resume_line_are_refused() {
+        assert_eq!(
+            super::parse_aid_args(
+                &words(&["resume", "owner/repo", "fix", "it"]),
+                Environment::default()
+            ),
+            Err(UsageError::ResumeTakesNoPrompt {
+                words: "fix it".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn resume_is_a_verb_only_in_the_first_slot() {
+        // After the spec it is prompt text, as every word there is.
+        assert_eq!(
+            prompt(&parsed(&["owner/repo", "resume", "the", "work"])),
+            "resume the work"
+        );
+        // And said twice, the second is a workspace called `resume`.
+        let twice = parsed(&["resume", "resume"]);
+        assert_eq!(twice.spec, "resume");
+        assert!(matches!(twice.task, Task::Resume { .. }));
+    }
+
+    #[test]
+    fn rm_rides_a_resume_line_from_either_end() {
+        let leading = unpicked(&["--rm", "resume"]).picked("ws".to_owned());
+        let trailing = parsed(&["resume", "ws", "--rm"]);
+
+        for built in [leading, trailing].map(|line| build_dl_args(&line, &id_of)) {
+            let built = built.expect("a known agent");
+            let separator = built.iter().position(|word| word == "--").expect("a --");
+            assert!(built[..separator].contains(&"--rm".to_owned()), "{built:?}");
+            assert_eq!(built.last().map(String::as_str), Some("--resume"));
+        }
+    }
+
+    #[test]
+    fn a_retired_spelling_on_a_resume_line_with_no_workspace_asks_for_one_before_any_picker() {
+        for retired in ["--stop", "--autorm"] {
+            assert_eq!(
+                super::parse_aid_args(&words(&["resume", retired]), Environment::default()),
+                Err(UsageError::NoWorkspace),
+                "{retired}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retired_spelling_on_a_resume_line_with_a_workspace_is_left_for_dl_to_refuse() {
+        assert_eq!(parsed(&["resume", "ws", "--autorm"]).task, Task::Retired);
     }
 }

@@ -106,9 +106,12 @@ fn run(argv: &[String]) -> i32 {
     // No arguments is the help *and* a failure, which is Python's pair of endings for
     // one body: somebody who typed `aid` asked for a workspace and named none, and
     // somebody who typed `aid --help` got what they asked for.
-    let asked_for_help = argv
-        .first()
-        .is_some_and(|word| word == "--help" || word == "-h");
+    let is_help = |word: &String| word == "--help" || word == "-h";
+    let asked_for_help = match argv {
+        [first, second, ..] if first == rewrite::RESUME_WORD => is_help(second),
+        [first, ..] => is_help(first),
+        [] => false,
+    };
     if argv.is_empty() || asked_for_help {
         print!("{}", help());
         return if argv.is_empty() { 1 } else { 0 };
@@ -139,7 +142,14 @@ fn run(argv: &[String]) -> i32 {
         remote_control: remote_control.as_deref(),
     };
     let parsed = match rewrite::parse_aid_args(argv, environment) {
-        Ok(parsed) => parsed,
+        Ok(rewrite::Line::Ready(parsed)) => parsed,
+        // `aid resume` with no workspace. The pick comes before everything below,
+        // which is all about one named workspace, so from here on this line is an
+        // `aid resume <id>` like any other.
+        Ok(rewrite::Line::Unpicked(unpicked)) => match dl::pick_workspace() {
+            Ok(workspace_id) => unpicked.picked(workspace_id),
+            Err(code) => return code,
+        },
         Err(refused) => {
             eprintln!("{}", refusal(&refused));
             return 1;
@@ -260,6 +270,11 @@ fn refusal(refused: &UsageError) -> String {
             dl::python_repr(value),
             rewrite::remote_control_values().join(", ")
         ),
+        UsageError::ResumeTakesNoPrompt { words } => format!(
+            "aid resume takes a workspace and nothing after it, not {}: the agent's own \
+             picker chooses the session. Use aid resume [<workspace>].",
+            dl::python_repr(words)
+        ),
     }
 }
 
@@ -293,6 +308,14 @@ already running, and never rebuilt just because aid asked for it.
 Usage:
     aid <user/repo>[@branch] [prompt...]   Open the workspace and start the agent
     aid <workspace> [prompt...]            Same, for an existing workspace or ./path
+    aid resume [<workspace>]               Reopen an earlier agent session in the
+                                           workspace. With no workspace, pick one
+                                           from dl's picker first
+
+`aid resume` starts the agent the way a fresh launch does (same agent flag,
+full-auto, Remote Control named after the workspace) and hands it its own
+resume words: claude and codex open their session picker, and gemini
+reopens its latest session.
 
 With no prompt on a terminal, aid boots the workspace in the background and
 asks for the prompt while it does: type it free of shell quoting and press
@@ -348,6 +371,8 @@ Examples:
     aid blooop/devlaunch@fix/42 fix the bug    # Open the branch, hand over the prompt
     aid --gemini ./my-project explain this     # Pick a different agent
     aid --no-remote blooop/devlaunch           # Nothing but the session in front of you
+    aid resume                                 # Pick a workspace, then a session in it
+    aid resume blooop/devlaunch@fix/42         # Pick a session in that workspace
     aid blooop/devlaunch@fix/42 fix the bug --rm
                                                # The line above, recalled, with the
                                                # workspace deleted once the agent is
@@ -536,6 +561,14 @@ mod tests {
         );
         assert!(help.contains("empty Enter"), "{help}");
         assert!(help.contains("DEVLAUNCH_NO_TTY=1"), "{help}");
+    }
+
+    #[test]
+    fn the_help_names_resume_and_what_it_opens() {
+        let help = help();
+
+        assert!(help.contains("aid resume [<workspace>]"), "{help}");
+        assert!(help.contains("from dl's picker"), "{help}");
     }
 
     #[test]

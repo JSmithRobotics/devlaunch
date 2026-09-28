@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.0] - 2026-09-28
+
+### Added
+
+- **`aid resume` reopens an agent session in one command.** After a restart, `aid resume`
+  opens the workspace picker, starts the workspace, and starts the agent with its own
+  resume words: `claude --resume` and `codex resume` open their session pickers, and
+  `gemini --resume` reopens the latest session. The agent is started as a fresh `aid`
+  launch starts it, so full auto, Remote Control named after the workspace id, `--rm`
+  and `--no-remote` all still apply. `aid resume <workspace>` skips the workspace picker.
+
 ## [0.56.0] - 2026-09-28
 
 ### Added

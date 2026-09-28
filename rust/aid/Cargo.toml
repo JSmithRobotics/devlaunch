@@ -30,6 +30,8 @@ dl = { path = "../dl" }
 dev-build = ["dl/dev-build"]
 
 [dev-dependencies]
+# `setsid` for the tests that need `aid` to run with no controlling terminal.
+libc = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 # The harness crate, and only ever that: `KeepingCoverage`, so the boundary tests

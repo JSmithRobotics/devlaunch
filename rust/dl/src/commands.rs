@@ -1682,6 +1682,46 @@ fn render_select<'r>(
     }
 }
 
+/// One workspace from the picker, for a caller that builds its own command line
+/// around the answer: `aid resume` with no workspace named.
+///
+/// The same picker, the same listing and the same `Picked <row> -> <id>` line as
+/// [`render_select`], and one thing left out: the help a pick that never came ends
+/// on. That help is dl's, and somebody who typed `aid resume` did not ask for dl's
+/// grammar. An empty list keeps dl's sentence, which says how to make a workspace.
+/// A run with no terminal gets one of its own in place of the invitation, which
+/// would ask for a pick nobody can make: it says a terminal is missing and how to
+/// name the workspace instead.
+pub(crate) fn pick_one(runner: &dyn Runner) -> Result<String, Ending> {
+    // The picker reads each row's clone under the cache for its columns. With no
+    // cache there is nothing to draw, and the refusal is every other command's.
+    let cache =
+        crate::session::cache_dir().map_err(|_| refuse_startup(&StartupError::NoHomeDirectory))?;
+    let mut context = CommandContext::new(runner);
+    let workspaces = context
+        .workspaces()
+        .map_err(|refused| refuse_listing(&refused))?;
+    match select::pick(&workspaces, select::Arity::One, &cache) {
+        select::Pick::Chose(chosen) => {
+            for line in render::picked("resume", &chosen) {
+                eprintln!("{line}");
+            }
+            Ok(chosen.first().workspace_id.clone())
+        }
+        select::Pick::Quit => Err(Ending::Refused),
+        select::Pick::NoWorkspaces => {
+            eprintln!("No workspaces found. Create one with: dl owner/repo or dl ./path");
+            Err(Ending::Refused)
+        }
+        select::Pick::NoTerminal => {
+            eprintln!(
+                "aid resume needs a terminal to pick a workspace. Name one instead: aid resume <workspace>"
+            );
+            Err(Ending::Refused)
+        }
+    }
+}
+
 /// Python's ending for a selector that chose nothing: the help, and exit 1.
 fn no_pick() -> Ending {
     let _ = <cli::Cli as clap::CommandFactory>::command().print_help();

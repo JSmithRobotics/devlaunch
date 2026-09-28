@@ -730,6 +730,48 @@ claude all take it offline immediately. The entry can sit in the claude.ai list 
 roughly 4 hours after that before it clears, which is the web side timing out rather
 than anything still running on your machine.
 
+## `aid resume`: back into a session after a restart
+
+```bash
+aid resume [<workspace>]
+```
+
+A machine that turns off ends every agent session and stops every container. The
+conversation is not lost: the agent keeps it on disk inside the container, and a
+stopped container keeps its disk.
+`aid resume` is the way back in, in one command. With no workspace it opens the same
+picker `dl` does. Then it starts the workspace and hands the agent its own resume
+words, so for claude it is exactly
+
+```bash
+dl <picked-id> -- CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude --dangerously-skip-permissions --remote-control=<picked-id> --resume
+```
+
+and claude's picker lists the sessions that were run in that workspace. Everything a
+fresh `aid` launch does still happens: the same full-auto flag, the same Remote Control
+name, `--no-remote` and `--rm` from either end of the line, and the agent flags. The
+words per agent are these:
+
+| Agent | Words | What the agent does |
+|---|---|---|
+| `claude` | `--resume` | Opens its session picker |
+| `codex` | `resume` | Opens its session picker |
+| `gemini` | `--resume` | Reopens its latest session. Its picker is `/resume`, inside the session |
+
+The claude row was checked against `claude --help`. The codex and gemini rows follow
+those CLIs' documentation and were not run.
+
+`resume` is a verb only in the first positional slot, the way `dl stop` is. After the
+workspace it is prompt text like any other word, so `aid owner/repo resume the work`
+still sends a prompt. A workspace that is itself called `resume` is `aid resume
+resume`. Words after the workspace on a resume line are refused before anything
+boots, because the three agents would each read them as something different: a
+search term, a session id, a session index.
+
+The picker is asked for before the line is built, not handed to `dl -- <command>` to
+open. The line names the Remote Control session after the workspace id, and the id is
+not known until the pick is made.
+
 ## `kill`: the workspace that will not answer
 
 `dl <ws> stop` asks devpod to stop a workspace, and it is the right thing to type

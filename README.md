@@ -19,7 +19,7 @@ one argument instead of a clone, a config file and a build command.
 [![GitHub pull-requests merged](https://badgen.net/github/merged-prs/blooop/devlaunch)](https://github.com/blooop/devlaunch/pulls?q=is%3Amerged)
 [![GitHub release](https://img.shields.io/github/release/blooop/devlaunch.svg)](https://GitHub.com/blooop/devlaunch/releases/)
 [![PyPI](https://img.shields.io/pypi/v/devlaunch)](https://pypi.org/project/devlaunch/)
-[![Conda](https://img.shields.io/badge/conda-v0.56.0-brightgreen?logo=anaconda)](https://prefix.dev/channels/blooop/packages/devlaunch)
+[![Conda](https://img.shields.io/badge/conda-v0.57.0-brightgreen?logo=anaconda)](https://prefix.dev/channels/blooop/packages/devlaunch)
 [![License](https://img.shields.io/github/license/blooop/devlaunch)](https://opensource.org/license/mit/)
 [![Platform](https://img.shields.io/badge/platform-linux--64-blue)](https://github.com/blooop/devlaunch/releases)
 [![Pixi Badge](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/prefix-dev/pixi/main/assets/badge/v0.json)](https://pixi.sh)
@@ -341,7 +341,7 @@ clone, and [docs/cleanup.md](docs/cleanup.md) says what it carries one past and 
 
 ```bash
 $ dl --version
-dl 0.56.0
+dl 0.57.0
 ```
 
 `--devcontainer <variant|path>` picks a non-default `devcontainer.json`. A bare name means
@@ -378,6 +378,7 @@ precedence order and what a profile does not change.
 
 ```bash
 aid <user/repo>[@branch|@<pr-link>] [prompt...]
+aid resume [<workspace>]
 ```
 
 `aid` is a shortcut, not a second launcher. It rewrites its command line into a `dl` one, so
@@ -439,6 +440,12 @@ This applies to agents `aid` starts, and nothing else. `dl <ws> -- claude` runs 
 typed.
 
 The agent's CLI has to be in the container already. `aid` runs it; it does not install it.
+
+After a restart, `aid resume` is the way back into an agent session in one command. It
+opens `dl`'s picker, starts the workspace you pick, and starts the agent with its own
+resume picker, Remote Control and full auto included. `aid resume <workspace>` skips the
+first picker. [docs/cli.md](docs/cli.md#aid-resume-back-into-a-session-after-a-restart)
+has the words per agent.
 
 ## What every workspace gets
 
