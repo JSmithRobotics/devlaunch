@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The picker no longer panics when `TERM` names no usable terminal.** With `TERM` unset,
+  or naming a terminfo entry the machine does not have, `dl`'s workspace picker (and
+  `aid resume`'s) aborted with a panic before it drew a row. It now draws as
+  `xterm-256color`, says so once the picker closes, and gives the session it opens
+  your own `TERM` back.
+
 ## [0.57.0] - 2026-09-28
 
 ### Added

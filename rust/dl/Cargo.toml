@@ -18,6 +18,7 @@ libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 skim = { workspace = true }
+term = { workspace = true }
 
 # The released package ships two binaries, and a maturin bin-wheel ships the bin
 # targets of exactly *one* cargo package (maturin 1.14 asks cargo metadata for

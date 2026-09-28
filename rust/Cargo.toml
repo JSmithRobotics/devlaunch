@@ -36,6 +36,10 @@ toml = "0.9"
 toml_edit = "0.23"
 clap = { version = "4", features = ["derive"] }
 skim = "0.20"
+# The terminfo lookup skim's terminal setup makes and unwraps, made first so a
+# `TERM` it would panic on can be replaced (dl's `select.rs`). The version skim
+# resolves, so the answer is the one skim would have reached.
+term = "0.7"
 # flock(2) — per open file description, kernel-released — as Python's
 # fcntl.flock. fd-lock 4 gets its semantics from the same rustix call, but its
 # guard borrows the RwLock and unlocks on drop, so an owned guard would have to

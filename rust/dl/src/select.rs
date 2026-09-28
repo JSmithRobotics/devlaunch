@@ -755,6 +755,7 @@ fn skim_options(arity: Arity, heading: &str) -> SkimOptions {
 
 /// The rows skim was left on: empty when the picker was quit without an answer.
 fn run_skim(offering: &Offering, arity: Arity) -> Vec<String> {
+    let _drawable = DrawableTerm::ensure();
     let options = skim_options(arity, &offering.heading);
     let (tx, rx): (SkimItemSender, SkimItemReceiver) = unbounded();
     for row in rows_of(&offering.offers) {
@@ -778,6 +779,69 @@ fn run_skim(offering: &Offering, arity: Arity) -> Vec<String> {
         .iter()
         .map(|item| item.output().into_owned())
         .collect()
+}
+
+/// The `TERM` the picker is drawn under when the process's own names no terminfo
+/// entry.
+///
+/// Any `xterm*` name resolves, from the database or else from the `term` crate's
+/// built-in ANSI entry, so this cannot fail the way the name it replaces did. And
+/// it is what nearly every terminal emulator answers to.
+const FALLBACK_TERM: &str = "xterm-256color";
+
+/// A `TERM` swapped for [`FALLBACK_TERM`] while skim runs, put back on drop.
+///
+/// skim's terminal setup looks up the terminfo entry `TERM` names and unwraps the
+/// answer (`Skim::run_with`), so a real terminal with `TERM` unset, or naming an
+/// entry this machine lacks (a terminal's own name inside a container without it),
+/// panicked before drawing a row. skim takes no terminfo of its own, so the
+/// variable is the only thing that can be changed. It is put back so that the
+/// session a pick goes on to open inherits the user's `TERM`, not this one.
+struct DrawableTerm {
+    before: Option<std::ffi::OsString>,
+    /// Why the swap was made, said once the picker has given the screen back.
+    reason: String,
+}
+
+impl DrawableTerm {
+    /// `None` when skim can already draw under the `TERM` there is.
+    fn ensure() -> Option<Self> {
+        let reason = match term::terminfo::TermInfo::from_env() {
+            Ok(_) => return None,
+            Err(term::Error::TermUnset) => "TERM is unset".to_owned(),
+            Err(_) => format!(
+                "TERM={} has no usable terminfo entry here",
+                std::env::var_os("TERM")
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ),
+        };
+        let before = std::env::var_os("TERM");
+        // Safety: `set_var` races only a concurrent `getenv` or `setenv`. Nothing
+        // else runs in this process now but the runner's pipe readers, which only
+        // `read`, and skim has not started its threads yet.
+        unsafe { std::env::set_var("TERM", FALLBACK_TERM) };
+        Some(Self { before, reason })
+    }
+}
+
+impl Drop for DrawableTerm {
+    fn drop(&mut self) {
+        // After skim, not before: a line written first is on the screen the picker
+        // covers, and it would read as the reason nothing was drawn.
+        eprintln!(
+            "{}, so the picker was drawn as {FALLBACK_TERM}.",
+            self.reason
+        );
+        // Safety: as in `ensure`. `Skim::run_with` has returned, and joined its
+        // input thread, by the time this runs.
+        unsafe {
+            match self.before.take() {
+                Some(before) => std::env::set_var("TERM", before),
+                None => std::env::remove_var("TERM"),
+            }
+        }
+    }
 }
 
 /// The offers as skim items, each carrying its own position as the item index.

@@ -520,6 +520,7 @@ dependencies = [
  "serde_json",
  "skim",
  "tempfile",
+ "term",
 ]
 
 [[package]]

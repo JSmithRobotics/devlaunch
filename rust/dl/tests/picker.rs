@@ -292,6 +292,37 @@ fn taking_a_row_acts_on_the_workspace_that_rows_label_names() {
     );
 }
 
+#[test]
+fn a_terminal_whose_term_names_no_terminfo_entry_still_gets_a_picker() {
+    // skim unwraps its terminal setup, and that setup reads the terminfo entry
+    // `TERM` names. So a real terminal with `TERM` unset (`env -i`, a `docker exec
+    // -t` that sets none) or naming an entry this machine does not have (a
+    // terminal's own name, inside a container whose terminfo lacks it) aborted the
+    // whole command with a panic, before a single row was drawn.
+    for (term, said) in [
+        (None, "TERM is unset"),
+        (
+            Some("no-such-terminal"),
+            "TERM=no-such-terminal has no usable terminfo entry here",
+        ),
+    ] {
+        let (screen, calls, afterwards) = Screen::run_under(
+            term,
+            &["stop"],
+            "wayfinder",
+            |screen| screen.row_of("blooop-devlaunch").is_none(),
+            Dismiss::Take,
+        );
+
+        assert!(
+            calls.iter().any(|call| call == "stop blooop-wayfinder"),
+            "{term:?}: the pick never reached devpod, which was asked {calls:?}, from \
+             this screen:\n{screen}\nand then said {afterwards:?}"
+        );
+        assert!(afterwards.contains(said), "{term:?}: {afterwards:?}");
+    }
+}
+
 /// The batch. `dl rm` is the verb TAB exists for, and the heading is the only thing
 /// in the run that says how many rows it took — devpod's own lines arrive one at a
 /// time and say nothing about the extent of what was asked for.
@@ -403,6 +434,17 @@ impl Screen {
         settled: impl Fn(&Screen) -> bool,
         dismiss: Dismiss,
     ) -> (Self, Vec<String>, String) {
+        Self::run_under(Some("xterm-256color"), args, keys, settled, dismiss)
+    }
+
+    /// [`Self::run`] with `TERM` set to `term`, or unset for `None`.
+    fn run_under(
+        term: Option<&str>,
+        args: &[&str],
+        keys: &str,
+        settled: impl Fn(&Screen) -> bool,
+        dismiss: Dismiss,
+    ) -> (Self, Vec<String>, String) {
         let world = World::new();
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -415,7 +457,7 @@ impl Screen {
 
         let mut child = pair
             .slave
-            .spawn_command(world.command(args))
+            .spawn_command(world.command(args, term))
             .expect("the dl binary runs");
         // The slave is the child's now: held open here, the reader below would never
         // see EOF.
@@ -751,8 +793,9 @@ exit 0
     ///
     /// The same scratch `HOME`/`XDG_*`/`DEVPOD_HOME` shape `tests/read_side.rs`
     /// builds, for the same reason: nothing here may reach the real cache or the
-    /// real devpod. `TERM` is the one addition, since this run has a terminal.
-    fn command(&self, args: &[&str]) -> CommandBuilder {
+    /// real devpod. `TERM` is the one addition, since this run has a terminal, and
+    /// `None` leaves it unset.
+    fn command(&self, args: &[&str], term: Option<&str>) -> CommandBuilder {
         let root = self.root.display().to_string();
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_dl"));
         for argument in args {
@@ -774,7 +817,9 @@ exit 0
         command.env("XDG_CACHE_HOME", format!("{root}/cache"));
         command.env("XDG_CONFIG_HOME", format!("{root}/config"));
         command.env("DEVPOD_HOME", format!("{root}/devpod"));
-        command.env("TERM", "xterm-256color");
+        if let Some(term) = term {
+            command.env("TERM", term);
+        }
         command.env("GIT_SSH_COMMAND", "false");
         command.env("GIT_CONFIG_GLOBAL", "/dev/null");
         command.env("GIT_CONFIG_SYSTEM", "/dev/null");
