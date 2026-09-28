@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The picker no longer panics when `TERM` names no usable terminal.** With `TERM` unset,
+  or naming a terminfo entry the machine does not have, `dl`'s workspace picker (and
+  `aid resume`'s) aborted with a panic before it drew a row. A name like `xterm-kitty`
+  with no entry behind it did not panic but drew a garbled picker, because the entry it
+  got could not move the cursor. Now any `TERM` whose entry cannot move the cursor is
+  drawn as `xterm-256color`, the picker says so once it closes, and the session it opens
+  gets your own `TERM` back. When `xterm-256color` cannot move the cursor here either,
+  the picker is not started, and the command says why and how to name the workspace
+  instead.
+
 ## [0.57.0] - 2026-09-28
 
 ### Added

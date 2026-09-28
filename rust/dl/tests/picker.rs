@@ -290,6 +290,167 @@ fn taking_a_row_acts_on_the_workspace_that_rows_label_names() {
         said.contains("Picked blooop | blooop-wayfinder -> blooop-wayfinder"),
         "a pick that named nothing: {said:?}"
     );
+    assert!(
+        !said.contains("so the picker was drawn as"),
+        "a TERM that can draw the picker was swapped: {said:?}"
+    );
+}
+
+#[test]
+fn a_terminal_whose_term_names_no_terminfo_entry_still_gets_a_picker() {
+    // skim unwraps its terminal setup, and that setup reads the terminfo entry
+    // `TERM` names. So a real terminal with `TERM` unset (`env -i`, a `docker exec
+    // -t` that sets none) or naming an entry this machine does not have (a
+    // terminal's own name, inside a container whose terminfo lacks it) aborted the
+    // whole command with a panic, before a single row was drawn. A name the `term`
+    // crate takes for ANSI (`xterm*`, `tmux*`, `screen*`) did not panic: it got a
+    // built-in entry with colours and no cursor movement, and a garbled picker.
+    for (term, said) in [
+        (None, "TERM is unset"),
+        (
+            Some("no-such-terminal"),
+            "TERM=no-such-terminal names no terminfo entry here that can move the cursor",
+        ),
+        (
+            Some("xterm-no-such-entry"),
+            "TERM=xterm-no-such-entry names no terminfo entry here that can move the cursor",
+        ),
+    ] {
+        let (screen, calls, afterwards, terms) = Screen::run_under(
+            term,
+            &["stop"],
+            "wayfinder",
+            |screen| screen.row_of("blooop-devlaunch").is_none(),
+            Dismiss::Take,
+        );
+
+        assert!(
+            calls.iter().any(|call| call == "stop blooop-wayfinder"),
+            "{term:?}: the pick never reached devpod, which was asked {calls:?}, from \
+             this screen:\n{screen}\nand then said {afterwards:?}"
+        );
+        assert!(afterwards.contains(said), "{term:?}: {afterwards:?}");
+        // The picker was drawn as xterm-256color, and the workspace it picked is
+        // acted on under the user's own `TERM`: a session opened under the
+        // borrowed one would draw for a terminal the user does not have.
+        let own = match term {
+            Some(term) => format!("TERM={term} stop blooop-wayfinder"),
+            None => "TERM unset stop blooop-wayfinder".to_owned(),
+        };
+        assert!(
+            terms.contains(&own),
+            "{term:?}: the stop did not run under the user's TERM: {terms:?}"
+        );
+        assert!(
+            !terms
+                .iter()
+                .any(|call| call.starts_with("TERM=xterm-256color ")),
+            "{term:?}: a devpod call ran under the borrowed TERM: {terms:?}"
+        );
+    }
+}
+
+#[test]
+fn a_picker_quit_under_a_swapped_term_still_says_why_and_acts_on_nothing() {
+    let (screen, calls, afterwards, _) =
+        Screen::run_under(None, &["stop"], "", |_| true, Dismiss::Quit);
+
+    assert!(
+        afterwards.contains("TERM is unset, so the picker was drawn as xterm-256color."),
+        "the note was not given: {afterwards:?}\nfrom this screen:\n{screen}"
+    );
+    assert!(
+        !calls.iter().any(|call| call.starts_with("stop")),
+        "a quit picker stopped a workspace: {calls:?}"
+    );
+}
+
+#[test]
+fn a_terminal_no_terminfo_entry_here_can_draw_on_is_refused_with_the_line_to_type() {
+    // The last resort gone as well. `TERMINFO_DIRS` is the whole of the `term`
+    // crate's search when it is set, so an empty one leaves every name, the
+    // fallback included, with the built-in ANSI entry and its missing `cup`. No
+    // picker can be drawn then, and the run says so and names the line that needs
+    // none, for the verb that was asked for.
+    for (args, line) in [
+        (vec!["stop"], "dl <workspace> stop"),
+        (vec![], "dl <workspace>"),
+    ] {
+        let (code, said, calls) = undrawable(&args);
+        assert!(
+            said.contains(&format!(
+                "TERM=xterm-no-such-entry names no terminfo entry here that can move the \
+                 cursor, and neither does xterm-256color, so the picker cannot be drawn. \
+                 Name the workspace instead: {line}\r\n"
+            )),
+            "{args:?}: the refusal was not given: {said:?}"
+        );
+        assert_eq!(
+            code,
+            Some(1),
+            "{args:?}: a refused picker exited {code:?}: {said:?}"
+        );
+        assert!(
+            !said.contains("\x1b[?1049h"),
+            "{args:?}: a picker was opened anyway: {said:?}"
+        );
+        assert!(
+            calls.iter().all(|call| call.starts_with("list")),
+            "{args:?}: a refused picker still acted: {calls:?}"
+        );
+    }
+}
+
+/// `dl <args>` on a pty where no terminfo entry can draw the picker: `TERM` names
+/// no entry, and `TERMINFO_DIRS` points the search at an empty directory. The
+/// exit code, or `None` for a run still going at [`DEADLINE`], everything the
+/// terminal was sent, and every devpod call.
+///
+/// No picker should open, so nothing is waited for but the exit.
+fn undrawable(args: &[&str]) -> (Option<u32>, String, Vec<String>) {
+    let world = World::new();
+    let nothing = world.root.join("terminfo");
+    std::fs::create_dir_all(&nothing).expect("an empty terminfo directory");
+    let mut command = world.command(args, Some("xterm-no-such-entry"));
+    command.env("TERMINFO_DIRS", nothing.display().to_string());
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: ROWS,
+            cols: COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("a pty");
+    let mut child = pair
+        .slave
+        .spawn_command(command)
+        .expect("the dl binary runs");
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().expect("a pty reader");
+    let collecting = std::thread::spawn(move || {
+        let mut said = Vec::new();
+        let _ = reader.read_to_end(&mut said);
+        said
+    });
+    // Polled against the deadline rather than waited on: a picker that opened
+    // anyway would sit on this pty for a key that never comes.
+    let gone = Instant::now() + DEADLINE;
+    let code = loop {
+        match child.try_wait().expect("dl's status") {
+            Some(status) => break Some(status.exit_code()),
+            None if Instant::now() >= gone => break None,
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    let _ = child.kill();
+    // Every slave fd is gone with the child, so the reader's EOF is already on its
+    // way and this join waits on it rather than for it.
+    let said = collecting.join().expect("the collected bytes");
+    (
+        code,
+        String::from_utf8_lossy(&said).into_owned(),
+        world.devpod_calls(),
+    )
 }
 
 /// The batch. `dl rm` is the verb TAB exists for, and the heading is the only thing
@@ -403,6 +564,20 @@ impl Screen {
         settled: impl Fn(&Screen) -> bool,
         dismiss: Dismiss,
     ) -> (Self, Vec<String>, String) {
+        let (screen, calls, afterwards, _) =
+            Self::run_under(Some("xterm-256color"), args, keys, settled, dismiss);
+        (screen, calls, afterwards)
+    }
+
+    /// [`Self::run`] with `TERM` set to `term`, or unset for `None`, and one more
+    /// answer: [`World::devpod_terms`], the `TERM` each devpod call ran under.
+    fn run_under(
+        term: Option<&str>,
+        args: &[&str],
+        keys: &str,
+        settled: impl Fn(&Screen) -> bool,
+        dismiss: Dismiss,
+    ) -> (Self, Vec<String>, String, Vec<String>) {
         let world = World::new();
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -415,7 +590,7 @@ impl Screen {
 
         let mut child = pair
             .slave
-            .spawn_command(world.command(args))
+            .spawn_command(world.command(args, term))
             .expect("the dl binary runs");
         // The slave is the child's now: held open here, the reader below would never
         // see EOF.
@@ -486,7 +661,12 @@ impl Screen {
         let _ = collecting_bytes.join();
 
         let afterwards = Self::afterwards(&drawn.lock().expect("the collected bytes").clone());
-        (screen, world.devpod_calls(), afterwards)
+        (
+            screen,
+            world.devpod_calls(),
+            afterwards,
+            world.devpod_terms(),
+        )
     }
 
     /// The bytes a terminal received, as the grid it would be showing.
@@ -700,6 +880,15 @@ impl World {
             r#"#!/bin/sh
 # Every call is recorded, so a test can ask which workspace a pick reached.
 echo "$@" >> "$DL_TEST_DEVPOD_LOG"
+# And, apart from the listing, the TERM each call ran under, so a test can ask
+# whether a session a pick opened got the user's back.
+if [ "$1" != "list" ]; then
+  if [ "${TERM+set}" = set ]; then
+    echo "TERM=$TERM $*" >> "$DL_TEST_DEVPOD_TERM_LOG"
+  else
+    echo "TERM unset $*" >> "$DL_TEST_DEVPOD_TERM_LOG"
+  fi
+fi
 if [ "$1" = "list" ]; then
   cat <<'JSON'
 [{"id": "blooop-devlaunch", "source": {"gitRepository": "https://github.com/blooop/devlaunch.git"},
@@ -747,12 +936,28 @@ exit 0
             .collect()
     }
 
+    /// Where the fake devpod writes the `TERM` each call other than `list` ran
+    /// under: `TERM=<value> <args>`, or `TERM unset <args>`.
+    fn devpod_term_log(&self) -> std::path::PathBuf {
+        self.root.join("devpod-terms")
+    }
+
+    /// Every line of [`Self::devpod_term_log`], in the order the calls came.
+    fn devpod_terms(&self) -> Vec<String> {
+        std::fs::read_to_string(self.devpod_term_log())
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// `dl <args>` against this world, environment and all.
     ///
     /// The same scratch `HOME`/`XDG_*`/`DEVPOD_HOME` shape `tests/read_side.rs`
     /// builds, for the same reason: nothing here may reach the real cache or the
-    /// real devpod. `TERM` is the one addition, since this run has a terminal.
-    fn command(&self, args: &[&str]) -> CommandBuilder {
+    /// real devpod. `TERM` is the one addition, since this run has a terminal, and
+    /// `None` leaves it unset.
+    fn command(&self, args: &[&str], term: Option<&str>) -> CommandBuilder {
         let root = self.root.display().to_string();
         let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_dl"));
         for argument in args {
@@ -770,11 +975,17 @@ exit 0
             "DL_TEST_DEVPOD_LOG",
             self.devpod_log().display().to_string(),
         );
+        command.env(
+            "DL_TEST_DEVPOD_TERM_LOG",
+            self.devpod_term_log().display().to_string(),
+        );
         command.env("HOME", format!("{root}/home"));
         command.env("XDG_CACHE_HOME", format!("{root}/cache"));
         command.env("XDG_CONFIG_HOME", format!("{root}/config"));
         command.env("DEVPOD_HOME", format!("{root}/devpod"));
-        command.env("TERM", "xterm-256color");
+        if let Some(term) = term {
+            command.env("TERM", term);
+        }
         command.env("GIT_SSH_COMMAND", "false");
         command.env("GIT_CONFIG_GLOBAL", "/dev/null");
         command.env("GIT_CONFIG_SYSTEM", "/dev/null");
