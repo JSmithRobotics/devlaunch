@@ -365,6 +365,94 @@ fn a_picker_quit_under_a_swapped_term_still_says_why_and_acts_on_nothing() {
     );
 }
 
+#[test]
+fn a_terminal_no_terminfo_entry_here_can_draw_on_is_refused_with_the_line_to_type() {
+    // The last resort gone as well. `TERMINFO_DIRS` is the whole of the `term`
+    // crate's search when it is set, so an empty one leaves every name, the
+    // fallback included, with the built-in ANSI entry and its missing `cup`. No
+    // picker can be drawn then, and the run says so and names the line that needs
+    // none, for the verb that was asked for.
+    for (args, line) in [
+        (vec!["stop"], "dl <workspace> stop"),
+        (vec![], "dl <workspace>"),
+    ] {
+        let (code, said, calls) = undrawable(&args);
+        assert!(
+            said.contains(&format!(
+                "TERM=xterm-no-such-entry names no terminfo entry here that can move the \
+                 cursor, and neither does xterm-256color, so the picker cannot be drawn. \
+                 Name the workspace instead: {line}\r\n"
+            )),
+            "{args:?}: the refusal was not given: {said:?}"
+        );
+        assert_eq!(
+            code,
+            Some(1),
+            "{args:?}: a refused picker exited {code:?}: {said:?}"
+        );
+        assert!(
+            !said.contains("\x1b[?1049h"),
+            "{args:?}: a picker was opened anyway: {said:?}"
+        );
+        assert!(
+            calls.iter().all(|call| call.starts_with("list")),
+            "{args:?}: a refused picker still acted: {calls:?}"
+        );
+    }
+}
+
+/// `dl <args>` on a pty where no terminfo entry can draw the picker: `TERM` names
+/// no entry, and `TERMINFO_DIRS` points the search at an empty directory. The
+/// exit code, or `None` for a run still going at [`DEADLINE`], everything the
+/// terminal was sent, and every devpod call.
+///
+/// No picker should open, so nothing is waited for but the exit.
+fn undrawable(args: &[&str]) -> (Option<u32>, String, Vec<String>) {
+    let world = World::new();
+    let nothing = world.root.join("terminfo");
+    std::fs::create_dir_all(&nothing).expect("an empty terminfo directory");
+    let mut command = world.command(args, Some("xterm-no-such-entry"));
+    command.env("TERMINFO_DIRS", nothing.display().to_string());
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: ROWS,
+            cols: COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("a pty");
+    let mut child = pair
+        .slave
+        .spawn_command(command)
+        .expect("the dl binary runs");
+    drop(pair.slave);
+    let mut reader = pair.master.try_clone_reader().expect("a pty reader");
+    let collecting = std::thread::spawn(move || {
+        let mut said = Vec::new();
+        let _ = reader.read_to_end(&mut said);
+        said
+    });
+    // Polled against the deadline rather than waited on: a picker that opened
+    // anyway would sit on this pty for a key that never comes.
+    let gone = Instant::now() + DEADLINE;
+    let code = loop {
+        match child.try_wait().expect("dl's status") {
+            Some(status) => break Some(status.exit_code()),
+            None if Instant::now() >= gone => break None,
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    let _ = child.kill();
+    // Every slave fd is gone with the child, so the reader's EOF is already on its
+    // way and this join waits on it rather than for it.
+    let said = collecting.join().expect("the collected bytes");
+    (
+        code,
+        String::from_utf8_lossy(&said).into_owned(),
+        world.devpod_calls(),
+    )
+}
+
 /// The batch. `dl rm` is the verb TAB exists for, and the heading is the only thing
 /// in the run that says how many rows it took — devpod's own lines arrive one at a
 /// time and say nothing about the extent of what was asked for.
