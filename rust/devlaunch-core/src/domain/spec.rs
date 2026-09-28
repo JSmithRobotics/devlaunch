@@ -795,6 +795,7 @@ mod tests {
             "https://www.github.com/owner/repo/tree/main",
             "HTTPS://GitHub.com/owner/repo/tree/main",
             "github.com/owner/repo/tree/main",
+            "www.github.com/owner/repo/tree/main",
             "https://github.com/owner/repo/tree/main/",
             "https://github.com/owner/repo/tree/main?tab=readme",
             "https://github.com/owner/repo/tree/main#readme",
@@ -833,6 +834,11 @@ mod tests {
             observed("owner/repo@feature/my-branch")
         );
         assert_eq!(
+            observed("https://github.com/owner/repo/tree/bad%branch"),
+            Expect::Unsafe
+        );
+        assert_eq!(observed("owner/repo@bad%branch"), Expect::Unsafe);
+        assert_eq!(
             parse("https://github.com/owner/repo/tree/main").expanded(),
             "git@github.com:owner/repo.git@main"
         );
@@ -853,6 +859,8 @@ mod tests {
             "https://github.com/owner/repo/tree",
             "https://github.com/owner/repo/blob/main/README.md",
             "https://github.com/owner/repo/tree/a b",
+            "https://github.com/ow ner/repo/tree/main",
+            "https://github.com/owner/re po/tree/main",
             "https://gitlab.com/owner/repo/tree/main",
             "ssh://github.com/owner/repo/tree/main",
         ] {

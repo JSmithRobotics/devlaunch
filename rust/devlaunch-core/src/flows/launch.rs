@@ -10375,6 +10375,22 @@ mod tests {
             plan("https://github.com/owner/repo/tree/feature/x"),
             plan("owner/repo@feature/x")
         );
+        assert_eq!(
+            plan("https://github.com/owner/repo/tree/feature/x"),
+            Ok(Plan::Triple {
+                owner: "owner".to_owned(),
+                repo: "repo".to_owned(),
+                branch: Some("feature/x".to_owned()),
+                remote_url: "git@github.com:owner/repo.git".to_owned(),
+            })
+        );
+        assert_eq!(
+            plan("https://github.com/../repo/tree/main"),
+            Err(UnsafeName {
+                part: NamePart::Owner,
+                name: "..".to_owned()
+            })
+        );
     }
 
     #[test]
