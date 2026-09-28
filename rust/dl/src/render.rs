@@ -191,6 +191,41 @@ pub(crate) fn claude_profile_lines(rows: &[claude_profiles::ProfileSummary]) -> 
     lines
 }
 
+/// One Claude login a picker can offer: the name `--claude-profile` takes, and its
+/// row of the `dl --claude-profiles` table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaudeProfileOffer {
+    pub name: String,
+    pub label: String,
+}
+
+/// The logins a launch can use, as picker rows, with the table heading above them.
+///
+/// The rows `dl --claude-profiles` draws, in its order and its columns, less the
+/// named profiles with no credential: a launch naming one of those refuses, so a
+/// picker that offered one would offer a refusal. The unnamed `default` login stays
+/// whatever its state, because choosing it passes no flag at all. The shared-account
+/// notes are left off, since a picker has no place for a footnote.
+pub fn claude_profile_offers(
+    rows: &[claude_profiles::ProfileSummary],
+) -> (String, Vec<ClaudeProfileOffer>) {
+    let mut lines = claude_profile_lines(rows).into_iter();
+    let heading = lines.next().unwrap_or_default();
+    let offers = rows
+        .iter()
+        .zip(lines)
+        .filter(|(row, _)| {
+            row.name == claude_profiles::DEFAULT_PROFILE
+                || row.state == claude_profiles::ProfileState::Authed
+        })
+        .map(|(row, label)| ClaudeProfileOffer {
+            name: row.name.clone(),
+            label,
+        })
+        .collect();
+    (heading, offers)
+}
+
 /// The sentence for a listing with no rows at all.
 ///
 /// A real state rather than a defensive branch: no home directory and no
@@ -4015,6 +4050,49 @@ mod tests {
             seat_tier: seat_tier.map(str::to_owned),
             account_uuid: None,
         }
+    }
+
+    #[test]
+    fn a_picker_offers_the_logins_that_can_launch_in_the_listings_own_rows() {
+        let rows = [
+            profile(
+                "default",
+                claude_profiles::ProfileState::NoCredential,
+                None,
+                &[],
+            ),
+            profile(
+                "fresh",
+                claude_profiles::ProfileState::NoCredential,
+                None,
+                &[],
+            ),
+            profile(
+                "work",
+                claude_profiles::ProfileState::Authed,
+                Some(account(Some("me@acme.example"), None, None)),
+                &["default"],
+            ),
+        ];
+        let lines = claude_profile_lines(&rows);
+        let (heading, offers) = claude_profile_offers(&rows);
+
+        assert_eq!(heading, lines[0]);
+        // `fresh` would refuse the launch, so it is not offered. `default` passes no
+        // flag, so it is offered whatever its state.
+        assert_eq!(
+            offers,
+            [
+                ClaudeProfileOffer {
+                    name: "default".to_owned(),
+                    label: lines[1].clone(),
+                },
+                ClaudeProfileOffer {
+                    name: "work".to_owned(),
+                    label: lines[3].clone(),
+                },
+            ]
+        );
     }
 
     #[test]

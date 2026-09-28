@@ -71,7 +71,7 @@ _dl_completion() {
     # flag, so a spelling this build only still answers for is never offered.
     local global_opts="--ls --install --refresh --prune --reconcile --purge --herdr-shell --herdr-setup --herdr-env --herdr-workspace --rm --devcontainer --claude-profile --claude-profiles --help -h --version"
     if [[ "$cmd" == aid ]]; then
-        global_opts="--claude --codex --gemini --devcontainer --claude-profile --help -h --version"
+        global_opts="--claude --codex --gemini --model --effort --devcontainer --claude-profile --help -h --version"
     fi
 
     # Workspace subcommands
@@ -83,6 +83,15 @@ _dl_completion() {
 
     # Options that take a value; a variant name, a profile name or a path follows.
     local value_opts="--devcontainer --claude-profile --herdr-workspace"
+
+    # aid's own value-taking flags, from `AGENT_VALUE_OPTIONS`. Nothing completes
+    # their values: the models and efforts are each agent's to list, they change
+    # with every agent release, and aid holds no copy of them on purpose. Empty
+    # for dl, which has neither flag.
+    local aid_value_opts=""
+    if [[ "$cmd" == aid ]]; then
+        aid_value_opts="--model --effort"
+    fi
 
     # The flags a workspace spec may still follow: they modify a launch instead
     # of being one. Every other flag ends the line, and that direction is the
@@ -115,7 +124,7 @@ _dl_completion() {
         # takes a value, so on `aid --unknown-taking-a-value foo owner/repo` it
         # calls `foo` the spec, and completing a slot aid itself cannot place is
         # worse than completing nothing.
-        spec_follows="--claude --codex --gemini --remote-control --remote --no-remote-control --no-remote --devcontainer --claude-profile"
+        spec_follows="--claude --codex --gemini --remote-control --remote --no-remote-control --no-remote --model --effort --devcontainer --claude-profile"
     fi
 
     if [[ "${prev}" == "--herdr-workspace" ]]; then
@@ -169,6 +178,10 @@ _dl_completion() {
             done
         fi
         COMPREPLY=( $(compgen -W "${profiles}" -- ${cur}) )
+        return 0
+    fi
+
+    if [[ -n "${aid_value_opts}" && " ${aid_value_opts} " == *" ${prev} "* ]]; then
         return 0
     fi
 
@@ -232,7 +245,7 @@ _dl_completion() {
             else
                 ends_here=1
             fi
-            if [[ " ${value_opts} " == *" ${scanned} "* ]]; then
+            if [[ " ${value_opts} ${aid_value_opts} " == *" ${scanned} "* ]]; then
                 # Its value is not a positional word, so step over the pair.
                 (( scan += 2 ))
             else

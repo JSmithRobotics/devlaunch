@@ -519,6 +519,7 @@ dependencies = [
  "serde_json",
  "skim",
  "tempfile",
+ "unicode-width",
 ]
 
 [[package]]

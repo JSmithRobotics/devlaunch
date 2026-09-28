@@ -840,6 +840,129 @@ impl SkimItem for Row {
     }
 }
 
+/// What [`choose`] settled.
+///
+/// Four arms, because a caller does a different thing for each: a row maps back
+/// to the value the caller offered, typed text is a value nobody offered, a
+/// cancel ends the caller's run, and no terminal means there was nobody to ask.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Choice {
+    /// The row at this position in the slice [`choose`] was given.
+    Row(usize),
+    /// Enter on a query that matched no row: the query, trimmed. Never empty.
+    Typed(String),
+    /// Esc or Ctrl-C. In skim these are keys, not signals, so the caller gets
+    /// the cancel as an answer and has to act on it itself.
+    Cancelled,
+    /// No terminal to draw on. skim would abort the process here, so it is not
+    /// entered.
+    NoTerminal,
+}
+
+/// Offer `rows` under `header` and wait for one, or for text that is none of them.
+///
+/// Exported for `aid`, whose model and effort pickers are this with rows `aid`
+/// builds. The same skim and the same layout as the workspace picker, with two
+/// differences. Matching is **exact** (substring), not fuzzy: a query is often a
+/// name that is not in the list yet, and fuzzy matching finds a listed row for
+/// almost any query, so Enter would take that row instead of what was typed. And
+/// a query that matches no row is an answer, [`Choice::Typed`].
+pub fn choose(header: &str, rows: &[String]) -> Choice {
+    if !a_terminal_exists()
+        || !a_terminal_type(std::env::var_os("TERM").as_deref())
+        || !a_drawable_size(terminal_size())
+    {
+        return Choice::NoTerminal;
+    }
+    let (tx, rx): (SkimItemSender, SkimItemReceiver) = unbounded();
+    for (index, label) in rows.iter().enumerate() {
+        let row: Arc<dyn SkimItem> = Arc::new(Row {
+            label: label.clone(),
+            index,
+        });
+        if tx.send(row).is_err() {
+            break;
+        }
+    }
+    drop(tx);
+    let Some(output) = Skim::run_with(&choose_options(header), Some(rx)) else {
+        return Choice::Cancelled;
+    };
+    let picked = output.selected_items.first().map(|item| item.get_index());
+    choice_of(output.is_abort, &output.query, picked, rows.len())
+}
+
+/// Whether `TERM` names a terminal skim can draw on.
+///
+/// skim reads the terminfo entry `TERM` names and unwraps the result, so with no
+/// `TERM` it panics rather than answering (`TermUnset`, skim 0.20.5). A person at a
+/// terminal always has one; a pty a program opened may not. `dumb` is the name for
+/// a terminal that cannot move its cursor, so it gets no picker either.
+fn a_terminal_type(term: Option<&std::ffi::OsStr>) -> bool {
+    term.is_some_and(|term| !term.is_empty() && term != "dumb")
+}
+
+/// The terminal's size as rows and columns, or `None` if it cannot be read.
+fn terminal_size() -> Option<(u16, u16)> {
+    use std::os::fd::AsRawFd as _;
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()?;
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ fills one `winsize` this scope owns, on a descriptor it
+    // owns; the file is closed at the end of the scope either way.
+    let read = unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCGWINSZ, &mut size) };
+    (read == 0).then_some((size.ws_row, size.ws_col))
+}
+
+/// Whether skim can draw in a terminal of this size.
+///
+/// A pty a program opened without setting a size is 0 by 0, and skim subtracts
+/// from the size with no check and panics (`attempt to subtract with overflow`,
+/// skim-tuikit 0.6.6). A size that cannot be read is let through: skim reads it
+/// its own way, and the panic is only known for the zero size.
+fn a_drawable_size(size: Option<(u16, u16)>) -> bool {
+    size.is_none_or(|(rows, columns)| rows > 0 && columns > 0)
+}
+
+/// The options [`choose`] draws with. A function so a test can read them.
+fn choose_options(header: &str) -> SkimOptions {
+    SkimOptions {
+        exact: true,
+        no_sort: true,
+        // See `skim_options`: the layout by name, because `reverse: true` is only
+        // expanded by a `build` that `run_with` never calls.
+        layout: String::from("reverse"),
+        header: Some(header.to_owned()),
+        ..Default::default()
+    }
+}
+
+/// What skim's answer means. Split from [`choose`] because it is the part a test
+/// can reach without a terminal.
+///
+/// An index outside `rows` is read as no row, and a query of only spaces as no
+/// query, so neither can turn into a value nobody chose.
+fn choice_of(aborted: bool, query: &str, picked: Option<usize>, rows: usize) -> Choice {
+    if aborted {
+        return Choice::Cancelled;
+    }
+    if let Some(index) = picked.filter(|index| *index < rows) {
+        return Choice::Row(index);
+    }
+    match query.trim() {
+        "" => Choice::Cancelled,
+        typed => Choice::Typed(typed.to_owned()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The Python `test_workspace_source::TestTheFuzzyPickerOffersEverySource`
@@ -1995,5 +2118,49 @@ mod tests {
             offering.offers[0].label, "blooop | devlaunch | main",
             "the short branch ends its line rather than paying the column's width"
         );
+    }
+
+    #[test]
+    fn a_choice_is_the_row_taken_or_else_the_text_typed() {
+        assert_eq!(choice_of(false, "op", Some(1), 3), Choice::Row(1));
+        assert_eq!(
+            choice_of(false, " claude-opus-5-5 ", None, 3),
+            Choice::Typed("claude-opus-5-5".to_owned())
+        );
+        // Esc wins over whatever was under the cursor or in the query.
+        assert_eq!(choice_of(true, "op", Some(1), 3), Choice::Cancelled);
+        // Enter on nothing at all is no answer, not an empty value.
+        assert_eq!(choice_of(false, "  ", None, 3), Choice::Cancelled);
+        // A row skim invented is not one of ours.
+        assert_eq!(
+            choice_of(false, "x", Some(7), 3),
+            Choice::Typed("x".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_chooser_matches_exactly_so_a_new_name_is_not_taken_for_an_old_one() {
+        let options = choose_options("Model for claude:");
+        assert!(options.exact);
+        assert!(!options.multi);
+        assert_eq!(options.layout, "reverse");
+        assert_eq!(options.header.as_deref(), Some("Model for claude:"));
+    }
+
+    #[test]
+    fn no_terminal_type_is_no_terminal_to_draw_a_chooser_on() {
+        use std::ffi::OsStr;
+        assert!(a_terminal_type(Some(OsStr::new("xterm-256color"))));
+        assert!(!a_terminal_type(None));
+        assert!(!a_terminal_type(Some(OsStr::new(""))));
+        assert!(!a_terminal_type(Some(OsStr::new("dumb"))));
+    }
+
+    #[test]
+    fn a_terminal_with_no_size_is_no_terminal_to_draw_a_chooser_on() {
+        assert!(a_drawable_size(Some((24, 80))));
+        assert!(a_drawable_size(None));
+        assert!(!a_drawable_size(Some((0, 0))));
+        assert!(!a_drawable_size(Some((24, 0))));
     }
 }

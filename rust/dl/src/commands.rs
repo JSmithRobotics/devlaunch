@@ -1682,6 +1682,34 @@ fn render_select<'r>(
     }
 }
 
+/// One workspace from the picker, for `aid` with none named: its id, or the
+/// ending of a run that has nothing to launch.
+///
+/// The same list and picker as [`render_select`], and the same `Picked` line once
+/// skim has given the screen back. The endings differ in one place: a quit picker
+/// prints no help, because `aid`'s help is not dl's to print.
+pub(crate) fn pick_one_workspace(runner: &dyn Runner, cache: &Path) -> Result<String, Ending> {
+    let mut context = CommandContext::new(runner);
+    let workspaces = match context.workspaces() {
+        Err(refused) => return Err(refuse_listing(&refused)),
+        Ok(workspaces) => workspaces,
+    };
+    match select::pick(&workspaces, select::Arity::One, cache) {
+        select::Pick::Chose(chosen) => {
+            for line in render::picked("launch", &chosen) {
+                eprintln!("{line}");
+            }
+            let first = chosen.iter().next().map(|pick| pick.workspace_id.clone());
+            first.ok_or(Ending::Refused)
+        }
+        select::Pick::NoWorkspaces => {
+            eprintln!("No workspaces found. Create one with: aid owner/repo or aid ./path");
+            Err(Ending::Refused)
+        }
+        select::Pick::Quit | select::Pick::NoTerminal => Err(Ending::Refused),
+    }
+}
+
 /// Python's ending for a selector that chose nothing: the help, and exit 1.
 fn no_pick() -> Ending {
     let _ = <cli::Cli as clap::CommandFactory>::command().print_help();

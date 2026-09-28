@@ -34,6 +34,53 @@ struct Agent {
     /// line asking for Remote Control is a launch or a refusal, so the capability is
     /// stated once and consulted from both ends.
     remote_control: Option<&'static str>,
+    /// How this agent is told which model to run.
+    model: Spelling,
+    /// How this agent is told how hard to think, if it can be.
+    ///
+    /// `None` is gemini, which has no such setting. Read the way
+    /// [`Self::remote_control`] is read: a typed `--effort` beside `None` is a
+    /// refusal, and one beside `Some` reaches the agent.
+    effort: Option<Spelling>,
+    /// Whether this agent signs in with the host's Claude login, which is what
+    /// `--claude-profile` chooses. The account picker is offered for these only.
+    claude_login: bool,
+}
+
+/// How one agent is told one setting: a flag word, then the value behind a prefix.
+///
+/// Two words always, so the value can never be read as the prompt or glued onto
+/// the flag before it. The prefix is what codex needs: it has no effort flag, only
+/// a config key, so its spelling is `-c` then `model_reasoning_effort=<value>`.
+///
+/// **The spelling is a fact, the values are only suggestions.** The models and
+/// effort levels each agent takes change with every release of that agent, and the
+/// agent checks them itself, so aid passes a value on as it was typed and never
+/// refuses one. `offered` is what the picker lists on a first run, before there are
+/// recent choices to list. A stale entry costs a row nobody picks, and a missing one
+/// costs typing the name once.
+struct Spelling {
+    flag: &'static str,
+    prefix: &'static str,
+    offered: &'static [&'static str],
+}
+
+/// claude's model aliases, from `claude --help` (2.1.280). An alias follows the
+/// newest model of its family, so these age slower than full names.
+const CLAUDE_MODELS: &[&str] = &["opus", "sonnet", "fable"];
+
+/// claude's `--effort` levels, from `claude --help` (2.1.280).
+const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// codex's common reasoning efforts. Its `ReasoningEffort` has more, and takes
+/// names it does not know (codex-rs/protocol/src/openai_models.rs).
+const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
+
+impl Spelling {
+    /// The two words that tell the agent `value`.
+    fn words(&self, value: &str) -> [String; 2] {
+        [self.flag.to_owned(), format!("{}{value}", self.prefix)]
+    }
 }
 
 /// The agent this build starts when nothing picks one.
@@ -122,6 +169,17 @@ const AGENTS: &[(&str, Agent)] = &[
                 ("IS_SANDBOX", "1"),
             ],
             remote_control: Some("--remote-control"),
+            model: Spelling {
+                flag: "--model",
+                prefix: "",
+                offered: CLAUDE_MODELS,
+            },
+            effort: Some(Spelling {
+                flag: "--effort",
+                prefix: "",
+                offered: CLAUDE_EFFORTS,
+            }),
+            claude_login: true,
         },
     ),
     (
@@ -131,6 +189,18 @@ const AGENTS: &[(&str, Agent)] = &[
             prompt_flags: &[],
             env: &[],
             remote_control: None,
+            // No model names are offered: codex's change too often to seed.
+            model: Spelling {
+                flag: "--model",
+                prefix: "",
+                offered: &[],
+            },
+            effort: Some(Spelling {
+                flag: "-c",
+                prefix: "model_reasoning_effort=",
+                offered: CODEX_EFFORTS,
+            }),
+            claude_login: false,
         },
     ),
     (
@@ -140,9 +210,29 @@ const AGENTS: &[(&str, Agent)] = &[
             prompt_flags: &["--prompt-interactive"],
             env: &[],
             remote_control: None,
+            model: Spelling {
+                flag: "--model",
+                prefix: "",
+                offered: &[],
+            },
+            effort: None,
+            claude_login: false,
         },
     ),
 ];
+
+/// aid's own flag for the model the agent runs. aid's word, not the agent's: each
+/// row of [`AGENTS`] says how its own CLI spells it.
+pub(crate) const MODEL_FLAG: &str = "--model";
+
+/// aid's own flag for how hard the agent thinks, spelled per agent the same way.
+pub(crate) const EFFORT_FLAG: &str = "--effort";
+
+/// aid's flags that take a value, read before the spec and never passed to dl.
+///
+/// Each takes its value as the next word or joined by `=`. They are read only
+/// ahead of the spec, like the agent flags: after it, they are prompt text.
+const AGENT_VALUE_OPTIONS: &[&str] = &[MODEL_FLAG, EFFORT_FLAG];
 
 /// aid's own flag for Claude Code's Remote Control, which is not dl's and must not
 /// reach it.
@@ -240,6 +330,152 @@ pub(crate) fn agent_names() -> Vec<&'static str> {
     names
 }
 
+/// The agents that take an `--effort`, sorted, for the refusal that lists them.
+pub(crate) fn effort_agent_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = AGENTS
+        .iter()
+        .filter(|(_, row)| row.effort.is_some())
+        .map(|(name, _)| *name)
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// One thing the interactive flow asks for before the prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Setting {
+    /// Which agent runs, and for claude which host login `dl` forwards. One
+    /// setting, because the picker offers them as one list of rows.
+    Agent,
+    Model,
+    Effort,
+}
+
+impl Setting {
+    /// The word the recent-choices file keys this setting by.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Model => "model",
+            Self::Effort => "effort",
+        }
+    }
+}
+
+/// Whether `agent` has this setting at all.
+pub(crate) fn takes(agent: &str, setting: Setting) -> bool {
+    agent_row(agent).is_some_and(|row| match setting {
+        Setting::Agent => true,
+        Setting::Model => true,
+        Setting::Effort => row.effort.is_some(),
+    })
+}
+
+/// The values the table suggests for this setting. Accounts are never suggested
+/// here: they are read off the disk by `dl`.
+pub(crate) fn suggestions(agent: &str, setting: Setting) -> &'static [&'static str] {
+    let Some(row) = agent_row(agent) else {
+        return &[];
+    };
+    match setting {
+        Setting::Agent => &[],
+        Setting::Model => row.model.offered,
+        Setting::Effort => row.effort.as_ref().map_or(&[], |spelling| spelling.offered),
+    }
+}
+
+/// One row of the agent picker: an agent, and for claude which login.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Launcher {
+    pub(crate) agent: &'static str,
+    /// A named Claude login, or `None` for the one the host uses anyway. Always
+    /// `None` for an agent without a Claude login.
+    pub(crate) profile: Option<String>,
+}
+
+impl Launcher {
+    /// The word the recent-choices file keeps this row by: `claude`, or
+    /// `claude/work` for a named login. A profile name is a directory name, so it
+    /// cannot hold a `/`.
+    pub(crate) fn key(&self) -> String {
+        match &self.profile {
+            Some(profile) => format!("{}/{profile}", self.agent),
+            None => self.agent.to_owned(),
+        }
+    }
+
+    /// The aid words that choose this row, for the front of a command line.
+    fn words(&self) -> Vec<String> {
+        let mut words = vec![format!("--{}", self.agent)];
+        if let Some(profile) = &self.profile {
+            words.push("--claude-profile".to_owned());
+            words.push(profile.clone());
+        }
+        words
+    }
+}
+
+/// The rows the agent picker offers for this line, in table order: one per Claude
+/// login for an agent that signs in with one, one for each other agent.
+///
+/// `profiles` is the named Claude logins that can launch; the default login is
+/// always a row. A line that already names a login offers nothing, and a line
+/// that typed an agent offers only that agent's rows.
+///
+/// **A row is offered only if the line it makes parses**, which is what keeps the
+/// rules in one place: `--remote-control` on the line leaves out codex and gemini,
+/// and `--effort` leaves out gemini, because [`parse_aid_args`] refuses those
+/// lines. Nothing here restates why.
+pub(crate) fn launchers(
+    argv: &[String],
+    environment: Environment<'_>,
+    parsed: &AidArgs,
+    profiles: &[String],
+) -> Vec<Launcher> {
+    if parsed.claude_profile().is_some() {
+        return Vec::new();
+    }
+    AGENTS
+        .iter()
+        .filter(|(name, _)| !parsed.agent_typed || parsed.agent() == Some(*name))
+        .flat_map(|(name, row)| {
+            let named = profiles.iter().filter(|_| row.claude_login).cloned();
+            std::iter::once(None)
+                .chain(named.map(Some))
+                .map(|profile| Launcher {
+                    agent: name,
+                    profile,
+                })
+        })
+        .filter(|launcher| relaunched(argv, environment, launcher).is_ok())
+        .collect()
+}
+
+/// The command line with `launcher`'s words in front, parsed again.
+///
+/// In front, so a word the person typed still comes later and wins, the way the
+/// last of two agent flags does.
+pub(crate) fn relaunched(
+    argv: &[String],
+    environment: Environment<'_>,
+    launcher: &Launcher,
+) -> Result<AidArgs, UsageError> {
+    let mut line = launcher.words();
+    line.extend(argv.iter().cloned());
+    parse_aid_args(&line, environment)
+}
+
+/// Whether `agent` signs in with the host's Claude login.
+pub(crate) fn takes_claude_login(agent: &str) -> bool {
+    agent_row(agent).is_some_and(|row| row.claude_login)
+}
+
+/// Whether a word can be a value for `--model`, `--effort` or `--claude-profile`:
+/// not empty, and not a flag.
+pub(crate) fn usable_value(value: &str) -> bool {
+    !value.is_empty() && !value.starts_with('-')
+}
+
 /// The values [`REMOTE_CONTROL_ENV_VAR`] takes, yes before no — for the refusal that
 /// lists them. Read off the same two lists the parse reads, so the sentence cannot
 /// offer a value the parse would reject.
@@ -281,6 +517,14 @@ pub(crate) enum UsageError {
     /// who thinks they turned something off, and silently meaning *off* is a person
     /// who thinks they turned something on.
     UnknownRemoteControlInEnvironment { value: String },
+    /// `--model` or `--effort` with nothing after it, or with another flag where
+    /// its value goes.
+    MissingValue { flag: &'static str },
+    /// `--effort` on a line that starts an agent with no effort setting.
+    ///
+    /// Carries the agent for the reason [`Self::RemoteControlUnsupported`] does:
+    /// `DEVLAUNCH_AID_AGENT` can be what chose it.
+    EffortUnsupported { agent: String },
 }
 
 /// The variables aid reads, resolved by the caller.
@@ -383,6 +627,10 @@ pub(crate) struct AidArgs {
     /// beats two rules for one list.
     pub(crate) spec_options: Vec<String>,
     pub(crate) task: Task,
+    /// Whether an agent flag on the line chose the agent, rather than the build's
+    /// default or `DEVLAUNCH_AID_AGENT`. The agent picker is not asked across
+    /// agents when one was typed.
+    pub(crate) agent_typed: bool,
 }
 
 /// What the line asks dl to do with the workspace.
@@ -409,6 +657,9 @@ pub(crate) enum Task {
         /// line cannot describe codex being started with a feature codex has never
         /// had, and no later stage has to ask again.
         remote_control: RemoteControl,
+        /// The model and the effort the line asked for, already checked against the
+        /// agent: an effort is only ever here beside an agent that can take one.
+        tuning: Tuning,
     },
     /// A line spelling a flag this build has retired ([`SUFFIX_RETIRED`]).
     ///
@@ -417,6 +668,18 @@ pub(crate) enum Task {
     /// than letting the line through as an agent is what keeps the interactive flow
     /// from booting a workspace and asking for a prompt on the way to exit 1.
     Retired,
+}
+
+/// The model and the effort an agent line asked for. `None` passes no flag, so
+/// the agent starts on its own default.
+///
+/// A struct rather than two more `Option<&str>` parameters on
+/// [`build_agent_command`], because two adjacent optional strings are two
+/// arguments a call site can swap with nothing to say so.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Tuning {
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
 }
 
 impl AidArgs {
@@ -441,6 +704,37 @@ impl AidArgs {
             *prompt = typed;
         }
         self
+    }
+
+    /// The model and effort an agent line asked for.
+    pub(crate) fn tuning(&self) -> Option<&Tuning> {
+        match &self.task {
+            Task::Agent { tuning, .. } => Some(tuning),
+            Task::Retired => None,
+        }
+    }
+
+    /// The same line with the model and effort the pickers settled. A line that
+    /// starts no agent is returned unchanged, as [`Self::with_prompt`] does.
+    pub(crate) fn with_tuning(mut self, settled: Tuning) -> Self {
+        if let Task::Agent { tuning, .. } = &mut self.task {
+            *tuning = settled;
+        }
+        self
+    }
+
+    /// The Claude login the line names for dl, in either spelling dl takes. The
+    /// last one wins, as it does for dl.
+    pub(crate) fn claude_profile(&self) -> Option<&str> {
+        let mut named = None;
+        for (at, word) in self.dl_options.iter().enumerate() {
+            if word == "--claude-profile" {
+                named = self.dl_options.get(at + 1).map(String::as_str);
+            } else if let Some(joined) = word.strip_prefix("--claude-profile=") {
+                named = Some(joined);
+            }
+        }
+        named
     }
 
     /// The same line with the spec a pull request reference resolved to.
@@ -638,6 +932,8 @@ pub(crate) fn parse_aid_args(
     // `DEVLAUNCH_AID_REMOTE_CONTROL` that is neither a yes nor a no.
     let mut agent = default_agent(environment.agent)?;
     let mut remote_control = default_remote_control(environment.remote_control)?;
+    let mut tuning = Tuning::default();
+    let mut agent_typed = false;
     let (line, trailing, trailing_remote_control) = match peel_suffix(argv) {
         Some(suffix) => (suffix.line, suffix.options, suffix.remote_control),
         None => (argv, Vec::new(), None),
@@ -649,6 +945,7 @@ pub(crate) fn parse_aid_args(
         let word = line[at].as_str();
         if let Some(named) = agent_flag(word) {
             agent = named.to_owned();
+            agent_typed = true;
             at += 1;
             continue;
         }
@@ -665,6 +962,16 @@ pub(crate) fn parse_aid_args(
         if NO_REMOTE_CONTROL_FLAGS.contains(&word) {
             remote_control = RemoteControlRequest::Off;
             at += 1;
+            continue;
+        }
+        if let Some((flag, value, width)) = agent_value(line, at)? {
+            let slot = if flag == MODEL_FLAG {
+                &mut tuning.model
+            } else {
+                &mut tuning.effort
+            };
+            *slot = Some(value.to_owned());
+            at += width;
             continue;
         }
         if DL_VALUE_OPTIONS.contains(&word) {
@@ -698,12 +1005,17 @@ pub(crate) fn parse_aid_args(
     // looks like. Settled before the task is built, so the `RemoteControl` the task
     // carries is one an agent row supplied the flag for.
     let remote_control = remote_control.settle(&agent)?;
+    // Settled at the same point and for the same reason as Remote Control.
+    if tuning.effort.is_some() && agent_row(&agent).is_some_and(|row| row.effort.is_none()) {
+        return Err(UsageError::EffortUnsupported { agent });
+    }
     let prompt = line[at.min(line.len())..].join(" ");
     let retired = names_a_retired_spelling(&trailing);
     Ok(AidArgs {
         spec,
         dl_options,
         spec_options: trailing,
+        agent_typed,
         task: if retired {
             Task::Retired
         } else {
@@ -711,9 +1023,48 @@ pub(crate) fn parse_aid_args(
                 agent,
                 prompt,
                 remote_control,
+                tuning,
             }
         },
     })
+}
+
+/// The table row for `agent`, when it has one.
+fn agent_row(agent: &str) -> Option<&'static Agent> {
+    AGENTS
+        .iter()
+        .find(|(name, _)| *name == agent)
+        .map(|(_, row)| row)
+}
+
+/// One of [`AGENT_VALUE_OPTIONS`] at `line[at]`, with its value and how many words
+/// the pair took: two for `--model opus`, one for `--model=opus`.
+///
+/// `Ok(None)` is a word that is not one of them. A missing value, an empty one or
+/// one that starts with `-` is refused: `aid --model --codex <ws>` is a typo, not a
+/// model called `--codex`.
+fn agent_value(
+    line: &[String],
+    at: usize,
+) -> Result<Option<(&'static str, &str, usize)>, UsageError> {
+    let word = line[at].as_str();
+    for &flag in AGENT_VALUE_OPTIONS {
+        let (value, width) = if word == flag {
+            (line.get(at + 1).map(String::as_str), 2)
+        } else if let Some(joined) = word
+            .strip_prefix(flag)
+            .and_then(|rest| rest.strip_prefix('='))
+        {
+            (Some(joined), 1)
+        } else {
+            continue;
+        };
+        return match value {
+            Some(value) if usable_value(value) => Ok(Some((flag, value, width))),
+            _ => Err(UsageError::MissingValue { flag }),
+        };
+    }
+    Ok(None)
 }
 
 /// Which agent `--gemini` and friends name.
@@ -752,11 +1103,31 @@ pub(crate) fn build_agent_command(
     agent: &str,
     prompt: &str,
     remote_control: Option<&str>,
+    tuning: &Tuning,
 ) -> Option<NonEmpty<String>> {
-    let (_, started) = AGENTS.iter().find(|(name, _)| *name == agent)?;
+    let started = agent_row(agent)?;
     // No prompt to be interactive about: start the agent's plain session, without
     // the flags that only make sense alongside one.
     let mut words: Vec<&str> = started.command.to_vec();
+    // The model before the effort, in one fixed order whatever order they were
+    // typed in. An effort beside an agent with no spelling for one is dropped here,
+    // which only a caller that skipped the parse can reach.
+    let settings: Vec<String> = [
+        tuning
+            .model
+            .as_deref()
+            .map(|model| started.model.words(model)),
+        started
+            .effort
+            .as_ref()
+            .zip(tuning.effort.as_deref())
+            .map(|(spelling, effort)| spelling.words(effort)),
+    ]
+    .into_iter()
+    .flatten()
+    .flatten()
+    .collect();
+    words.extend(settings.iter().map(String::as_str));
     let named_session = started
         .remote_control
         .zip(remote_control)
@@ -815,6 +1186,7 @@ pub(crate) fn build_dl_args(parsed: &AidArgs) -> Option<Vec<String>> {
             agent,
             prompt,
             remote_control,
+            tuning,
         } => {
             args.push("--".to_owned());
             // The session is named after the spec the person typed, so the list on
@@ -823,7 +1195,11 @@ pub(crate) fn build_dl_args(parsed: &AidArgs) -> Option<Vec<String>> {
                 RemoteControl::On => Some(parsed.spec.as_str()),
                 RemoteControl::Off => None,
             };
-            args.extend(build_agent_command(agent, prompt, session)?.iter().cloned());
+            args.extend(
+                build_agent_command(agent, prompt, session, tuning)?
+                    .iter()
+                    .cloned(),
+            );
         }
         Task::Retired => {}
     }
@@ -1118,7 +1494,7 @@ mod tests {
 
     /// The agent's argv, for a name the table has.
     fn agent_argv(agent: &str, prompt: &str, remote_control: Option<&str>) -> Vec<String> {
-        build_agent_command(agent, prompt, remote_control)
+        build_agent_command(agent, prompt, remote_control, &Tuning::default())
             .expect("a known agent")
             .iter()
             .cloned()
@@ -1249,7 +1625,10 @@ mod tests {
 
     #[test]
     fn an_agent_nothing_knows_has_no_command() {
-        assert_eq!(build_agent_command("clippy", "hi", None), None);
+        assert_eq!(
+            build_agent_command("clippy", "hi", None, &Tuning::default()),
+            None
+        );
     }
 
     // ------------------------------------------- the dl command line
@@ -1324,7 +1703,10 @@ mod tests {
             .expect("a usable command line");
 
             assert_eq!(chosen.agent(), Some(name));
-            assert!(build_agent_command(name, "hi", None).is_some(), "{name}");
+            assert!(
+                build_agent_command(name, "hi", None, &Tuning::default()).is_some(),
+                "{name}"
+            );
         }
     }
 
@@ -2116,5 +2498,325 @@ mod tests {
                 "--remote-control=owner/repo",
             ]
         );
+    }
+
+    // --- the model and the effort --------------------------------------------
+
+    /// The words the agent is started with, off the dl line: everything after `--`.
+    fn agent_words(argv: &[&str]) -> Vec<String> {
+        let dl = build_dl_args(&parsed(argv)).expect("an agent line");
+        let at = dl
+            .iter()
+            .position(|word| word == "--")
+            .expect("a `--` tail");
+        dl[at + 1..].to_vec()
+    }
+
+    /// What `parse_aid_args` refused the line with.
+    fn refused(argv: &[&str]) -> UsageError {
+        parse_aid_args(&words(argv), Environment::default()).expect_err("a refusal")
+    }
+
+    #[test]
+    fn a_model_reaches_each_agent_as_its_own_flag() {
+        // Ahead of the Remote Control flag and the prompt, so neither can be read as
+        // the model's value. All three CLIs happen to spell it `--model <m>`.
+        assert_eq!(
+            agent_words(&["--model", "opus", "owner/repo", "fix", "it"]),
+            [
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--model",
+                "opus",
+                "--remote-control=owner/repo",
+                "fix it",
+            ]
+        );
+        assert_eq!(
+            agent_words(&["--codex", "--model", "gpt-5.5", "owner/repo", "hi"]),
+            [
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model",
+                "gpt-5.5",
+                "hi",
+            ]
+        );
+        assert_eq!(
+            agent_words(&["--gemini", "--model", "gemini-3-pro", "owner/repo", "hi"]),
+            [
+                "gemini",
+                "--yolo",
+                "--model",
+                "gemini-3-pro",
+                "--prompt-interactive",
+                "hi",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_effort_reaches_each_agent_that_has_one_in_that_agents_spelling() {
+        // claude has a flag of its own. codex has none: effort is a config key, and
+        // `-c key=value` is how codex overrides one from the command line. A value
+        // that does not parse as TOML is taken as a literal string, so the bare
+        // `high` needs no quotes (codex-rs/utils/cli/src/config_override.rs).
+        assert_eq!(
+            agent_words(&["--effort", "high", "owner/repo"]),
+            [
+                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+                "IS_SANDBOX=1",
+                "claude",
+                "--dangerously-skip-permissions",
+                "--effort",
+                "high",
+                "--remote-control=owner/repo",
+            ]
+        );
+        assert_eq!(
+            agent_words(&["--codex", "--effort", "high", "owner/repo"]),
+            [
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-c",
+                "model_reasoning_effort=high",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_model_goes_ahead_of_the_effort_whichever_was_typed_first() {
+        assert_eq!(
+            agent_words(&["--effort", "max", "--model", "opus", "owner/repo"]),
+            agent_words(&["--model", "opus", "--effort", "max", "owner/repo"]),
+        );
+    }
+
+    #[test]
+    fn a_value_is_passed_on_as_typed_and_never_checked() {
+        // The agents add models and effort levels faster than aid is released, and
+        // codex already takes effort values it does not know by name. A value the
+        // agent does not have is the agent's to answer for: claude warns and moves on.
+        assert_eq!(
+            agent_words(&["--codex", "--effort", "ultra-new", "owner/repo"]),
+            [
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-c",
+                "model_reasoning_effort=ultra-new",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_value_can_be_joined_to_its_flag() {
+        assert_eq!(
+            parsed(&["--model=opus", "--effort=high", "owner/repo"]),
+            parsed(&["--model", "opus", "--effort", "high", "owner/repo"]),
+        );
+    }
+
+    #[test]
+    fn the_last_value_typed_for_a_flag_wins() {
+        assert_eq!(
+            parsed(&["--model", "sonnet", "--model", "opus", "owner/repo"]),
+            parsed(&["--model", "opus", "owner/repo"]),
+        );
+    }
+
+    #[test]
+    fn a_flag_with_no_value_is_refused_by_name() {
+        // A flag in the value's place is the typo this catches: `aid --model --codex
+        // <ws>` would otherwise start claude with a model called `--codex`.
+        for (argv, flag) in [
+            (vec!["--model"], MODEL_FLAG),
+            (vec!["--model="], MODEL_FLAG),
+            (vec!["--model", "--codex", "owner/repo"], MODEL_FLAG),
+            (vec!["--effort", "", "owner/repo"], EFFORT_FLAG),
+        ] {
+            assert_eq!(
+                refused(&argv),
+                UsageError::MissingValue { flag },
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_effort_beside_an_agent_that_has_none_is_refused() {
+        // gemini has no effort setting, so a typed `--effort` has nothing to reach.
+        // Refused rather than dropped, for the reason `--remote-control` is: the
+        // person asked for something by name.
+        assert_eq!(
+            refused(&["--gemini", "--effort", "high", "owner/repo"]),
+            UsageError::EffortUnsupported {
+                agent: "gemini".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn the_flags_after_the_spec_are_prompt_like_any_other_flag() {
+        let chosen = parsed(&["owner/repo", "use", "--model", "opus"]);
+        assert_eq!(prompt(&chosen), "use --model opus");
+        assert_eq!(
+            chosen,
+            parsed(&["owner/repo"]).with_prompt("use --model opus".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_background_boot_carries_neither_flag() {
+        // The boot is `dl <ws> up`, and dl has never heard of either word.
+        assert_eq!(
+            build_boot_args(&parsed(&[
+                "--model",
+                "opus",
+                "--effort",
+                "high",
+                "owner/repo"
+            ])),
+            ["owner/repo", "up"]
+        );
+    }
+
+    #[test]
+    fn a_login_the_picker_chose_reaches_dl_ahead_of_the_spec() {
+        let chosen = relaunched(
+            &words(&["owner/repo"]),
+            Environment::default(),
+            &Launcher {
+                agent: "claude",
+                profile: Some("work".to_owned()),
+            },
+        )
+        .expect("a usable command line");
+        let dl = build_dl_args(&chosen).expect("an agent line");
+        assert_eq!(dl[..3], ["--claude-profile", "work", "owner/repo"]);
+    }
+
+    #[test]
+    fn a_profile_on_the_line_is_seen_in_either_spelling() {
+        assert_eq!(
+            parsed(&["--claude-profile", "work", "owner/repo"]).claude_profile(),
+            Some("work")
+        );
+        assert_eq!(
+            parsed(&["--claude-profile=work", "owner/repo"]).claude_profile(),
+            Some("work")
+        );
+        assert_eq!(parsed(&["owner/repo"]).claude_profile(), None);
+    }
+
+    #[test]
+    fn the_settings_each_agent_takes_are_read_off_the_table() {
+        assert!(takes("gemini", Setting::Model));
+        assert!(!takes("gemini", Setting::Effort));
+        assert!(takes("codex", Setting::Effort));
+        assert!(suggestions("claude", Setting::Effort).contains(&"max"));
+        assert!(suggestions("gemini", Setting::Effort).is_empty());
+    }
+
+    #[test]
+    fn a_tuning_the_pickers_settled_replaces_the_lines_own() {
+        let settled = Tuning {
+            model: Some("opus".to_owned()),
+            effort: None,
+        };
+        let chosen = parsed(&["owner/repo"]).with_tuning(settled.clone());
+        assert_eq!(chosen.tuning(), Some(&settled));
+        assert_eq!(chosen, parsed(&["--model", "opus", "owner/repo"]));
+    }
+
+    fn launcher(agent: &'static str, profile: Option<&str>) -> Launcher {
+        Launcher {
+            agent,
+            profile: profile.map(str::to_owned),
+        }
+    }
+
+    fn launchers_for(argv: &[&str], profiles: &[&str]) -> Vec<Launcher> {
+        let argv = words(argv);
+        let profiles: Vec<String> = profiles.iter().map(|name| (*name).to_owned()).collect();
+        launchers(
+            &argv,
+            Environment::default(),
+            &parse_aid_args(&argv, Environment::default()).expect("a usable command line"),
+            &profiles,
+        )
+    }
+
+    #[test]
+    fn the_agent_picker_offers_each_claude_login_then_each_other_agent() {
+        assert_eq!(
+            launchers_for(&["owner/repo"], &["personal", "work"]),
+            [
+                launcher("claude", None),
+                launcher("claude", Some("personal")),
+                launcher("claude", Some("work")),
+                launcher("codex", None),
+                launcher("gemini", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_typed_agent_offers_only_its_own_logins() {
+        assert_eq!(
+            launchers_for(&["--claude", "owner/repo"], &["work"]),
+            [launcher("claude", None), launcher("claude", Some("work"))]
+        );
+        assert_eq!(
+            launchers_for(&["--codex", "owner/repo"], &["work"]),
+            [launcher("codex", None)]
+        );
+    }
+
+    #[test]
+    fn a_named_login_on_the_line_offers_nothing() {
+        assert!(launchers_for(&["--claude-profile", "work", "owner/repo"], &["work"]).is_empty());
+    }
+
+    #[test]
+    fn a_row_the_line_would_refuse_is_not_offered() {
+        // The refusals are parse_aid_args's, read by trying each row.
+        assert_eq!(
+            launchers_for(&["--remote-control", "owner/repo"], &[]),
+            [launcher("claude", None)]
+        );
+        assert_eq!(
+            launchers_for(&["--effort", "high", "owner/repo"], &[]),
+            [launcher("claude", None), launcher("codex", None)]
+        );
+    }
+
+    #[test]
+    fn a_chosen_row_is_the_line_with_its_flags_in_front() {
+        let argv = words(&["--model", "opus", "owner/repo"]);
+        let chosen = relaunched(
+            &argv,
+            Environment::default(),
+            &launcher("claude", Some("work")),
+        )
+        .expect("a usable command line");
+        assert_eq!(chosen.claude_profile(), Some("work"));
+        assert_eq!(
+            chosen.tuning().and_then(|t| t.model.as_deref()),
+            Some("opus")
+        );
+
+        let codex = relaunched(&argv, Environment::default(), &launcher("codex", None))
+            .expect("a usable command line");
+        assert_eq!(codex.agent(), Some("codex"));
+        // Remote Control was only the default, so codex is quietly without it.
+        assert_eq!(remote_control(&codex), RemoteControl::Off);
+    }
+
+    #[test]
+    fn a_row_is_kept_by_its_agent_and_login() {
+        assert_eq!(launcher("claude", None).key(), "claude");
+        assert_eq!(launcher("claude", Some("work")).key(), "claude/work");
     }
 }

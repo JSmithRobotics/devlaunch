@@ -36,7 +36,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use crate::rewrite::AidArgs;
+use crate::recent::{self, Recent};
+use crate::rewrite::{self, AidArgs, Environment, Launcher, Setting, Tuning};
 
 /// The internal argv word the boot child is started with. Undocumented on
 /// purpose: it is aid talking to itself, not a flag anyone types.
@@ -90,6 +91,17 @@ impl BootChild {
             log,
             relayed: 0,
         })
+    }
+
+    /// Stop the boot the way a terminal Ctrl-C would, and wait for it to end.
+    ///
+    /// SIGINT, so the boot's own handler kills its `devpod up` group and unlinks
+    /// its staged token file. Its output is not relayed: it is the noise of a boot
+    /// nobody wants any more.
+    pub(crate) fn cancel(mut self) {
+        dl::interrupt(self.child.id());
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.log);
     }
 
     /// Wait for the boot to end, relaying its output to stderr as it lands, and
@@ -159,16 +171,30 @@ impl BootChild {
 /// An empty submission — a bare Enter, or Ctrl-D — leaves the prompt empty,
 /// which is the agent's plain session: the old bare-`aid` behaviour is one
 /// keystroke away, not gone.
-pub(crate) fn collect_prompt(parsed: AidArgs) -> (AidArgs, Option<BootChild>) {
+/// How the interactive flow ended.
+pub(crate) enum Collected {
+    /// Launch this line, once the boot beside it, if any, has finished.
+    Launch(Box<AidArgs>, Option<BootChild>),
+    /// A picker was cancelled. The boot was stopped and nothing launches.
+    Cancelled,
+}
+
+/// `argv` and `environment` are what `parsed` was parsed from: the agent picker
+/// builds its rows by parsing the line again with each row's flags in front.
+pub(crate) fn collect_prompt(
+    parsed: AidArgs,
+    argv: &[String],
+    environment: Environment<'_>,
+) -> Collected {
     let promptless_agent = matches!(
         &parsed.task,
         crate::rewrite::Task::Agent { prompt, .. } if prompt.is_empty()
     );
     if !promptless_agent || !dl::interactive_terminal() {
-        return (parsed, None);
+        return Collected::Launch(Box::new(parsed), None);
     }
     let Some(boot) = BootChild::spawn(&crate::rewrite::build_boot_args(&parsed)) else {
-        return (parsed, None);
+        return Collected::Launch(Box::new(parsed), None);
     };
     // Name the pane and the tab now, because the launch that would name them is
     // behind the editor and the editor is where the waiting happens. Deliberately
@@ -181,9 +207,225 @@ pub(crate) fn collect_prompt(parsed: AidArgs) -> (AidArgs, Option<BootChild>) {
     // log is not a title. That gate is also why this is a foreground call rather
     // than something handed to `BootChild`.
     dl::name_before_launch(&parsed.spec);
+    // The pickers come after the boot has started, so the minute they take is
+    // also spent booting. Nothing they choose reaches the boot: `up` takes no
+    // model, and `--claude-profile` is read when the session starts, not at `up`.
+    let Some(parsed) = settle(parsed, argv, environment) else {
+        boot.cancel();
+        return Collected::Cancelled;
+    };
     banner(&parsed);
-    let typed = dl::read_terminal_submission();
-    (parsed.with_prompt(typed), Some(boot))
+    match dl::read_prompt() {
+        dl::Submission::Text(typed) => {
+            Collected::Launch(Box::new(parsed.with_prompt(typed)), Some(boot))
+        }
+        // The editor holds the terminal in raw mode, so Ctrl-C is a key there as
+        // it is in a picker, and ends the run the same way.
+        dl::Submission::Cancelled => {
+            boot.cancel();
+            Collected::Cancelled
+        }
+    }
+}
+
+/// What one picker settled.
+enum Asked {
+    /// This value, or `None` for the default, which passes no flag.
+    Chose(Option<String>),
+    /// Nothing to ask about, or no terminal to ask on. The line is left as it was.
+    Skipped,
+    /// Esc or Ctrl-C: the launch is off.
+    Cancelled,
+}
+
+/// Ask for each setting the line left open, in one fixed order: the agent (and
+/// for claude its login), the model, the effort. `None` is a cancel.
+///
+/// A setting a flag already gave is not asked for, and neither is one the agent
+/// does not have. Every choice is remembered, so the next launch lists it first.
+fn settle(parsed: AidArgs, argv: &[String], environment: Environment<'_>) -> Option<AidArgs> {
+    let file = recent::path();
+    let mut recent = file.as_deref().map(Recent::read).unwrap_or_default();
+    let parsed = match ask_agent(&parsed, argv, environment, &mut recent) {
+        Picked::Cancelled => return None,
+        Picked::Kept => parsed,
+        // The spec `parsed` holds may be a pull request link already resolved to a
+        // branch, which a fresh parse of argv would undo.
+        Picked::Line(line) => line.with_spec(parsed.spec.clone()),
+    };
+    let (Some(agent), Some(tuning)) = (parsed.agent(), parsed.tuning()) else {
+        return Some(parsed);
+    };
+    let agent = agent.to_owned();
+    let mut tuning = tuning.clone();
+    for setting in [Setting::Model, Setting::Effort] {
+        if !rewrite::takes(&agent, setting) {
+            continue;
+        }
+        let slot = match setting {
+            Setting::Effort => &mut tuning.effort,
+            _ => &mut tuning.model,
+        };
+        if slot.is_none() {
+            match ask_value(&agent, setting, &recent) {
+                Asked::Cancelled => return None,
+                Asked::Skipped => continue,
+                Asked::Chose(value) => *slot = value,
+            }
+        }
+        recent.record(&agent, setting, slot.as_deref());
+    }
+    if let Some(file) = &file {
+        recent.write(file);
+    }
+    Some(parsed.with_tuning(tuning))
+}
+
+/// What the agent picker settled.
+enum Picked {
+    /// The line as it was: one row or none to choose from, or no terminal.
+    Kept,
+    /// The line again, with the chosen row's flags in front.
+    Line(Box<AidArgs>),
+    Cancelled,
+}
+
+/// The column the recent-choices file keeps agent rows under. The row is not one
+/// agent's setting: it is what chooses the agent.
+const ANY_AGENT: &str = "*";
+
+/// The agent picker: one row per Claude login, then one for each other agent.
+///
+/// Not asked when there is at most one row, such as a line that typed `--codex`.
+/// The first run lists the default agent's rows first; after that the rows chosen
+/// most recently lead. Typed text that is no row is not an agent, so the picker
+/// asks again.
+fn ask_agent(
+    parsed: &AidArgs,
+    argv: &[String],
+    environment: Environment<'_>,
+    recent: &mut Recent,
+) -> Picked {
+    let (heading, offers) = dl::claude_profile_offers();
+    let named: Vec<String> = offers
+        .iter()
+        .map(|offer| offer.name.clone())
+        .filter(|name| name != dl::DEFAULT_CLAUDE_PROFILE)
+        .collect();
+    let mut rows = rewrite::launchers(argv, environment, parsed, &named);
+    if rows.len() < 2 {
+        return Picked::Kept;
+    }
+    // A stable sort, so rows with the same rank keep the table's order.
+    let remembered: Vec<String> = recent
+        .values(ANY_AGENT, Setting::Agent)
+        .into_iter()
+        .flatten()
+        .collect();
+    let rank = |row: &Launcher| {
+        remembered
+            .iter()
+            .position(|key| *key == row.key())
+            .unwrap_or(remembered.len() + usize::from(parsed.agent() != Some(row.agent)))
+    };
+    rows.sort_by_key(|row| rank(row));
+
+    let width = rows.iter().map(|row| row.agent.len()).max().unwrap_or(0);
+    let login = |row: &Launcher| {
+        let name = row.profile.as_deref().unwrap_or(dl::DEFAULT_CLAUDE_PROFILE);
+        offers
+            .iter()
+            .find(|offer| rewrite::takes_claude_login(row.agent) && offer.name == name)
+            .map(|offer| offer.label.clone())
+    };
+    let labels: Vec<String> = rows
+        .iter()
+        .map(|row| match login(row) {
+            Some(label) => format!("{:<width$}  {label}", row.agent),
+            None => row.agent.to_owned(),
+        })
+        .collect();
+    let columns = if rows.iter().any(|row| login(row).is_some()) {
+        format!("{:<width$}  {heading}", "AGENT")
+    } else {
+        "AGENT".to_owned()
+    };
+    let header =
+        format!("Agent for this launch. Type to filter. Esc cancels the launch.\n{columns}");
+    loop {
+        match dl::choose(&header, &labels) {
+            dl::Choice::Row(index) => {
+                let row = &rows[index];
+                let Ok(line) = rewrite::relaunched(argv, environment, row) else {
+                    return Picked::Kept;
+                };
+                recent.record(ANY_AGENT, Setting::Agent, Some(&row.key()));
+                return Picked::Line(Box::new(line));
+            }
+            dl::Choice::Typed(_) => {}
+            dl::Choice::Cancelled => return Picked::Cancelled,
+            dl::Choice::NoTerminal => return Picked::Kept,
+        }
+    }
+}
+
+/// One picker over `rows`, drawn with `label`. Asked again after typed text that
+/// cannot be a value, such as a flag.
+fn ask(header: &str, rows: &[Option<String>], label: impl Fn(&Option<String>) -> String) -> Asked {
+    let labels: Vec<String> = rows.iter().map(label).collect();
+    loop {
+        match dl::choose(header, &labels) {
+            dl::Choice::Row(index) => return Asked::Chose(rows[index].clone()),
+            dl::Choice::Typed(typed) if rewrite::usable_value(&typed) => {
+                return Asked::Chose(Some(typed));
+            }
+            dl::Choice::Typed(_) => {}
+            dl::Choice::Cancelled => return Asked::Cancelled,
+            dl::Choice::NoTerminal => return Asked::Skipped,
+        }
+    }
+}
+
+/// The row that stands for "pass no flag".
+const DEFAULT_ROW: &str = "default (the agent's own)";
+
+/// The model or effort picker.
+fn ask_value(agent: &str, setting: Setting, recent: &Recent) -> Asked {
+    let rows = recent::ordered(
+        recent.values(agent, setting),
+        rewrite::suggestions(agent, setting),
+    );
+    let header = format!(
+        "{} for {agent}. Type to filter, or type a name that is not listed. Esc cancels \
+         the launch.",
+        match setting {
+            Setting::Effort => "Effort",
+            _ => "Model",
+        }
+    );
+    ask(&header, &rows, |row| {
+        row.clone().unwrap_or_else(|| DEFAULT_ROW.to_owned())
+    })
+}
+
+/// What the line settled beyond the agent, for the banner: ` (account work, model
+/// opus)`, or nothing when every setting is the default.
+fn chosen(parsed: &AidArgs) -> String {
+    let default = Tuning::default();
+    let tuning = parsed.tuning().unwrap_or(&default);
+    let parts: Vec<String> = [
+        ("account", parsed.claude_profile()),
+        ("model", tuning.model.as_deref()),
+        ("effort", tuning.effort.as_deref()),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| value.map(|value| format!("{name} {value}")))
+    .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
 }
 
 /// The one line the editor shows before the read, naming what is booting, which
@@ -191,10 +433,10 @@ pub(crate) fn collect_prompt(parsed: AidArgs) -> (AidArgs, Option<BootChild>) {
 pub(crate) fn banner(parsed: &AidArgs) {
     let agent = parsed.agent().unwrap_or_default();
     eprintln!(
-        "Booting {} in the background. Type the prompt for {agent} and press Enter to \
-         launch; an empty Enter starts a plain session.",
-        parsed.spec
+        "Booting {} in the background. Type the prompt for {agent}{} and press Enter to \
+         launch; an empty Enter starts a plain session. Alt-Enter or Ctrl-J adds a line, \
+         and a paste keeps its line breaks.",
+        parsed.spec,
+        chosen(parsed)
     );
-    eprint!("> ");
-    let _ = std::io::stderr().flush();
 }

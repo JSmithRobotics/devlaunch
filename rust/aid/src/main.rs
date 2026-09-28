@@ -27,6 +27,7 @@
 //! through an absolute path.
 
 mod interactive;
+mod recent;
 mod rewrite;
 
 use std::io::Write as _;
@@ -109,11 +110,14 @@ fn run(argv: &[String]) -> i32 {
     let asked_for_help = argv
         .first()
         .is_some_and(|word| word == "--help" || word == "-h");
-    if argv.is_empty() || asked_for_help {
+    // A bare `aid` on a terminal picks a workspace below, as a bare `dl` does. The
+    // help is for a run with nobody at a terminal to pick.
+    let picks = argv.is_empty() && dl::interactive_terminal();
+    if (argv.is_empty() && !picks) || asked_for_help {
         print!("{}", help());
         return if argv.is_empty() { 1 } else { 0 };
     }
-    if argv[0] == "--version" {
+    if argv.first().is_some_and(|word| word == "--version") {
         // `aid <version>`, the version dl prints under aid's name, and the same
         // build marker: `dl::BUILD_MARKER` is empty in a released build and `-dev`
         // in a working-tree one, so `aid-next` says which build it is exactly as
@@ -138,8 +142,27 @@ fn run(argv: &[String]) -> i32 {
         agent: agent.as_deref(),
         remote_control: remote_control.as_deref(),
     };
-    let parsed = match rewrite::parse_aid_args(argv, environment) {
-        Ok(parsed) => parsed,
+    // A line with no workspace, on a terminal, gets dl's workspace picker, and the
+    // id it answers is added to the end of the line: after the leading flags, which
+    // is where a typed spec goes. From here on the line is that longer one, because
+    // the agent picker parses it again.
+    let with_pick: Vec<String>;
+    let (argv, parsed) = match rewrite::parse_aid_args(argv, environment) {
+        Ok(parsed) => (argv, parsed),
+        Err(UsageError::NoWorkspace) if dl::interactive_terminal() => {
+            let spec = match dl::pick_workspace() {
+                Ok(spec) => spec,
+                Err(code) => return code,
+            };
+            with_pick = argv.iter().cloned().chain([spec]).collect();
+            match rewrite::parse_aid_args(&with_pick, environment) {
+                Ok(parsed) => (with_pick.as_slice(), parsed),
+                Err(refused) => {
+                    eprintln!("{}", refusal(&refused));
+                    return 1;
+                }
+            }
+        }
         Err(refused) => {
             eprintln!("{}", refusal(&refused));
             return 1;
@@ -158,7 +181,15 @@ fn run(argv: &[String]) -> i32 {
         Ok(spec) => parsed.with_spec(spec),
         Err(code) => return code,
     };
-    let (parsed, boot) = interactive::collect_prompt(parsed);
+    let (parsed, boot) = match interactive::collect_prompt(parsed, argv, environment) {
+        interactive::Collected::Launch(parsed, boot) => (*parsed, boot),
+        // 130, the code a Ctrl-C at the prompt editor ends with, because a cancel
+        // in a picker is the same request made with a different key.
+        interactive::Collected::Cancelled => {
+            eprintln!("aid: cancelled; the background boot was stopped and nothing launched.");
+            return 130;
+        }
+    };
     let Some(dl_args) = rewrite::build_dl_args(&parsed) else {
         // Unreachable by a command line: the parse only ever answers with an agent
         // from the table, and a line that starts no agent cannot fail to build one.
@@ -260,6 +291,21 @@ fn refusal(refused: &UsageError) -> String {
             dl::python_repr(value),
             rewrite::remote_control_values().join(", ")
         ),
+        UsageError::MissingValue { flag } => {
+            format!("{flag} needs a value: aid {flag} <value> <workspace> [prompt]")
+        }
+        // The agents that can take one are listed, because the fix is either to
+        // drop the flag or to pick one of them.
+        UsageError::EffortUnsupported { agent } => format!(
+            "{} sets a reasoning effort, which {agent} has no setting for. \
+             Drop the flag or pick one of: {}.",
+            rewrite::EFFORT_FLAG,
+            rewrite::effort_agent_names()
+                .iter()
+                .map(|name| format!("--{name}"))
+                .collect::<Vec<String>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -291,18 +337,36 @@ opened by dl itself, so it is the same workspace, container and clone that
 already running, and never rebuilt just because aid asked for it.
 
 Usage:
+    aid                                    Pick a workspace, then start the agent
     aid <user/repo>[@branch] [prompt...]   Open the workspace and start the agent
     aid <workspace> [prompt...]            Same, for an existing workspace or ./path
 
+With no workspace on a terminal, aid lets you pick one of your workspaces, as
+dl does.
+
 With no prompt on a terminal, aid boots the workspace in the background and
-asks for the prompt while it does: type it free of shell quoting and press
-Enter to launch. An empty Enter (or Ctrl-D) starts the agent's plain session.
+asks for the prompt while it does. First it asks for each setting the line
+left open: the agent (one row per Claude login, then each other agent), the
+model and the effort. Each picker lists your recent choices first, so one
+Enter repeats the last launch. Type a name that is not listed to use it.
+
+Then type the prompt free of shell quoting and press Enter to launch. A paste
+keeps its line breaks, and Alt-Enter or Ctrl-J adds a line. An empty Enter
+(or Ctrl-D) starts the agent's plain session. Esc in a picker, or Ctrl-C at
+the prompt, stops the boot and launches nothing.
 Piping stdin or setting DEVLAUNCH_NO_TTY=1 skips the question and launches
 one-shot, as a prompt on the command line always has.
 
 Options:
     {agents}
                                      Pick the agent (default: {default})
+    --model <model>                  The model the agent runs, passed on as typed
+                                     in the agent's own spelling. Any name the
+                                     agent takes works; aid does not check it.
+                                     Default: the agent's own default
+    --effort <level>                 How hard the agent thinks, the same way:
+                                     claude's --effort, codex's
+                                     model_reasoning_effort. gemini has none
     --devcontainer <variant|path>    Passed through to dl
     --rm                             Delete the workspace once the agent's session
                                      ends, the way docker run --rm does. Appendable:
@@ -348,6 +412,8 @@ Examples:
     aid blooop/devlaunch@fix/42 fix the bug    # Open the branch, hand over the prompt
     aid --gemini ./my-project explain this     # Pick a different agent
     aid --no-remote blooop/devlaunch           # Nothing but the session in front of you
+    aid --model opus --effort max blooop/devlaunch
+                                               # Pick the model and how hard it thinks
     aid blooop/devlaunch@fix/42 fix the bug --rm
                                                # The line above, recalled, with the
                                                # workspace deleted once the agent is
@@ -587,6 +653,25 @@ mod tests {
             }),
             "--remote-control starts Claude Code's Remote Control, which only the claude agent \
              has, not codex. Drop the flag or pick --claude."
+        );
+    }
+
+    #[test]
+    fn a_flag_with_no_value_says_where_the_value_goes() {
+        assert_eq!(
+            refusal(&UsageError::MissingValue { flag: "--model" }),
+            "--model needs a value: aid --model <value> <workspace> [prompt]"
+        );
+    }
+
+    #[test]
+    fn an_effort_beside_an_agent_that_has_none_names_the_agents_that_do() {
+        assert_eq!(
+            refusal(&UsageError::EffortUnsupported {
+                agent: "gemini".to_owned()
+            }),
+            "--effort sets a reasoning effort, which gemini has no setting for. \
+             Drop the flag or pick one of: --claude, --codex."
         );
     }
 

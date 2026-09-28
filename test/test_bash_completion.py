@@ -361,6 +361,24 @@ done
         assert self.run_completion("dl --devcontainer robot my-") == bare
         assert self.run_completion("dl --claude-profile work my-") == bare
 
+    def test_an_aid_model_or_effort_and_its_value_do_not_move_the_spec(self):
+        """`aid --model opus <spec>` completes its spec as `aid <spec>` does.
+
+        Both flags take a value, so the scan has to step over two words. A
+        script that stepped over one would call `opus` the spec and complete
+        nothing after it.
+        """
+        bare = self.run_completion("aid my-")
+        assert bare
+        assert self.run_completion("aid --model opus my-") == bare
+        assert self.run_completion("aid --effort high my-") == bare
+        assert self.run_completion("aid --model opus --effort high my-") == bare
+
+    def test_nothing_completes_an_aid_model_or_effort_value(self):
+        """The values are each agent's, and aid holds no list of them."""
+        assert self.run_completion("aid --model ") == []
+        assert self.run_completion("aid --effort ") == []
+
     def test_a_leading_modifier_leaves_the_verb_where_it_was(self):
         """`dl --rm <ws> <verb>`: a flag ahead of the spec shifts nothing.
 
