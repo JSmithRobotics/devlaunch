@@ -391,7 +391,9 @@ pub(crate) enum Command {
     Repos,
     /// `dl --claude-profiles [--json]` — the Claude logins `--claude-profile`
     /// can name.
-    ClaudeProfiles { output: ListOutput },
+    ClaudeProfiles {
+        output: ListOutput,
+    },
     /// `dl --completion-data` — the whole completion cache, as one JSON line.
     CompletionData,
     /// `dl --update-cache [--force]` — the silent background refresh.
