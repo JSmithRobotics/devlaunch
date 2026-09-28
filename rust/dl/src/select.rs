@@ -814,8 +814,10 @@ const FALLBACK_TERM: &str = "xterm-256color";
 /// without, since every row is placed with it. The `term` crate's built-in ANSI
 /// entry, which `TermInfo::from_name` returns for any `xterm*`, `screen*` or
 /// `tmux*` name that has no database entry behind it, holds colours and bold and no
-/// `cup`. The alternate screen (`smcup`) is not needed: without it skim draws over
-/// the visible screen, which is still a picker.
+/// `cup`. The alternate screen (`smcup`) is not needed to draw: without it skim
+/// draws over the visible screen, which is still a picker. It is missed afterwards,
+/// though. An entry without `smcup` has no `rmcup` either, so nothing puts the old
+/// screen back when skim closes, and the picker's rows stay where they were drawn.
 fn drawable(entry: &TermInfo) -> bool {
     entry.strings.contains_key("cup")
 }
