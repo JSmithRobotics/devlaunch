@@ -50,6 +50,23 @@ pub use crate::clients::claude::Account;
 /// leaving one to drift.
 pub const DEFAULT_PROFILE: &str = "default";
 
+/// The exact filename a usage snapshot is read from, beside the credential.
+///
+/// Named, not globbed: Claude Code's own writers use temp-then-rename (a file named
+/// `.usage-snapshot.json.<pid>` briefly exists beside the real one while a write is in
+/// flight), and a glob over the directory would pick up that half-written temp file as
+/// though it were the snapshot. Joining this exact name never can.
+const USAGE_SNAPSHOT_NAME: &str = "usage-snapshot.json";
+
+/// The most a usage snapshot read will ever return, regardless of the file's real
+/// size.
+///
+/// A cap, not a validation: this crate does not parse the file, so it cannot tell an
+/// oversize snapshot from a truncated one and does not try to. It exists so that a
+/// gateway relying on one ssh round trip cannot be handed an unbounded amount of data
+/// by a file it does not own.
+const USAGE_SNAPSHOT_MAX_BYTES: u64 = 64 * 1024;
+
 /// Whether a profile can be launched with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileState {
@@ -85,6 +102,19 @@ pub struct ProfileSummary {
     /// proves nothing. Decided on `accountUuid`, never on a display field, for that
     /// reason.
     pub shares_account_with: Vec<String>,
+    /// The bytes of `usage-snapshot.json` beside the credential, when there is a
+    /// credential and a file to read.
+    ///
+    /// `None` covers two different absences a caller does not need told apart: no
+    /// credential (nobody signed in to have a snapshot) and a credential with no such
+    /// file yet (nothing has written one). What a caller *does* need told apart is
+    /// this crate's own absence from an older `dl` that never read the file at all --
+    /// [`crate::flows::claude_profiles::json_document`] carries that distinction by
+    /// always emitting the wire key, `null` or not, rather than omitting it.
+    ///
+    /// Read whole and undecoded: this crate does not parse whatever a usage snapshot
+    /// holds, only forwards the bytes a gateway asked for over one round trip.
+    pub usage_snapshot: Option<String>,
 }
 
 /// Every profile this host offers, `default` first and the rest by name.
@@ -236,7 +266,34 @@ fn row(name: String, path: PathBuf) -> ProfileSummary {
         // Filled in by `note_shared_accounts` once the whole listing exists: it is a
         // fact about a row's neighbours, so no row can answer it alone.
         shares_account_with: Vec::new(),
+        // Same rule as `account`, and the same reason: a usage snapshot belongs to the
+        // account that wrote it, and a profile with no credential has no account to
+        // have written one.
+        usage_snapshot: authed.then(|| read_usage_snapshot(&path)).flatten(),
     }
+}
+
+/// The bytes of `usage-snapshot.json` in `dir`, if there is one to read.
+///
+/// `None` for "no such file" and for "could not be read" alike -- this is a listing,
+/// not a diagnostic, and, like [`claude::account_at`] beside it, has no stderr of its
+/// own to put a reason on.
+///
+/// **Never writes, creates or renames anything**, and checks [`Path::is_file`] before
+/// opening so that a FIFO or other special file left in the directory cannot hang this
+/// read. Reads at most [`USAGE_SNAPSHOT_MAX_BYTES`] and decodes what it got lossily,
+/// because this crate does not parse the contents and a snapshot writer using bytes
+/// this is not prepared for is not this function's failure to report.
+fn read_usage_snapshot(dir: &Path) -> Option<String> {
+    let path = dir.join(USAGE_SNAPSHOT_NAME);
+    if !path.is_file() {
+        return None;
+    }
+    let file = std::fs::File::open(&path).ok()?;
+    let mut capped = std::io::Read::take(file, USAGE_SNAPSHOT_MAX_BYTES);
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut capped, &mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +336,15 @@ fn row(name: String, path: PathBuf) -> ProfileSummary {
 /// `sharesAccountWith` carries [`ProfileSummary::shares_account_with`] unmodified,
 /// for the same reason it is a field there: which names are spare copies of one
 /// login is a fact about the whole listing, not about a name alone.
+///
+/// `usageSnapshot` carries [`ProfileSummary::usage_snapshot`] unmodified, and is
+/// **always present as a key**, never dropped for `null` -- unlike every other
+/// optional field here. That is deliberate and the opposite default from
+/// `account`'s: a caller reading this over one ssh round trip has to be able to tell
+/// "this `dl` is old enough that it never read for a snapshot at all" (the key is
+/// missing) from "this `dl` looked and there was nothing to find" (the key is
+/// present and `null`). Collapsing the two would let an un-upgraded host report zero
+/// usage with the same shape as a host that genuinely has none.
 pub fn json_document(rows: &[ProfileSummary]) -> serde_json::Value {
     serde_json::Value::Array(rows.iter().map(json_row).collect())
 }
@@ -294,6 +360,10 @@ struct RowWire {
     account: Option<AccountWire>,
     #[serde(rename = "sharesAccountWith")]
     shares_account_with: Vec<String>,
+    /// Always serialised, `null` or not -- see [`json_document`]'s doc comment for
+    /// why a missing key and a `null` value must stay distinguishable.
+    #[serde(rename = "usageSnapshot")]
+    usage_snapshot: Option<String>,
 }
 
 /// [`Account`], on the wire. No `accountUuid`: it exists to tell two profiles of
@@ -322,6 +392,7 @@ fn json_row(row: &ProfileSummary) -> serde_json::Value {
             seat_tier: account.seat_tier.clone(),
         }),
         shares_account_with: row.shares_account_with.clone(),
+        usage_snapshot: row.usage_snapshot.clone(),
     };
     serde_json::to_value(wire).expect("RowWire holds only strings, bools and options of them")
 }
@@ -617,5 +688,98 @@ mod tests {
         let rows = summarise(Some(root.path()), None);
         let offered: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
         assert_eq!(offered, ["alpha", "mid", "zeta"]);
+    }
+
+    #[test]
+    fn an_authed_profile_with_a_usage_snapshot_returns_its_exact_bytes() {
+        let root = tempfile::tempdir().expect("a scratch root");
+        let dir = profile(root.path(), "work", true, None);
+        std::fs::write(dir.join(USAGE_SNAPSHOT_NAME), r#"{"tokens":123}"#).expect("a snapshot");
+
+        let rows = summarise(Some(root.path()), None);
+        assert_eq!(rows[0].usage_snapshot.as_deref(), Some(r#"{"tokens":123}"#));
+    }
+
+    #[test]
+    fn an_authed_profile_with_no_usage_snapshot_returns_none() {
+        let root = tempfile::tempdir().expect("a scratch root");
+        profile(root.path(), "work", true, None);
+
+        let rows = summarise(Some(root.path()), None);
+        assert_eq!(rows[0].usage_snapshot, None);
+    }
+
+    #[test]
+    fn a_profile_with_no_credential_names_no_usage_snapshot_even_with_one_on_disk() {
+        // Same rule as `account`: a snapshot belongs to the account that wrote it, and
+        // a profile with no credential has no account to have written one.
+        let root = tempfile::tempdir().expect("a scratch root");
+        let dir = profile(root.path(), "stale", false, None);
+        std::fs::write(dir.join(USAGE_SNAPSHOT_NAME), r#"{"tokens":123}"#).expect("a snapshot");
+
+        let rows = summarise(Some(root.path()), None);
+        assert_eq!(rows[0].usage_snapshot, None);
+    }
+
+    #[test]
+    fn a_temp_written_snapshot_is_not_picked_up() {
+        // The writer's own temp-then-rename artifact, left beside the real name --
+        // never globbed for, so it is never mistaken for one.
+        let root = tempfile::tempdir().expect("a scratch root");
+        let dir = profile(root.path(), "work", true, None);
+        std::fs::write(dir.join(".usage-snapshot.json.123"), r#"{"tokens":123}"#)
+            .expect("a temp file");
+
+        let rows = summarise(Some(root.path()), None);
+        assert_eq!(rows[0].usage_snapshot, None);
+    }
+
+    #[test]
+    fn an_oversize_usage_snapshot_is_truncated_at_the_cap() {
+        let root = tempfile::tempdir().expect("a scratch root");
+        let dir = profile(root.path(), "work", true, None);
+        let oversize = "a".repeat(USAGE_SNAPSHOT_MAX_BYTES as usize + 1024);
+        std::fs::write(dir.join(USAGE_SNAPSHOT_NAME), &oversize).expect("a snapshot");
+
+        let rows = summarise(Some(root.path()), None);
+        let read = rows[0].usage_snapshot.as_ref().expect("a truncated read");
+        assert_eq!(read.len(), USAGE_SNAPSHOT_MAX_BYTES as usize);
+    }
+
+    #[test]
+    fn the_wire_always_carries_the_usage_snapshot_key() {
+        let root = tempfile::tempdir().expect("a scratch root");
+        let dir = profile(root.path(), "work", true, None);
+        std::fs::write(dir.join(USAGE_SNAPSHOT_NAME), r#"{"tokens":123}"#).expect("a snapshot");
+        profile(root.path(), "fresh", false, None);
+
+        let rows = summarise(Some(root.path()), None);
+        let document = json_document(&rows);
+        let by_name = |name: &str| -> &serde_json::Value {
+            document
+                .as_array()
+                .expect("an array")
+                .iter()
+                .find(|row| row["name"] == name)
+                .unwrap_or_else(|| panic!("{name} missing from {document:?}"))
+        };
+        // Present and non-null for the profile that has one.
+        assert_eq!(by_name("work")["usageSnapshot"], r#"{"tokens":123}"#);
+        // Present, but null, for a profile with nothing to report -- the key must
+        // never simply be absent, which is what would make an un-upgraded `dl`
+        // indistinguishable from a host with no usage at all.
+        assert!(
+            by_name("work")
+                .as_object()
+                .unwrap()
+                .contains_key("usageSnapshot")
+        );
+        assert!(
+            by_name("fresh")
+                .as_object()
+                .unwrap()
+                .contains_key("usageSnapshot")
+        );
+        assert!(by_name("fresh")["usageSnapshot"].is_null());
     }
 }
