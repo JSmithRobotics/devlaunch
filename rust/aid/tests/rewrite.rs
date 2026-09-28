@@ -701,3 +701,43 @@ fn full_auto_rows(document: &str) -> Vec<(String, String)> {
         })
         .collect()
 }
+
+#[test]
+fn resume_reopens_a_session_in_the_named_workspace_through_dls_own_launch() {
+    // Newer than the Python build, so this one was not captured from it: `aid
+    // resume` is the Rust tree's own. What it pins is the one thing that makes it a
+    // resume and not a launch, observed where the agent is actually started:
+    // `--resume` is the last word of the payload, after the Remote Control name
+    // that makes the resumed session drivable from claude.ai as the first one was.
+    let world = World::with(&["--warm"]);
+    world.aid(&["resume", MAIN]).exited(0);
+    assert_eq!(
+        world.devpod_calls(),
+        [
+            format!("devpod status {MAIN} --output json"),
+            format!(
+                "devpod ssh {MAIN} --log-output json --command bash -lc \
+                 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
+                 --dangerously-skip-permissions --remote-control={MAIN} --resume'"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_resume_line_with_a_prompt_never_reaches_dl() {
+    let world = World::with(&["--warm"]);
+    let run = world.aid(&["resume", MAIN, "fix", "it"]);
+    run.exited(1);
+    assert!(
+        run.err
+            .contains("aid resume takes a workspace and nothing after it"),
+        "{}",
+        run.err
+    );
+    assert!(
+        world.devpod_calls().is_empty(),
+        "{:?}",
+        world.devpod_calls()
+    );
+}

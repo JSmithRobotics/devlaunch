@@ -378,6 +378,7 @@ precedence order and what a profile does not change.
 
 ```bash
 aid <user/repo>[@branch|@<pr-link>] [prompt...]
+aid resume [<workspace>]
 ```
 
 `aid` is a shortcut, not a second launcher. It rewrites its command line into a `dl` one, so
@@ -439,6 +440,12 @@ This applies to agents `aid` starts, and nothing else. `dl <ws> -- claude` runs 
 typed.
 
 The agent's CLI has to be in the container already. `aid` runs it; it does not install it.
+
+After a restart, `aid resume` is the way back into an agent session in one command. It
+opens `dl`'s picker, starts the workspace you pick, and starts the agent with its own
+resume picker, Remote Control and full auto included. `aid resume <workspace>` skips the
+first picker. [docs/cli.md](docs/cli.md#aid-resume-back-into-a-session-after-a-restart)
+has the words per agent.
 
 ## What every workspace gets
 

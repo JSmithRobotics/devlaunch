@@ -139,7 +139,14 @@ fn run(argv: &[String]) -> i32 {
         remote_control: remote_control.as_deref(),
     };
     let parsed = match rewrite::parse_aid_args(argv, environment) {
-        Ok(parsed) => parsed,
+        Ok(rewrite::Line::Ready(parsed)) => parsed,
+        // `aid resume` with no workspace. The pick comes before everything below,
+        // which is all about one named workspace, so from here on this line is an
+        // `aid resume <id>` like any other.
+        Ok(rewrite::Line::Unpicked(unpicked)) => match dl::pick_workspace() {
+            Ok(workspace_id) => unpicked.picked(workspace_id),
+            Err(code) => return code,
+        },
         Err(refused) => {
             eprintln!("{}", refusal(&refused));
             return 1;
@@ -260,6 +267,11 @@ fn refusal(refused: &UsageError) -> String {
             dl::python_repr(value),
             rewrite::remote_control_values().join(", ")
         ),
+        UsageError::ResumeTakesNoPrompt { words } => format!(
+            "aid resume takes a workspace and nothing after it, not {}: the agent's own \
+             picker chooses the session. Use aid resume [<workspace>].",
+            dl::python_repr(words)
+        ),
     }
 }
 
@@ -293,6 +305,14 @@ already running, and never rebuilt just because aid asked for it.
 Usage:
     aid <user/repo>[@branch] [prompt...]   Open the workspace and start the agent
     aid <workspace> [prompt...]            Same, for an existing workspace or ./path
+    aid resume [<workspace>]               Reopen an earlier agent session in the
+                                           workspace. With no workspace, pick one
+                                           from dl's picker first
+
+`aid resume` starts the agent the way a fresh launch does (same agent flag,
+full-auto, Remote Control named after the workspace) and hands it its own
+resume words: claude and codex open their session picker, and gemini
+reopens its latest session.
 
 With no prompt on a terminal, aid boots the workspace in the background and
 asks for the prompt while it does: type it free of shell quoting and press
@@ -348,6 +368,8 @@ Examples:
     aid blooop/devlaunch@fix/42 fix the bug    # Open the branch, hand over the prompt
     aid --gemini ./my-project explain this     # Pick a different agent
     aid --no-remote blooop/devlaunch           # Nothing but the session in front of you
+    aid resume                                 # Pick a workspace, then a session in it
+    aid resume blooop/devlaunch@fix/42         # Pick a session in that workspace
     aid blooop/devlaunch@fix/42 fix the bug --rm
                                                # The line above, recalled, with the
                                                # workspace deleted once the agent is

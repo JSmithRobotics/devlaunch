@@ -396,6 +396,23 @@ pub fn workspace_id_of(spec: &str) -> Option<String> {
     target::workspace_id_of(&ProcessRunner, spec)
 }
 
+/// The id of one workspace the user picks from dl's own picker, or the exit code
+/// to end on.
+///
+/// **Public for `aid resume`, which needs the id before it can build its line.**
+/// `dl -- <command>` with no workspace already opens this picker, and a plain
+/// `aid resume` could have ridden on that. It does not, because the agent line
+/// names Claude Code's Remote Control session after the workspace id
+/// ([`workspace_id_of`]), and inside dl's picker the line is already built. So aid
+/// asks for the pick first and builds a line for a named workspace, which is the
+/// path every other aid launch takes.
+///
+/// A pick that never came (Esc, an empty list, no terminal) is `Err(1)`, with the
+/// reason on stderr where there is one.
+pub fn pick_workspace() -> Result<String, i32> {
+    commands::pick_one(&ProcessRunner).map_err(commands::Ending::code)
+}
+
 /// What `spec` states it is called, without resolving anything.
 ///
 /// Split out from [`name_before_launch`] because it is the whole of the decision
