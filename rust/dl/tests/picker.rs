@@ -298,12 +298,18 @@ fn a_terminal_whose_term_names_no_terminfo_entry_still_gets_a_picker() {
     // `TERM` names. So a real terminal with `TERM` unset (`env -i`, a `docker exec
     // -t` that sets none) or naming an entry this machine does not have (a
     // terminal's own name, inside a container whose terminfo lacks it) aborted the
-    // whole command with a panic, before a single row was drawn.
+    // whole command with a panic, before a single row was drawn. A name the `term`
+    // crate takes for ANSI (`xterm*`, `tmux*`, `screen*`) did not panic: it got a
+    // built-in entry with colours and no cursor movement, and a garbled picker.
     for (term, said) in [
         (None, "TERM is unset"),
         (
             Some("no-such-terminal"),
-            "TERM=no-such-terminal has no usable terminfo entry here",
+            "TERM=no-such-terminal names no terminfo entry here that can move the cursor",
+        ),
+        (
+            Some("xterm-no-such-entry"),
+            "TERM=xterm-no-such-entry names no terminfo entry here that can move the cursor",
         ),
     ] {
         let (screen, calls, afterwards) = Screen::run_under(

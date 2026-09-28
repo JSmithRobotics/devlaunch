@@ -1679,6 +1679,17 @@ fn render_select<'r>(
             println!("{}", select::invitation(arity));
             no_pick()
         }
+        select::Pick::Undrawable(reason) => {
+            let line = match &verb {
+                Verb::Attach { .. } => "dl <workspace>".to_owned(),
+                Verb::Run(..) => "dl <workspace> -- <command>".to_owned(),
+                verb => format!("dl <workspace> {}", verb.word()),
+            };
+            eprintln!(
+                "{reason}, so the picker cannot be drawn. Name the workspace instead: {line}"
+            );
+            no_pick()
+        }
     }
 }
 
@@ -1691,7 +1702,8 @@ fn render_select<'r>(
 /// grammar. An empty list keeps dl's sentence, which says how to make a workspace.
 /// A run with no terminal gets one of its own in place of the invitation, which
 /// would ask for a pick nobody can make: it says a terminal is missing and how to
-/// name the workspace instead.
+/// name the workspace instead. So does a terminal that no terminfo entry here can
+/// draw on.
 pub(crate) fn pick_one(runner: &dyn Runner) -> Result<String, Ending> {
     // The picker reads each row's clone under the cache for its columns. With no
     // cache there is nothing to draw, and the refusal is every other command's.
@@ -1716,6 +1728,13 @@ pub(crate) fn pick_one(runner: &dyn Runner) -> Result<String, Ending> {
         select::Pick::NoTerminal => {
             eprintln!(
                 "aid resume needs a terminal to pick a workspace. Name one instead: aid resume <workspace>"
+            );
+            Err(Ending::Refused)
+        }
+        select::Pick::Undrawable(reason) => {
+            eprintln!(
+                "{reason}, so aid resume cannot draw its picker. Name the workspace instead: \
+                 aid resume <workspace>"
             );
             Err(Ending::Refused)
         }
