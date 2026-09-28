@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`rm` no longer refuses over a `git filter-branch` backup.** The unpushed-commit
+  probe asked `git log --all --not --remotes`, and `--all` reaches `refs/original/`,
+  where filter-branch keeps the old tip of each ref it rewrote. After a rewrite that
+  was pushed, every pre-rewrite commit read as unpushed: a kinisi_ros workspace
+  refused `rm` over "5 unpushed commit(s)", and all five were on the remote in their
+  rewritten form. The probe now excludes `refs/original/*` beside `refs/tags/*`. A
+  rewrite that was not pushed still refuses, because the rewritten branch is a local
+  branch like any other.
+
 ## [0.55.0] - 2026-09-28
 
 ### Fixed

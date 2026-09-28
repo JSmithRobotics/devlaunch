@@ -1036,6 +1036,14 @@ reachable only from local tag(s) (backup)`, and a tag sitting on a commit some
 branch also holds is named nowhere, because it explains nothing about why the
 clone is being kept.
 
+One other ref kind is left out, and it needs no comparison: `refs/original/`,
+where `git filter-branch` keeps the old tip of every ref it rewrote. That is a
+backup of the same kind as the reflog, which the answer never reached. After a
+rewrite you pushed, it holds the pre-rewrite copy of commits the remote now
+has in their rewritten form, and counting it made `rm` refuse over work that
+was all on the remote. A rewrite you did not push is still counted, because
+the rewritten branch is an ordinary local branch.
+
 The changed paths are named, not just counted, and that matters more than it
 looks: a devcontainer that runs a package install in its `postCreateCommand` can
 leave a tracked lockfile modified in *every* workspace it builds. This repo's
