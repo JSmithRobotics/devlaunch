@@ -413,6 +413,67 @@ fn an_empty_enter_is_the_plain_session_it_always_was() {
     );
 }
 
+/// The session line `aid resume` hands dl for [`MAIN`]: the agent's own line with
+/// `--resume` as its last word.
+fn resumed_session() -> String {
+    format!(
+        "devpod ssh {MAIN} --log-output json --command bash -lc 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
+         --dangerously-skip-permissions --remote-control={MAIN} --resume'"
+    )
+}
+
+#[test]
+fn a_resume_line_on_a_terminal_opens_no_editor() {
+    // A resume line has no prompt, and an empty prompt on a terminal is exactly
+    // what opens the editor for an agent line. Only the real gate on a real pty
+    // says which of the two a resume line is.
+    let world = World::with(&["--warm"]);
+    let session = PtyAid::spawn(&world, &["resume", MAIN], &[]);
+    session.expect("aid -> dl");
+    let seen = Arc::clone(&session.seen);
+    assert_eq!(session.wait(), 0);
+
+    let whole = String::from_utf8_lossy(&seen.lock().expect("the pty buffer")).into_owned();
+    assert!(
+        !whole.contains("Type the prompt") && !whole.contains(BANNER),
+        "a resume line opened the editor; the pty said:\n{whole}"
+    );
+    assert_eq!(
+        world.devpod_calls().last().expect("a session"),
+        &resumed_session()
+    );
+}
+
+#[test]
+fn a_resume_with_no_workspace_resumes_the_row_the_picker_took() {
+    // `aid resume` alone asks dl's picker, and the id that comes back is the one
+    // the line is then built around. The row is taken through skim, whose answer is
+    // a label that dl maps back to an id, so only a pick made on a terminal proves
+    // the id that reaches the session is the row's.
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &["resume"], &[("TERM", "xterm-256color")]);
+    session.expect("Select workspace (type to filter):");
+    session.expect("blooop | devlaunch | main");
+    session
+        .writer
+        .write_all(b"\r")
+        .and_then(|()| session.writer.flush())
+        .expect("taking the row on the pty");
+    session.expect("aid -> dl");
+    let seen = Arc::clone(&session.seen);
+    assert_eq!(session.wait(), 0);
+
+    let whole = String::from_utf8_lossy(&seen.lock().expect("the pty buffer")).into_owned();
+    assert!(
+        whole.contains(&format!("Picked blooop | devlaunch | main -> {MAIN}")),
+        "the pick named no row; the pty said:\n{whole:?}"
+    );
+    assert_eq!(
+        world.devpod_calls().last().expect("a session"),
+        &resumed_session()
+    );
+}
+
 #[test]
 fn the_boot_runs_while_the_prompt_is_still_being_typed() {
     // The overlap itself: a stopped workspace's `devpod up` is on the shim's log

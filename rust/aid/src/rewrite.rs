@@ -2527,12 +2527,4 @@ mod tests {
     fn a_retired_spelling_on_a_resume_line_with_a_workspace_is_left_for_dl_to_refuse() {
         assert_eq!(parsed(&["resume", "ws", "--autorm"]).task, Task::Retired);
     }
-
-    #[test]
-    fn a_resume_line_never_opens_the_prompt_editor() {
-        // The editor opens for an agent line with an empty prompt. A resume line has
-        // no prompt at all, so it is not one of those, whatever the terminal says.
-        let parsed = parsed(&["resume", "ws"]);
-        assert!(!matches!(&parsed.task, Task::Agent { prompt, .. } if prompt.is_empty()));
-    }
 }
