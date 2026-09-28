@@ -1706,13 +1706,7 @@ pub(crate) fn pick_one(runner: &dyn Runner) -> Result<String, Ending> {
             for line in render::picked("resume", &chosen) {
                 eprintln!("{line}");
             }
-            // `Arity::One` answers one row, and `NonEmpty` holds at least that one,
-            // so the `Refused` is unreachable rather than a path.
-            chosen
-                .iter()
-                .next()
-                .map(|pick| pick.workspace_id.clone())
-                .ok_or(Ending::Refused)
+            Ok(chosen.first().workspace_id.clone())
         }
         select::Pick::Quit => Err(Ending::Refused),
         select::Pick::NoWorkspaces => {

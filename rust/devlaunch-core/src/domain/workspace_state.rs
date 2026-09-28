@@ -372,6 +372,11 @@ impl<T> NonEmpty<T> {
         })
     }
 
+    /// The item the sequence always holds.
+    pub fn first(&self) -> &T {
+        &self.first
+    }
+
     pub(crate) fn len(&self) -> usize {
         1 + self.rest.len()
     }
