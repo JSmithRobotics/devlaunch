@@ -101,7 +101,7 @@ that clone last fetched, the attach says how far behind before it hands over the
 shell. [How fresh a launch is](workspaces.md#how-fresh-a-launch-is) is the whole
 of the freshness rules, and the section under it names which verb moves what.
 
-## A branch link where a branch goes
+## A branch link as the spec
 
 The link a browser shows for a branch is accepted as the spec itself:
 
@@ -117,6 +117,10 @@ So a link to a directory inside a branch, `.../tree/main/docs`, asks for a branc
 named `main/docs`, and the checkout reports that no such branch exists. Only
 `github.com` links are read this way, since `owner/repo` expands to a GitHub
 remote. A link to any other host is handed to devpod as typed.
+
+The link is not accepted after `owner/repo@` the way a pull request link is.
+`dl owner/repo@https://github.com/owner/repo/tree/main` is read as a URL and the
+clone fails. Name the whole link instead.
 
 ## A pull request where a branch goes
 
