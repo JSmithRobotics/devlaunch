@@ -290,6 +290,10 @@ fn taking_a_row_acts_on_the_workspace_that_rows_label_names() {
         said.contains("Picked blooop | blooop-wayfinder -> blooop-wayfinder"),
         "a pick that named nothing: {said:?}"
     );
+    assert!(
+        !said.contains("so the picker was drawn as"),
+        "a TERM that can draw the picker was swapped: {said:?}"
+    );
 }
 
 #[test]
@@ -312,7 +316,7 @@ fn a_terminal_whose_term_names_no_terminfo_entry_still_gets_a_picker() {
             "TERM=xterm-no-such-entry names no terminfo entry here that can move the cursor",
         ),
     ] {
-        let (screen, calls, afterwards) = Screen::run_under(
+        let (screen, calls, afterwards, terms) = Screen::run_under(
             term,
             &["stop"],
             "wayfinder",
@@ -326,7 +330,39 @@ fn a_terminal_whose_term_names_no_terminfo_entry_still_gets_a_picker() {
              this screen:\n{screen}\nand then said {afterwards:?}"
         );
         assert!(afterwards.contains(said), "{term:?}: {afterwards:?}");
+        // The picker was drawn as xterm-256color, and the workspace it picked is
+        // acted on under the user's own `TERM`: a session opened under the
+        // borrowed one would draw for a terminal the user does not have.
+        let own = match term {
+            Some(term) => format!("TERM={term} stop blooop-wayfinder"),
+            None => "TERM unset stop blooop-wayfinder".to_owned(),
+        };
+        assert!(
+            terms.contains(&own),
+            "{term:?}: the stop did not run under the user's TERM: {terms:?}"
+        );
+        assert!(
+            !terms
+                .iter()
+                .any(|call| call.starts_with("TERM=xterm-256color ")),
+            "{term:?}: a devpod call ran under the borrowed TERM: {terms:?}"
+        );
     }
+}
+
+#[test]
+fn a_picker_quit_under_a_swapped_term_still_says_why_and_acts_on_nothing() {
+    let (screen, calls, afterwards, _) =
+        Screen::run_under(None, &["stop"], "", |_| true, Dismiss::Quit);
+
+    assert!(
+        afterwards.contains("TERM is unset, so the picker was drawn as xterm-256color."),
+        "the note was not given: {afterwards:?}\nfrom this screen:\n{screen}"
+    );
+    assert!(
+        !calls.iter().any(|call| call.starts_with("stop")),
+        "a quit picker stopped a workspace: {calls:?}"
+    );
 }
 
 /// The batch. `dl rm` is the verb TAB exists for, and the heading is the only thing
@@ -440,17 +476,20 @@ impl Screen {
         settled: impl Fn(&Screen) -> bool,
         dismiss: Dismiss,
     ) -> (Self, Vec<String>, String) {
-        Self::run_under(Some("xterm-256color"), args, keys, settled, dismiss)
+        let (screen, calls, afterwards, _) =
+            Self::run_under(Some("xterm-256color"), args, keys, settled, dismiss);
+        (screen, calls, afterwards)
     }
 
-    /// [`Self::run`] with `TERM` set to `term`, or unset for `None`.
+    /// [`Self::run`] with `TERM` set to `term`, or unset for `None`, and one more
+    /// answer: [`World::devpod_terms`], the `TERM` each devpod call ran under.
     fn run_under(
         term: Option<&str>,
         args: &[&str],
         keys: &str,
         settled: impl Fn(&Screen) -> bool,
         dismiss: Dismiss,
-    ) -> (Self, Vec<String>, String) {
+    ) -> (Self, Vec<String>, String, Vec<String>) {
         let world = World::new();
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -534,7 +573,12 @@ impl Screen {
         let _ = collecting_bytes.join();
 
         let afterwards = Self::afterwards(&drawn.lock().expect("the collected bytes").clone());
-        (screen, world.devpod_calls(), afterwards)
+        (
+            screen,
+            world.devpod_calls(),
+            afterwards,
+            world.devpod_terms(),
+        )
     }
 
     /// The bytes a terminal received, as the grid it would be showing.
@@ -748,6 +792,15 @@ impl World {
             r#"#!/bin/sh
 # Every call is recorded, so a test can ask which workspace a pick reached.
 echo "$@" >> "$DL_TEST_DEVPOD_LOG"
+# And, apart from the listing, the TERM each call ran under, so a test can ask
+# whether a session a pick opened got the user's back.
+if [ "$1" != "list" ]; then
+  if [ "${TERM+set}" = set ]; then
+    echo "TERM=$TERM $*" >> "$DL_TEST_DEVPOD_TERM_LOG"
+  else
+    echo "TERM unset $*" >> "$DL_TEST_DEVPOD_TERM_LOG"
+  fi
+fi
 if [ "$1" = "list" ]; then
   cat <<'JSON'
 [{"id": "blooop-devlaunch", "source": {"gitRepository": "https://github.com/blooop/devlaunch.git"},
@@ -795,6 +848,21 @@ exit 0
             .collect()
     }
 
+    /// Where the fake devpod writes the `TERM` each call other than `list` ran
+    /// under: `TERM=<value> <args>`, or `TERM unset <args>`.
+    fn devpod_term_log(&self) -> std::path::PathBuf {
+        self.root.join("devpod-terms")
+    }
+
+    /// Every line of [`Self::devpod_term_log`], in the order the calls came.
+    fn devpod_terms(&self) -> Vec<String> {
+        std::fs::read_to_string(self.devpod_term_log())
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// `dl <args>` against this world, environment and all.
     ///
     /// The same scratch `HOME`/`XDG_*`/`DEVPOD_HOME` shape `tests/read_side.rs`
@@ -818,6 +886,10 @@ exit 0
         command.env(
             "DL_TEST_DEVPOD_LOG",
             self.devpod_log().display().to_string(),
+        );
+        command.env(
+            "DL_TEST_DEVPOD_TERM_LOG",
+            self.devpod_term_log().display().to_string(),
         );
         command.env("HOME", format!("{root}/home"));
         command.env("XDG_CACHE_HOME", format!("{root}/cache"));
