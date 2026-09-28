@@ -215,6 +215,26 @@ fn help_is_asked_for_by_flag_and_printed_by_accident() {
 }
 
 #[test]
+fn resume_help_prints_aids_help_rather_than_opening_the_picker() {
+    let world = World::with(&["--warm"]);
+
+    for flag in ["--help", "-h"] {
+        let run = world.aid(&["resume", flag]);
+        run.exited(0);
+        assert!(
+            run.out.contains("aid resume"),
+            "aid resume {flag} printed {:?}",
+            run.out
+        );
+        assert!(
+            world.devpod_calls().is_empty(),
+            "aid resume {flag} asked devpod something: {:?}",
+            world.devpod_calls()
+        );
+    }
+}
+
+#[test]
 fn the_version_is_dls_under_aids_name_with_dls_build_marker() {
     // Both halves come from `dl`, so `aid-next` and `dl-next` cannot disagree
     // about which build they are (#268): the marker is empty in the released build

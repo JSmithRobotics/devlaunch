@@ -106,9 +106,12 @@ fn run(argv: &[String]) -> i32 {
     // No arguments is the help *and* a failure, which is Python's pair of endings for
     // one body: somebody who typed `aid` asked for a workspace and named none, and
     // somebody who typed `aid --help` got what they asked for.
-    let asked_for_help = argv
-        .first()
-        .is_some_and(|word| word == "--help" || word == "-h");
+    let is_help = |word: &String| word == "--help" || word == "-h";
+    let asked_for_help = match argv {
+        [first, second, ..] if first == rewrite::RESUME_WORD => is_help(second),
+        [first, ..] => is_help(first),
+        [] => false,
+    };
     if argv.is_empty() || asked_for_help {
         print!("{}", help());
         return if argv.is_empty() { 1 } else { 0 };
