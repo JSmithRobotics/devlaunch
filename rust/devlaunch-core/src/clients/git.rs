@@ -92,6 +92,15 @@ const TAG_REFS_QUERY: [&str; 3] = [
     "refs/tags/",
 ];
 
+/// The refs `--all` reaches that hold no work of their own, as the `--exclude`s
+/// that take them out of the `--all` right after them.
+///
+/// Written once because the two queries that use it are compared to each other:
+/// [`Git::commits_only_tags_reach`] subtracts from what [`Git::unpushed_commits`]
+/// counts, and two lists would let a commit be counted by one and not the other.
+/// See [`Git::unpushed_commits`] for why each is here.
+const NOT_WORK: [&str; 2] = ["--exclude=refs/tags/*", "--exclude=refs/original/*"];
+
 /// What git answered, or that it did not.
 ///
 /// `Said` carries the output shaped the way the verb that asked for it needs —
@@ -615,6 +624,15 @@ impl<'r> Git<'r> {
     /// it alone, so every other ref `--all` reaches is still asked about: local
     /// branches, every worktree's HEAD including detached ones, and `refs/stash`.
     ///
+    /// **`refs/original` is excluded as well, for the same reason.** It is where
+    /// `git filter-branch` keeps the old tips of the refs it rewrote: a backup,
+    /// like the reflog, which `--all` never reached. After a rewrite that was
+    /// pushed, every commit under it reads as unpushed although the work is on
+    /// the remote in its rewritten form. That is how a kinisi_ros workspace
+    /// refused `rm` over five commits that were all pushed. A rewrite that was
+    /// *not* pushed loses nothing by this: the rewritten branch is an ordinary
+    /// local branch, and its own commits still count.
+    ///
     /// **The tags that are local come back in by name, and #487 is why.** A
     /// blanket exclusion gives up one shape of work: a commit reachable *only*
     /// from a tag typed in this clone, with no branch, worktree HEAD or stash
@@ -639,7 +657,9 @@ impl<'r> Git<'r> {
         clone: &Path,
         local_tags: &[String],
     ) -> GitAnswer<String> {
-        let mut args: Vec<&str> = vec!["log", "--oneline", "--exclude=refs/tags/*", "--all"];
+        let mut args: Vec<&str> = vec!["log", "--oneline"];
+        args.extend(NOT_WORK);
+        args.push("--all");
         args.extend(local_tags.iter().map(String::as_str));
         args.extend(["--not", "--remotes"]);
         self.about(clone, &args)
@@ -691,7 +711,9 @@ impl<'r> Git<'r> {
     ) -> GitAnswer<String> {
         let mut args: Vec<&str> = vec!["log", "--oneline"];
         args.extend(local_tags.iter().map(String::as_str));
-        args.extend(["--not", "--remotes", "--exclude=refs/tags/*", "--all"]);
+        args.extend(["--not", "--remotes"]);
+        args.extend(NOT_WORK);
+        args.push("--all");
         self.about(clone, &args)
     }
 

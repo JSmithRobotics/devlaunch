@@ -2669,6 +2669,57 @@ fn a_commit_on_a_branch_the_clone_is_not_on_would_be_lost_too() {
     assert!(losses_of(&guard_reads(&world, "r-main-aa")).contains("unpushed commit"));
 }
 
+/// The clone `git filter-branch` leaves: the branch rewritten, and its old tip
+/// kept under `refs/original/`.
+///
+/// `update-ref` rather than a real `filter-branch`, because the ref is the whole
+/// of what the command leaves behind that the probe can see, and filter-branch
+/// itself prints a warning and waits unless told not to.
+fn rewritten_with_a_backup(clone: &Path, branch: &str) {
+    let before = run_git(clone, &["rev-parse", "HEAD"]);
+    run_git(clone, &["commit", "--amend", "-m", "reworded"]);
+    run_git(
+        clone,
+        &[
+            "update-ref",
+            &format!("refs/original/refs/heads/{branch}"),
+            before.trim(),
+        ],
+    );
+}
+
+#[test]
+fn a_filter_branch_backup_of_a_pushed_rewrite_is_nothing_to_lose() {
+    // A kinisi_ros workspace refused `rm` over "5 unpushed commit(s)" that were
+    // every one on the remote, rewritten. `refs/original/` is filter-branch's
+    // backup of the refs it moved, the same kind of thing as the reflog, which
+    // the probe has never counted. Counting it is #485's shape again: a guard
+    // that fires on a clone with nothing to lose teaches `--force`.
+    let mut world = World::empty();
+    let clone = world.clone_at("r-main-aa", "main");
+    world.record("r-main-aa", "main", &clone);
+    rewritten_with_a_backup(&clone, "main");
+    run_git(&clone, &["push", "--force", "origin", "main"]);
+
+    assert!(matches!(
+        guard_reads(&world, "r-main-aa"),
+        Verdict::Collectable(_)
+    ));
+}
+
+#[test]
+fn a_rewrite_that_was_never_pushed_still_stops_the_delete() {
+    // What leaving `refs/original/` out of the probe does not give up: the
+    // rewritten branch is an ordinary local branch, and the commits on it that
+    // no remote holds are still the only copy.
+    let mut world = World::empty();
+    let clone = world.clone_at("r-main-aa", "main");
+    world.record("r-main-aa", "main", &clone);
+    rewritten_with_a_backup(&clone, "main");
+
+    assert!(losses_of(&guard_reads(&world, "r-main-aa")).contains("1 unpushed commit(s)"));
+}
+
 #[test]
 fn a_clone_dl_has_no_record_for_answers_nothing_to_lose() {
     // What the guard does *not* cover, pinned so no README can overstate it. A

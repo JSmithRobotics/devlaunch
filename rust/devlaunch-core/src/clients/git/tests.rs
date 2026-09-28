@@ -138,13 +138,15 @@ fn the_pinned_verbs_ask_exactly_what_python_asked() {
     // `--all` comes first: `log --oneline --not --remotes --all` is silently
     // always empty, which would report every clone as safe to delete. And
     // `--exclude` binds to the *next* ref-set option, so it has to sit
-    // immediately before `--all` to take the tags out of it (#485).
+    // immediately before `--all` to take the tags out of it (#485), and
+    // filter-branch's `refs/original` backups with them.
     assert_eq!(
         strs(&argv(&fake))[3..],
         [
             "log",
             "--oneline",
             "--exclude=refs/tags/*",
+            "--exclude=refs/original/*",
             "--all",
             "--not",
             "--remotes"
@@ -162,6 +164,7 @@ fn the_pinned_verbs_ask_exactly_what_python_asked() {
             "log",
             "--oneline",
             "--exclude=refs/tags/*",
+            "--exclude=refs/original/*",
             "--all",
             "refs/tags/backup",
             "--not",
@@ -191,6 +194,7 @@ fn the_attribution_query_is_the_unpushed_one_with_the_sides_swapped() {
             "--not",
             "--remotes",
             "--exclude=refs/tags/*",
+            "--exclude=refs/original/*",
             "--all"
         ]
     );
