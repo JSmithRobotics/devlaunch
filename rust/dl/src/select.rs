@@ -98,7 +98,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -673,14 +673,13 @@ pub(crate) fn pick(workspaces: &[Workspace], arity: Arity, cache_dir: &Path) -> 
     if !a_terminal_exists() {
         return Pick::NoTerminal;
     }
-    let name = std::env::var_os("TERM");
     let swapped = match plan(
         TermInfo::from_env(),
         TermInfo::from_name(FALLBACK_TERM),
-        name.as_deref(),
+        Was::read(),
     ) {
         Plan::Keep => None,
-        Plan::Swap { reason } => Some(DrawableTerm::swap(reason)),
+        Plan::Swap { was, reason } => Some(DrawableTerm::swap(was, reason)),
         Plan::Refuse { reason } => return Pick::Undrawable(reason),
     };
     let rows = run_skim(&offering, arity);
@@ -821,48 +820,60 @@ fn drawable(entry: &TermInfo) -> bool {
     entry.strings.contains_key("cup")
 }
 
+/// What `TERM` held when the picker was asked for.
+///
+/// Read once, with `var_os`, and used both for what the note says and for what is
+/// put back. `TermInfo::from_env` reads the variable with `env::var` instead, which
+/// answers nothing for bytes that are not UTF-8, so its `TermUnset` cannot be
+/// trusted to mean the variable is unset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Was {
+    Unset,
+    Set(OsString),
+}
+
+impl Was {
+    fn read() -> Self {
+        std::env::var_os("TERM").map_or(Self::Unset, Self::Set)
+    }
+}
+
 /// What to do about `TERM` before skim runs.
 #[derive(Debug, PartialEq, Eq)]
 enum Plan {
     /// The entry `TERM` names can draw the picker.
     Keep,
-    /// Draw under [`FALLBACK_TERM`], and give `reason` once the picker has closed.
-    Swap { reason: String },
+    /// Draw under [`FALLBACK_TERM`], give `reason` once the picker has closed, and
+    /// put back what `TERM` `was`.
+    Swap { was: Was, reason: String },
     /// Neither the entry `TERM` names nor [`FALLBACK_TERM`]'s can draw the picker,
     /// and `reason` says so, for the caller to finish with what to do instead.
     Refuse { reason: String },
 }
 
 /// The [`Plan`] for two terminfo lookups: `current` for the `TERM` there is, which
-/// `name` is, and `fallback` for [`FALLBACK_TERM`].
-fn plan(
-    current: term::Result<TermInfo>,
-    fallback: term::Result<TermInfo>,
-    name: Option<&OsStr>,
-) -> Plan {
+/// held what it `was`, and `fallback` for [`FALLBACK_TERM`].
+fn plan(current: term::Result<TermInfo>, fallback: term::Result<TermInfo>, was: Was) -> Plan {
     if current.as_ref().is_ok_and(drawable) {
         return Plan::Keep;
     }
-    let unset = matches!(current, Err(term::Error::TermUnset));
-    let missing = format!(
-        "TERM={} names no terminfo entry here that can move the cursor",
-        name.unwrap_or_default().to_string_lossy()
-    );
+    let missing = match &was {
+        Was::Unset => None,
+        Was::Set(name) => Some(format!(
+            "TERM={} names no terminfo entry here that can move the cursor",
+            name.to_string_lossy()
+        )),
+    };
     if fallback.as_ref().is_ok_and(drawable) {
-        let reason = if unset {
-            "TERM is unset".to_owned()
-        } else {
-            missing
-        };
-        return Plan::Swap { reason };
+        let reason = missing.unwrap_or_else(|| "TERM is unset".to_owned());
+        return Plan::Swap { was, reason };
     }
-    let reason = if unset {
-        format!(
+    let reason = match missing {
+        None => format!(
             "TERM is unset, and {FALLBACK_TERM} names no terminfo entry here that can move \
              the cursor"
-        )
-    } else {
-        format!("{missing}, and neither does {FALLBACK_TERM}")
+        ),
+        Some(missing) => format!("{missing}, and neither does {FALLBACK_TERM}"),
     };
     Plan::Refuse { reason }
 }
@@ -876,20 +887,20 @@ fn plan(
 /// variable is the only thing that can be changed. It is put back so that the
 /// session a pick goes on to open inherits the user's `TERM`, not this one.
 struct DrawableTerm {
-    before: Option<OsString>,
+    was: Was,
     /// Why the swap was made, said once the picker has given the screen back.
     reason: String,
 }
 
 impl DrawableTerm {
-    /// Put [`FALLBACK_TERM`] in `TERM` until this is dropped.
-    fn swap(reason: String) -> Self {
-        let before = std::env::var_os("TERM");
+    /// Put [`FALLBACK_TERM`] in `TERM` until this is dropped, and then what it
+    /// `was`.
+    fn swap(was: Was, reason: String) -> Self {
         // Safety: `set_var` races only a concurrent `getenv` or `setenv`. Nothing
         // else runs in this process now but the runner's pipe readers, which only
         // `read`, and skim has not started its threads yet.
         unsafe { std::env::set_var("TERM", FALLBACK_TERM) };
-        Self { before, reason }
+        Self { was, reason }
     }
 }
 
@@ -904,9 +915,9 @@ impl Drop for DrawableTerm {
         // Safety: as in `swap`. `Skim::run_with` has returned, and joined its
         // input thread, by the time this runs.
         unsafe {
-            match self.before.take() {
-                Some(before) => std::env::set_var("TERM", before),
-                None => std::env::remove_var("TERM"),
+            match &self.was {
+                Was::Set(before) => std::env::set_var("TERM", before),
+                Was::Unset => std::env::remove_var("TERM"),
             }
         }
     }
@@ -2155,19 +2166,22 @@ mod tests {
         entry(&["sgr0", "bold", "setaf", "setab"])
     }
 
+    /// `TERM` set to `name`.
+    fn set(name: &str) -> Was {
+        Was::Set(name.into())
+    }
+
     #[test]
     fn an_entry_that_can_move_the_cursor_is_kept() {
-        assert_eq!(
-            plan(Ok(full()), Ok(full()), Some(OsStr::new("xterm-kitty"))),
-            Plan::Keep
-        );
+        assert_eq!(plan(Ok(full()), Ok(full()), set("xterm-kitty")), Plan::Keep);
     }
 
     #[test]
     fn an_entry_that_cannot_move_the_cursor_is_swapped_for_one_that_can() {
         assert_eq!(
-            plan(Ok(ansi_only()), Ok(full()), Some(OsStr::new("xterm-kitty"))),
+            plan(Ok(ansi_only()), Ok(full()), set("xterm-kitty")),
             Plan::Swap {
+                was: set("xterm-kitty"),
                 reason: "TERM=xterm-kitty names no terminfo entry here that can move the cursor"
                     .to_owned()
             }
@@ -2177,8 +2191,9 @@ mod tests {
     #[test]
     fn an_unset_term_is_swapped_for_one_that_can_move_the_cursor() {
         assert_eq!(
-            plan(Err(term::Error::TermUnset), Ok(full()), None),
+            plan(Err(term::Error::TermUnset), Ok(full()), Was::Unset),
             Plan::Swap {
+                was: Was::Unset,
                 reason: "TERM is unset".to_owned()
             }
         );
@@ -2187,11 +2202,7 @@ mod tests {
     #[test]
     fn a_fallback_that_cannot_move_the_cursor_is_refused_rather_than_named() {
         assert_eq!(
-            plan(
-                Ok(ansi_only()),
-                Ok(ansi_only()),
-                Some(OsStr::new("xterm-kitty"))
-            ),
+            plan(Ok(ansi_only()), Ok(ansi_only()), set("xterm-kitty")),
             Plan::Refuse {
                 reason: "TERM=xterm-kitty names no terminfo entry here that can move the cursor, \
                          and neither does xterm-256color"
@@ -2199,10 +2210,29 @@ mod tests {
             }
         );
         assert_eq!(
-            plan(Err(term::Error::TermUnset), Ok(ansi_only()), None),
+            plan(Err(term::Error::TermUnset), Ok(ansi_only()), Was::Unset),
             Plan::Refuse {
                 reason: "TERM is unset, and xterm-256color names no terminfo entry here that can \
                          move the cursor"
+                    .to_owned()
+            }
+        );
+    }
+
+    /// `TermInfo::from_env` reads `TERM` with `env::var`, which answers nothing for
+    /// bytes that are not UTF-8, so the lookup says `TermUnset` for a `TERM` that is
+    /// set. The note is about the variable, and the variable is set; so is what is
+    /// put back.
+    #[test]
+    fn a_term_that_is_not_utf8_is_named_rather_than_called_unset() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let was = Was::Set(OsString::from_vec(b"xterm-\xff".to_vec()));
+        assert_eq!(
+            plan(Err(term::Error::TermUnset), Ok(full()), was.clone()),
+            Plan::Swap {
+                was,
+                reason: "TERM=xterm-\u{fffd} names no terminfo entry here that can move the cursor"
                     .to_owned()
             }
         );
