@@ -2715,9 +2715,14 @@ fn a_rewrite_that_was_never_pushed_still_stops_the_delete() {
     let mut world = World::empty();
     let clone = world.clone_at("r-main-aa", "main");
     world.record("r-main-aa", "main", &clone);
+    std::fs::write(clone.join("local.txt"), "not pushed\n").expect("a file");
+    commit(&clone, "local");
     rewritten_with_a_backup(&clone, "main");
 
-    assert!(losses_of(&guard_reads(&world, "r-main-aa")).contains("1 unpushed commit(s)"));
+    assert_eq!(
+        losses_of(&guard_reads(&world, "r-main-aa")),
+        "1 unpushed commit(s)"
+    );
 }
 
 #[test]
