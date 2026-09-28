@@ -520,13 +520,16 @@ pub(crate) enum Line {
 
 /// An `aid resume` line waiting for the workspace the picker will choose.
 ///
-/// Everything [`AidArgs`] holds except the spec. Private fields and one way out,
-/// so the only thing that can be done with it is to name the workspace.
+/// Everything [`AidArgs`] holds except the spec, with the task's fields in place
+/// of a [`Task`], because the only task a line with no workspace can reach is
+/// [`Task::Resume`]. Private fields and one way out, so the only thing that can be
+/// done with it is to name the workspace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Unpicked {
     dl_options: Vec<String>,
     spec_options: Vec<String>,
-    task: Task,
+    agent: String,
+    remote_control: RemoteControl,
 }
 
 impl Unpicked {
@@ -536,7 +539,10 @@ impl Unpicked {
             spec,
             dl_options: self.dl_options,
             spec_options: self.spec_options,
-            task: self.task,
+            task: Task::Resume {
+                agent: self.agent,
+                remote_control: self.remote_control,
+            },
         }
     }
 }
@@ -715,7 +721,8 @@ fn peel_suffix(argv: &[String]) -> Option<Suffix<'_>> {
 ///
 /// [`RESUME_WORD`] in the spec's place makes it a resume line, and the next
 /// positional word is the spec. With none, the answer is [`Line::Unpicked`] and
-/// the caller asks the picker.
+/// the caller asks the picker, unless the line spells a retired flag: that is
+/// [`UsageError::NoWorkspace`], as it is on any other line with no spec.
 pub(crate) fn parse_aid_args(
     argv: &[String],
     environment: Environment<'_>,
@@ -785,7 +792,10 @@ pub(crate) fn parse_aid_args(
             words: rest.join(" "),
         });
     }
-    if spec.is_none() && !resuming {
+    // dl is what refuses a retired spelling, and it needs a workspace to be asked
+    // about, so a resume line carrying one goes no further than `aid --stop` does.
+    let retired = names_a_retired_spelling(&trailing);
+    if spec.is_none() && (!resuming || retired) {
         return Err(UsageError::NoWorkspace);
     }
     // A run at the end of the line was typed after everything before it, so it wins
@@ -800,7 +810,15 @@ pub(crate) fn parse_aid_args(
     // looks like. Settled before the task is built, so the `RemoteControl` the task
     // carries is one an agent row supplied the flag for.
     let remote_control = remote_control.settle(&agent)?;
-    let task = if names_a_retired_spelling(&trailing) {
+    let Some(spec) = spec else {
+        return Ok(Line::Unpicked(Unpicked {
+            dl_options,
+            spec_options: trailing,
+            agent,
+            remote_control,
+        }));
+    };
+    let task = if retired {
         Task::Retired
     } else if resuming {
         Task::Resume {
@@ -814,15 +832,12 @@ pub(crate) fn parse_aid_args(
             remote_control,
         }
     };
-    let unpicked = Unpicked {
+    Ok(Line::Ready(AidArgs {
+        spec,
         dl_options,
         spec_options: trailing,
         task,
-    };
-    Ok(match spec {
-        Some(spec) => Line::Ready(unpicked.picked(spec)),
-        None => Line::Unpicked(unpicked),
-    })
+    }))
 }
 
 /// Which agent `--gemini` and friends name.
@@ -2495,6 +2510,22 @@ mod tests {
             assert!(built[..separator].contains(&"--rm".to_owned()), "{built:?}");
             assert_eq!(built.last().map(String::as_str), Some("--resume"));
         }
+    }
+
+    #[test]
+    fn a_retired_spelling_on_a_resume_line_with_no_workspace_asks_for_one_before_any_picker() {
+        for retired in ["--stop", "--autorm"] {
+            assert_eq!(
+                super::parse_aid_args(&words(&["resume", retired]), Environment::default()),
+                Err(UsageError::NoWorkspace),
+                "{retired}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retired_spelling_on_a_resume_line_with_a_workspace_is_left_for_dl_to_refuse() {
+        assert_eq!(parsed(&["resume", "ws", "--autorm"]).task, Task::Retired);
     }
 
     #[test]
