@@ -4031,6 +4031,7 @@ mod tests {
             state,
             account,
             shares_account_with: shares_with.iter().map(|n| (*n).to_owned()).collect(),
+            usage_snapshot: None,
         }
     }
 
