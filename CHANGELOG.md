@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.55.0] - 2026-09-28
+
 ### Fixed
 
-- **An agent `aid` started can be messaged by other agents.** `aid` named each
+- **An agent `aid` started can be messaged by other agents** (#640). `aid` named each
   Remote Control session after the spec as typed, `--remote-control=blooop/bencher@msg-b`,
   and Claude Code's `SendMessage` refuses any address with a `/` in it: "to must be a
   bare teammate name - there is only one team per session". Every `aid` session was in
@@ -28,7 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   profile, on every launch and whatever `DEVLAUNCH_NO_TITLE` says, so the name starts
   with the workspace id. Claude Code still replaces it with a title from the
   conversation after the first message, since dl does not add flags to your command.
-||||||| ed25864
 
 ## [0.54.0] - 2026-09-25
 
