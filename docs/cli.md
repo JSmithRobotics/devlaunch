@@ -758,6 +758,9 @@ words per agent are these:
 | `codex` | `resume` | Opens its session picker |
 | `gemini` | `--resume` | Reopens its latest session. Its picker is `/resume`, inside the session |
 
+The claude row was checked against `claude --help`. The codex and gemini rows follow
+those CLIs' documentation and were not run.
+
 `resume` is a verb only in the first positional slot, the way `dl stop` is. After the
 workspace it is prompt text like any other word, so `aid owner/repo resume the work`
 still sends a prompt. A workspace that is itself called `resume` is `aid resume
