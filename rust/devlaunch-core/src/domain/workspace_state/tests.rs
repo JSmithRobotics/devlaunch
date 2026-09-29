@@ -492,6 +492,21 @@ fn a_copy_on_another_local_branch_is_not_a_copy_on_a_remote() {
 }
 
 #[test]
+fn a_local_branch_as_an_upstream_is_not_a_remote() {
+    // `branch -u`, `--track` and `branch.autoSetupMerge=always` can all make a
+    // local branch the upstream, and a copy on it is still only local.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("fix.txt"), "the fix\n");
+    commit(&clone, "fix");
+    git(&clone, &["checkout", "-q", "-b", "other", "origin/main"]);
+    git(&clone, &["branch", "-q", "-u", "feature", "other"]);
+    git_as_author(&clone, &["cherry-pick", "feature"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
 fn a_copy_that_git_will_not_look_for_leaves_every_commit_counted() {
     // Every question the copy rule asks can fail, and a failure must never clear
     // a commit: here git refuses them all, and nothing is found to be copied.

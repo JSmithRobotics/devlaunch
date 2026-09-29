@@ -62,6 +62,9 @@ pub(crate) const PROGRAM: &str = "git";
 /// `refs/heads/` — `branch_manager.py`'s `REFS_HEADS_PREFIX`.
 pub(crate) const REFS_HEADS: &str = "refs/heads/";
 
+/// `refs/remotes/`, the namespace of every remote-tracking ref.
+pub(crate) const REFS_REMOTES: &str = "refs/remotes/";
+
 /// How long a question *about one repository* may take (`workspace_state._git`).
 ///
 /// A bound rather than none because these run inside `dl --ls --json`, once per
@@ -1646,7 +1649,7 @@ pub(crate) fn refs_heads(branch: &str) -> String {
 /// `refs/remotes/<remote>/<branch>` — the ref [`Git::verify_ref`] is asked for a
 /// remote-tracking branch.
 pub(crate) fn refs_remotes(remote: &str, branch: &str) -> String {
-    format!("refs/remotes/{remote}/{branch}")
+    format!("{REFS_REMOTES}{remote}/{branch}")
 }
 
 /// The branch a symbolic ref names, with its namespace prefix removed.
@@ -1760,6 +1763,10 @@ pub(crate) struct LocalBranch {
     /// The full refname, `refs/heads/feature`, for [`TagRef::name`]'s reason.
     pub(crate) name: String,
     /// The full refname of the upstream, `refs/remotes/origin/feature`.
+    ///
+    /// Not always a remote-tracking ref: `branch -u <local>`, `--track <local>`
+    /// and `branch.autoSetupMerge=always` all give a `refs/heads/` upstream, so a
+    /// caller that wants a remote checks the namespace itself.
     pub(crate) upstream: Option<String>,
 }
 
