@@ -1443,15 +1443,68 @@ fn a_patch_match_is_a_copy_only_when_git_replays_it_as_the_copy() {
 #[test]
 fn a_merge_with_a_remerge_diff_is_not_one_that_adds_nothing() {
     assert_eq!(
-        merges_without_a_diff_in("\0aaa\n\0bbb\ndiff --git x\n"),
-        ["aaa".to_owned()]
+        merges_without_a_diff_in(&format!("\0{LOCAL}\n\0{COPY}\ndiff --git x\n")),
+        [LOCAL.to_owned()]
     );
     assert_eq!(
-        merges_without_a_diff_in("\0ccc"),
-        ["ccc".to_owned()],
+        merges_without_a_diff_in(&format!("\0{TREE}")),
+        [TREE.to_owned()],
         "the last merge, with its trailing newline trimmed away"
     );
     assert!(merges_without_a_diff_in("").is_empty());
+}
+
+/// A hash in SHA-256's length, which git prints in a repository made with
+/// `--object-format=sha256`.
+const SHA256: &str = "5555555555555555555555555555555555555555555555555555555555555555";
+
+#[test]
+fn a_nul_inside_a_diff_leaves_the_merges_unread() {
+    // A `diff` gitattribute makes git print a file that holds a NUL as text,
+    // so the NUL between entries can also turn up inside one.
+    assert!(
+        merges_without_a_diff_in(&format!("\0{LOCAL}\ndiff --git a/f b/f\n+a\0  y\n")).is_empty()
+    );
+    assert!(merges_without_a_diff_in(&format!("\0{LOCAL}\ndiff --git a/f b/f\n+a\0y")).is_empty());
+    assert_eq!(
+        merges_without_a_diff_in(&format!("\0{SHA256}\n")),
+        [SHA256.to_owned()]
+    );
+    for hash in [
+        "1111111",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        " 1111111111111111111111111111111111111111",
+        "g111111111111111111111111111111111111111",
+    ] {
+        assert!(
+            merges_without_a_diff_in(&format!("\0{hash}\n")).is_empty(),
+            "{hash:?} is not a full hash"
+        );
+    }
+}
+
+#[test]
+fn a_nul_inside_a_patch_leaves_the_patches_unread() {
+    let patch = "\ndiff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n";
+    assert_eq!(
+        patches_in(&format!("\0{LOCAL}{patch}\0{SHA256}{patch}"))
+            .into_iter()
+            .map(|(hash, _)| hash)
+            .collect::<Vec<_>>(),
+        [LOCAL.to_owned(), SHA256.to_owned()]
+    );
+    assert!(patches_in(&format!("\0{LOCAL}{patch}+a\0  y\n")).is_empty());
+    assert!(patches_in(&format!("\0{LOCAL}{patch}+a\0y")).is_empty());
+    assert!(
+        patches_in(&format!(
+            "\0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA{patch}"
+        ))
+        .is_empty()
+    );
+    assert!(
+        patches_in(&format!("{LOCAL}{patch}")).is_empty(),
+        "no NUL before the first"
+    );
 }
 
 #[test]

@@ -1875,10 +1875,9 @@ fn cherry_marked_in(output: &str) -> Vec<String> {
 }
 
 /// Each commit in [`Git::patches_already_on`]'s `git log -p` output, with its
-/// patch in the form two copies share.
+/// patch in the form two copies share, or none when the output cannot be read.
 ///
-/// Each commit is a NUL, its hash on the rest of that line, then its patch, for
-/// [`merges_without_a_diff_in`]'s reason. Two things differ between copies
+/// Read as [`hashed_entries`] reads it. Two things differ between copies
 /// that hold the same change, and only those are dropped: the `index` line,
 /// which names blobs the rest of the tree decides, and the line numbers in each
 /// hunk header, which move with whatever is above the hunk. The header's
@@ -1890,13 +1889,12 @@ fn cherry_marked_in(output: &str) -> Vec<String> {
 /// else, so every other empty commit replays as it, and the message may be the
 /// one record of something.
 fn patches_in(output: &str) -> Vec<(String, String)> {
-    output
-        .split('\0')
-        .filter_map(|entry| {
-            let (hash, patch) = entry.split_once('\n').unwrap_or((entry, ""));
-            let hash = hash.trim();
+    hashed_entries(output)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(hash, patch)| {
             let patch = normalized(patch);
-            (!hash.is_empty() && !patch.is_empty()).then(|| (hash.to_owned(), patch))
+            (!patch.is_empty()).then(|| (hash.to_owned(), patch))
         })
         .collect()
 }
@@ -1917,20 +1915,47 @@ fn normalized(patch: &str) -> String {
 }
 
 /// The merges in [`Git::merges_with_nothing_of_their_own`] output that git
-/// printed no diff for.
+/// printed no diff for, or none when the output cannot be read.
 ///
-/// Each merge is a NUL, its hash on the rest of that line, then its remerge diff,
-/// if it has one. A NUL cannot appear in a diff git prints as text, so it is the
-/// one separator no diff content can forge.
+/// Read as [`hashed_entries`] reads it, each merge's text its remerge diff, if
+/// it has one.
 fn merges_without_a_diff_in(output: &str) -> Vec<String> {
-    output
-        .split('\0')
-        .filter_map(|entry| {
-            let (hash, diff) = entry.split_once('\n').unwrap_or((entry, ""));
-            let hash = hash.trim();
-            (!hash.is_empty() && diff.trim().is_empty()).then(|| hash.to_owned())
+    hashed_entries(output)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, diff)| diff.trim().is_empty())
+        .map(|(hash, _)| hash.to_owned())
+        .collect()
+}
+
+/// The entries in `--format=%x00%H` output: a NUL, a full hash on the rest of
+/// that line, then the text git printed for that commit.
+///
+/// **A NUL can turn up inside the text too.** A `diff` gitattribute makes git
+/// print a file that holds one as text, so a split on NUL can cut one entry in
+/// two, and the piece after the cut starts with whatever the file held. So each
+/// entry has to start with a hash in full, SHA-1's 40 or SHA-256's 64 lowercase
+/// hex digits, and one entry in any other shape leaves the whole output unread:
+/// the entry before the cut lost the rest of its text, and nothing says which
+/// one that was.
+fn hashed_entries(output: &str) -> Option<Vec<(&str, &str)>> {
+    let mut entries = output.split('\0');
+    if !entries.next().is_some_and(str::is_empty) {
+        return None;
+    }
+    entries
+        .map(|entry| {
+            let (hash, text) = entry.split_once('\n').unwrap_or((entry, ""));
+            is_a_full_hash(hash).then_some((hash, text))
         })
         .collect()
+}
+
+fn is_a_full_hash(text: &str) -> bool {
+    matches!(text.len(), 40 | 64)
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// The tags in [`TAG_REFS_QUERY`] output, one per `<object> <refname>` line.
