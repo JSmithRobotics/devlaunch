@@ -391,6 +391,20 @@ fn a_branch_the_remote_rebased_holds_nothing_unsaved() {
 }
 
 #[test]
+fn a_branch_the_remote_rebased_holds_nothing_unsaved_in_colour_too() {
+    // `color.ui=always` puts an escape code before every hash `log --oneline`
+    // prints, and a line that starts with one names no commit.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["config", "color.ui", "always"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
 fn a_backup_made_before_the_remote_rebase_holds_nothing_unsaved() {
     // The shape that kept most of the old commits on a real host: a backup branch
     // with no upstream, whose copies are on *another* local branch's upstream.

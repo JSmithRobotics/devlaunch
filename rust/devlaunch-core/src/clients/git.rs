@@ -659,12 +659,15 @@ impl<'r> Git<'r> {
     /// Answers on a clone with no refs at all, where there is nothing to be
     /// unpushed: git exits 0 with no output rather than refusing, so a clone of an
     /// empty repository needs no gate here and does not get one.
+    ///
+    /// `--no-color` because each line has to start with its hash: the copy rule
+    /// reads the hash back, and `color.ui=always` puts an escape code before it.
     pub(crate) fn unpushed_commits(
         &self,
         clone: &Path,
         local_tags: &[String],
     ) -> GitAnswer<String> {
-        let mut args: Vec<&str> = vec!["log", "--oneline"];
+        let mut args: Vec<&str> = vec!["log", "--oneline", "--no-color"];
         args.extend(NOT_WORK);
         args.push("--all");
         args.extend(local_tags.iter().map(String::as_str));
@@ -716,7 +719,7 @@ impl<'r> Git<'r> {
         clone: &Path,
         local_tags: &[String],
     ) -> GitAnswer<String> {
-        let mut args: Vec<&str> = vec!["log", "--oneline"];
+        let mut args: Vec<&str> = vec!["log", "--oneline", "--no-color"];
         args.extend(local_tags.iter().map(String::as_str));
         args.extend(["--not", "--remotes"]);
         args.extend(NOT_WORK);
@@ -1041,7 +1044,10 @@ impl<'r> Git<'r> {
     /// question that has to attribute its answer to one worktree's checkout
     /// rather than to the clone as a whole.
     pub(crate) fn unpushed_commits_from(&self, clone: &Path, rev: &str) -> GitAnswer<String> {
-        self.about(clone, &["log", "--oneline", rev, "--not", "--remotes"])
+        self.about(
+            clone,
+            &["log", "--oneline", "--no-color", rev, "--not", "--remotes"],
+        )
     }
 
     /// How many commits are reachable from *rev* and from no ref in *repo*.

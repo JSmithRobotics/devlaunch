@@ -145,6 +145,7 @@ fn the_pinned_verbs_ask_exactly_what_python_asked() {
         [
             "log",
             "--oneline",
+            "--no-color",
             "--exclude=refs/tags/*",
             "--exclude=refs/original/*",
             "--all",
@@ -163,10 +164,31 @@ fn the_pinned_verbs_ask_exactly_what_python_asked() {
         [
             "log",
             "--oneline",
+            "--no-color",
             "--exclude=refs/tags/*",
             "--exclude=refs/original/*",
             "--all",
             "refs/tags/backup",
+            "--not",
+            "--remotes"
+        ]
+    );
+}
+
+#[test]
+fn the_per_branch_unpushed_query_asks_for_its_hashes_without_colour() {
+    let (dir, _root) = a_clone();
+    let fake = ScriptedRunner::new();
+
+    Git::new(&fake).unpushed_commits_from(dir.path(), "refs/heads/feature");
+
+    assert_eq!(
+        strs(&argv(&fake))[3..],
+        [
+            "log",
+            "--oneline",
+            "--no-color",
+            "refs/heads/feature",
             "--not",
             "--remotes"
         ]
@@ -190,6 +212,7 @@ fn the_attribution_query_is_the_unpushed_one_with_the_sides_swapped() {
         [
             "log",
             "--oneline",
+            "--no-color",
             "refs/tags/backup",
             "--not",
             "--remotes",
