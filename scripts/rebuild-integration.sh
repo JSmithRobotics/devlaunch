@@ -38,6 +38,7 @@ TOPICS=(
     fix/agent-socket-private-directory  # PR #648
     fix/agent-socket-own-directory      # held, pending a repro on upstream main
     feat/claude-profile-mount           # PR #652
+    feat/lxcfs-proc-view                # to propose upstream
     fork/public-api-toolchain           # not upstreamable: upstream pins a nightly instead
 )
 
