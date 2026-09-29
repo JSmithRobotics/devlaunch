@@ -499,6 +499,9 @@ pub(crate) enum ResumeReported {
     Dropped,
     /// The session ended first.
     Stopped,
+    /// herdr's saved session holds another argv: a later report, which this one
+    /// must not replace.
+    Superseded,
 }
 
 /// Tell herdr how to start this pane's agent again, and check that it kept it.
@@ -539,7 +542,8 @@ pub(crate) fn report_resume(
         match read(report.session_file()).map(|json| report.saved_in(&json)) {
             Some(herdr::Saved::Holds) => return ResumeReported::Saved,
             None | Some(herdr::Saved::Unreadable) => return ResumeReported::Taken,
-            Some(herdr::Saved::Lacks) => {
+            Some(herdr::Saved::Other) => return ResumeReported::Superseded,
+            Some(herdr::Saved::Empty) => {
                 unsaved += 1;
                 if unsaved >= RESUME_UNSAVED_TICKS {
                     taken = false;
@@ -1421,6 +1425,26 @@ mod tests {
             2,
             "sent, unsaved three times, sent again"
         );
+    }
+
+    /// The hook reports the session claude really opened, after the host's
+    /// guess: sending the guess again would restore the wrong session.
+    #[test]
+    fn a_newer_argv_in_the_file_is_never_replaced() {
+        let runner = ScriptedRunner::new().with_script(["herdr"], Response::ok());
+        let ended = report_resume(
+            &runner,
+            &resume_report(),
+            &|| 1,
+            &|_| {
+                Some(saved(Some(
+                    r#"["dl","ws","--","claude","--resume","picked"]"#,
+                )))
+            },
+            &|_| true,
+        );
+        assert_eq!(ended, ResumeReported::Superseded);
+        assert_eq!(reports(&runner).len(), 1);
     }
 
     #[test]

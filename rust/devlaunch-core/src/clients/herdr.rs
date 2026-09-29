@@ -1875,7 +1875,8 @@ impl ResumeReport {
         match saved_argv(session_json, &self.pane_id) {
             None => Saved::Unreadable,
             Some(Some(argv)) if argv == self.argv => Saved::Holds,
-            Some(_) => Saved::Lacks,
+            Some(Some(_)) => Saved::Other,
+            Some(None) => Saved::Empty,
         }
     }
 }
@@ -1890,8 +1891,10 @@ fn report_source(agent: &str) -> String {
 pub(crate) enum Saved {
     /// It holds exactly the argv reported.
     Holds,
-    /// It holds another argv, or none.
-    Lacks,
+    /// It holds another argv.
+    Other,
+    /// It holds none.
+    Empty,
     /// The file could not be read as herdr's session, so it cannot say.
     Unreadable,
 }
@@ -2161,13 +2164,13 @@ mod resume_tests {
     fn the_saved_session_is_read_by_the_panes_public_number() {
         let report = report();
         assert_eq!(report.saved_in(&session(r#"["dl","ws"]"#)), Saved::Holds);
-        assert_eq!(report.saved_in(&session(r#"["dl","other"]"#)), Saved::Lacks);
+        assert_eq!(report.saved_in(&session(r#"["dl","other"]"#)), Saved::Other);
     }
 
     #[test]
     fn a_pane_with_no_argv_lacks_one() {
         let json = session(r#"["dl","ws"]"#).replace("\"agent_resume\"", "\"other\"");
-        assert_eq!(report().saved_in(&json), Saved::Lacks);
+        assert_eq!(report().saved_in(&json), Saved::Empty);
     }
 
     #[test]
