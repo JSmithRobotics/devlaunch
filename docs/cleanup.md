@@ -979,6 +979,33 @@ the answer covers every local branch, every worktree's HEAD including detached
 ones, and the stash, which is one ref per clone and holds work that exists nowhere
 else either.
 
+**A commit the remote holds as a new commit is not counted.** A rebase, a
+cherry-pick and a squash merge all put the same change on the remote under a new
+hash, so by hash the old commit is on no remote ref. A kinisi_ros workspace refused
+`rm` over 23 commits that way, and none of them was lost: its remote branch had
+been rebased, a merged PR had been squashed into `main`, and five of the commits
+were merges of `origin/main`. Two more rules now run after the count:
+
+- A commit drops out when a remote ref holds a copy with the same patch id, which
+  is the test `git cherry` and `git rebase` use to skip a commit already upstream.
+  Each local branch that holds unpushed commits is compared with a few remote
+  refs: the upstream of every local branch, the remote branch of the same name,
+  and `origin/HEAD`, which is where a squashed one-commit PR lands. Every
+  upstream, not only the branch's own, because the branch holding the old commits
+  is often a backup made before the rebase, with no upstream at all. A copy on a
+  remote branch that no local branch tracks is not looked for, because a clone
+  can hold thousands of them.
+- A two-parent merge drops out when `git log --remerge-diff` prints nothing for
+  it: git would make the same merge from its parents by itself. A conflict
+  resolved by hand is work of the merge's own, and it stays counted. So does the
+  stash, which git writes as a merge, and so does each merge's parent that has no
+  copy.
+
+Both rules can only take commits out of the count, and only when git answers. A
+question git refuses clears nothing. A squash of several commits has no patch
+that matches any one of them, so those commits still count, and the refusal is
+yours to judge.
+
 Tags are the one ref kind the answer has to think about, and both directions of
 getting it wrong have a ticket. A tag your remote carries, but which no remote
 *branch* reaches any more, must not read as unpushed: a repository that tags

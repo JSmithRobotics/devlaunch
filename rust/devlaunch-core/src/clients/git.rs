@@ -508,8 +508,11 @@ impl<'r> Git<'r> {
     ///   it off.
     ///
     /// The refspec forces. So a branch the remote rewrote does move its tracking
-    /// ref off the old commits, and those commits then count. That is the truth
-    /// about the remote, not a regression: the old commits are no longer on it.
+    /// ref off the old commits, and by hash those commits then count. That is the
+    /// truth about the remote, not a regression: the old commits are no longer on
+    /// it. What clears them is the copy rule the guard applies after the count, a
+    /// patch-id match against the rewritten branch (see
+    /// [`Git::patches_already_on`]).
     ///
     /// `GIT_TERMINAL_PROMPT=0` because this runs under *limit*: a credential
     /// prompt would eat the deadline and then be killed. A remote that asks for
@@ -715,6 +718,113 @@ impl<'r> Git<'r> {
         args.extend(NOT_WORK);
         args.push("--all");
         self.about(clone, &args)
+    }
+
+    /// Every local branch in *clone*, with the upstream each one tracks.
+    ///
+    /// Full refnames on both sides, `refs/heads/feature` and
+    /// `refs/remotes/origin/feature`, so neither can be read as an option or be
+    /// ambiguous against a tag. A branch with no upstream carries `None`.
+    ///
+    /// Asked only to choose which remote refs to compare an unpushed branch
+    /// against (see [`Git::patches_already_on`]), never to decide what is
+    /// unpushed: that stays [`Git::unpushed_commits`]'s question.
+    pub(crate) fn branches_with_upstreams(&self, clone: &Path) -> GitAnswer<Vec<LocalBranch>> {
+        self.about(
+            clone,
+            &[
+                "for-each-ref",
+                "--format=%(refname)%00%(upstream)",
+                REFS_HEADS,
+            ],
+        )
+        .map(|stdout| local_branches_in(&stdout))
+    }
+
+    /// The commits on *tip* that *other* does not contain but holds a copy of,
+    /// as full hashes.
+    ///
+    /// A copy is a commit with the same patch id: the same diff, give or take
+    /// line numbers and whitespace, which is what `git cherry` and
+    /// `git rebase` use to skip a commit already upstream. A rebase, a
+    /// cherry-pick and the squash of a one-commit branch all leave one.
+    ///
+    /// This is the question the SHA count cannot ask. A branch the remote
+    /// rebased has its old commits on no remote-tracking ref, so they count as
+    /// unpushed, although every one of them is on the remote in its new form.
+    ///
+    /// `--no-merges` because a merge's patch id is not defined. Merges are
+    /// [`Git::merges_with_nothing_of_their_own`]'s question.
+    pub(crate) fn patches_already_on(
+        &self,
+        clone: &Path,
+        tip: &str,
+        other: &str,
+    ) -> GitAnswer<Vec<String>> {
+        let range = format!("{tip}...{other}");
+        self.about(
+            clone,
+            &[
+                "rev-list",
+                "--cherry-mark",
+                "--left-only",
+                "--no-merges",
+                &range,
+            ],
+        )
+        .map(|stdout| {
+            stdout
+                .lines()
+                .filter_map(|line| line.strip_prefix('='))
+                .map(str::to_owned)
+                .collect()
+        })
+    }
+
+    /// The unpushed two-parent merges in *clone* that add nothing of their own,
+    /// as full hashes.
+    ///
+    /// A merge adds something of its own only where it differs from what git
+    /// would have merged by itself: a conflict resolved by hand, or an edit made
+    /// in the merge. `--remerge-diff` prints exactly that difference, so a merge
+    /// it prints nothing for is one git can make again from its parents. Those
+    /// parents are still asked about, one by one, so a parent that exists
+    /// nowhere else keeps the clone.
+    ///
+    /// The refs asked about are [`Git::unpushed_commits`]' own, in the same
+    /// order, so this answers about a subset of what that query counted.
+    /// `--max-parents=2` because an octopus merge has no remerge diff, and one
+    /// is kept rather than guessed at.
+    ///
+    /// **`refs/stash` is left out.** git writes a stash as a merge of `HEAD` and
+    /// the index, and a stash of staged work has no remerge diff, so the rule
+    /// would clear the stash commit itself. A stash is work nobody merged, and
+    /// it stays counted whole.
+    ///
+    /// `--no-ext-diff` and `--no-textconv` because the question is about bytes,
+    /// and an external diff driver can print nothing for a change.
+    pub(crate) fn merges_with_nothing_of_their_own(
+        &self,
+        clone: &Path,
+        local_tags: &[String],
+    ) -> GitAnswer<Vec<String>> {
+        let mut args: Vec<&str> = vec![
+            "log",
+            "--remerge-diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--merges",
+            "--max-parents=2",
+            "--format=%x00%H",
+        ];
+        args.extend(NOT_WORK);
+        args.push("--exclude=refs/stash");
+        args.push("--all");
+        args.extend(local_tags.iter().map(String::as_str));
+        args.extend(["--not", "--remotes"]);
+        self.about(clone, &args)
+            .map(|stdout| merges_without_a_diff_in(&stdout))
     }
 
     /// Every tag in the bare cache at *bare*, with the object each one names.
@@ -1642,6 +1752,46 @@ pub(crate) struct TagRef {
     /// unambiguous as a revision argument and can never read as an option.
     pub(crate) name: String,
     pub(crate) object: String,
+}
+
+/// One local branch, and the upstream it tracks when it tracks one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalBranch {
+    /// The full refname, `refs/heads/feature`, for [`TagRef::name`]'s reason.
+    pub(crate) name: String,
+    /// The full refname of the upstream, `refs/remotes/origin/feature`.
+    pub(crate) upstream: Option<String>,
+}
+
+/// The branches in [`Git::branches_with_upstreams`] output, one per
+/// `<refname>NUL<upstream>` line, the upstream empty where there is none.
+fn local_branches_in(output: &str) -> Vec<LocalBranch> {
+    output
+        .lines()
+        .filter_map(|line| line.split_once('\0'))
+        .filter(|(name, _)| name.starts_with(REFS_HEADS))
+        .map(|(name, upstream)| LocalBranch {
+            name: name.to_owned(),
+            upstream: (!upstream.is_empty()).then(|| upstream.to_owned()),
+        })
+        .collect()
+}
+
+/// The merges in [`Git::merges_with_nothing_of_their_own`] output that git
+/// printed no diff for.
+///
+/// Each merge is a NUL, its hash on the rest of that line, then its remerge diff,
+/// if it has one. A NUL cannot appear in a diff git prints as text, so it is the
+/// one separator no diff content can forge.
+fn merges_without_a_diff_in(output: &str) -> Vec<String> {
+    output
+        .split('\0')
+        .filter_map(|entry| {
+            let (hash, diff) = entry.split_once('\n').unwrap_or((entry, ""));
+            let hash = hash.trim();
+            (!hash.is_empty() && diff.trim().is_empty()).then(|| hash.to_owned())
+        })
+        .collect()
 }
 
 /// The tags in [`TAG_REFS_QUERY`] output, one per `<object> <refname>` line.

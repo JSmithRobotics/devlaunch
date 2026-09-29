@@ -320,6 +320,189 @@ fn a_branch_whose_commits_are_on_the_remote_under_another_name_is_saved() {
     assert_eq!(held(&clone), Unsaved::NothingToLose);
 }
 
+// ------------------------------------ work on the remote as new commits
+
+/// Run a git command that writes a commit, with an identity this test owns.
+fn git_as_author(cwd: &Path, args: &[&str]) -> String {
+    let mut argv = vec!["-c", "user.email=t@t", "-c", "user.name=t"];
+    argv.extend(args);
+    git(cwd, &argv)
+}
+
+/// A second clone of *remote*, for the teammate who rewrites it.
+fn teammate(fixture: &Fixture) -> PathBuf {
+    let mate = fixture.path("mate");
+    git(
+        fixture.root.path(),
+        &[
+            "clone",
+            "-q",
+            fixture.remote.to_str().expect("utf-8"),
+            mate.to_str().expect("utf-8"),
+        ],
+    );
+    mate
+}
+
+/// Move `main` on the remote by one commit that touches nothing *clone* has.
+fn move_main(mate: &Path) {
+    git(mate, &["checkout", "-q", "main"]);
+    write(&mate.join("main.txt"), "main moved\n");
+    commit(mate, "main moved");
+    git(mate, &["push", "-q", "origin", "main"]);
+}
+
+/// Rebase the remote's `feature` onto its moved `main` and force-push it, so
+/// every commit on it gets a new hash.
+fn rebase_feature_on_the_remote(mate: &Path) {
+    move_main(mate);
+    git(mate, &["checkout", "-q", "feature"]);
+    git_as_author(mate, &["rebase", "-q", "main"]);
+    git(mate, &["push", "-q", "--force", "origin", "feature"]);
+}
+
+/// The commits on *branch* that no remote-tracking ref has, by hash.
+fn by_sha(clone: &Path, branch: &str) -> usize {
+    git(clone, &["log", "--oneline", branch, "--not", "--remotes"])
+        .lines()
+        .count()
+}
+
+#[test]
+fn a_branch_the_remote_rebased_holds_nothing_unsaved() {
+    // The kinisi_ros case that refused `rm` over 23 commits: the remote branch was
+    // rebased, so the clone's old commits are on no remote-tracking ref, and every
+    // one of them is on the remote in its new form.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    for name in ["a", "b"] {
+        write(&clone.join(format!("{name}.txt")), "work\n");
+        commit(&clone, name);
+    }
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    // The premise, asserted rather than assumed: by hash, all three commits are
+    // unpushed now.
+    assert_eq!(by_sha(&clone, "feature"), 3);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_backup_made_before_the_remote_rebase_holds_nothing_unsaved() {
+    // The shape that kept most of the old commits on a real host: a backup branch
+    // with no upstream, whose copies are on *another* local branch's upstream.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["branch", "backup/before-rebase"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    git_as_author(&clone, &["reset", "-q", "--hard", "origin/feature"]);
+    assert_eq!(by_sha(&clone, "backup/before-rebase"), 1);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn only_the_commits_the_rebased_remote_has_a_copy_of_drop_out() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    write(&clone.join("unpushed.txt"), "an hour of work\n");
+    commit(&clone, "unpushed");
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 2);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_commit_squash_merged_into_the_default_branch_is_saved() {
+    // A one-commit PR squashed into `main` lands as a new commit with the same
+    // patch. The branch's own remote ref never got the commit, so only
+    // `origin/HEAD` can say the remote has it.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("fix.txt"), "the fix\n");
+    commit(&clone, "fix");
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "main"]);
+    write(&mate.join("fix.txt"), "the fix\n");
+    commit(&mate, "fix (#1)");
+    git(&mate, &["push", "-q", "origin", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_merge_of_the_default_branch_adds_nothing_of_its_own() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    move_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    git_as_author(&clone, &["merge", "-q", "--no-edit", "origin/main"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_merge_with_a_conflict_resolved_by_hand_is_still_unsaved() {
+    // The resolution is work of the merge's own, and it may exist nowhere else.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("README.md"), "ours\n");
+    commit(&clone, "ours");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "main"]);
+    write(&mate.join("README.md"), "theirs\n");
+    commit(&mate, "theirs");
+    git(&mate, &["push", "-q", "origin", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    let conflicted = Command::new("git")
+        .args(["merge", "-q", "origin/main"])
+        .current_dir(&clone)
+        .output()
+        .expect("git is installed");
+    assert!(!conflicted.status.success(), "the premise: a conflict");
+    write(&clone.join("README.md"), "resolved by hand\n");
+    git(&clone, &["add", "README.md"]);
+    git_as_author(&clone, &["commit", "-q", "--no-edit"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_copy_on_another_local_branch_is_not_a_copy_on_a_remote() {
+    // Two local copies of one change are still the only two copies.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("fix.txt"), "the fix\n");
+    commit(&clone, "fix");
+    git(&clone, &["checkout", "-q", "-b", "other", "origin/main"]);
+    git_as_author(&clone, &["cherry-pick", "feature"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_copy_that_git_will_not_look_for_leaves_every_commit_counted() {
+    // Every question the copy rule asks can fail, and a failure must never clear
+    // a commit: here git refuses them all, and nothing is found to be copied.
+    let refused = ScriptedRunner::new().with_script(["git"], Response::failed(128, "fatal: nope"));
+
+    assert_eq!(
+        already_on_a_remote(&Git::new(&refused), Path::new("/ws"), &[]),
+        Vec::<String>::new()
+    );
+}
+
 #[test]
 fn a_commit_on_a_branch_that_is_not_checked_out_is_unsaved() {
     // The whole of #471, and it is a live data-loss path in shipped code: commit
