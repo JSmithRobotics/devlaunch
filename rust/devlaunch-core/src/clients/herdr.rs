@@ -862,6 +862,41 @@ mod tests {
         );
     }
 
+    /// Nor may it report a state. Its SessionEnd releases the pane from this
+    /// source, which clears the pane's agent and the argv herdr saved with it.
+    #[test]
+    fn a_claude_started_by_the_panes_claude_reports_nothing() {
+        let top = StandIn::claude(None);
+        let nested = StandIn::claude(Some(&top));
+        for state in ["start", "working", "blocked", "idle", "release"] {
+            let calls = run_hook(
+                state,
+                SESSION_START,
+                &[
+                    (RESUME_PREFIX_VAR, "dl ws -- claude --resume"),
+                    ("CLAUDE_PID", &nested.pid()),
+                ],
+            );
+            assert!(calls.is_empty(), "{state}: {calls:?}");
+        }
+    }
+
+    /// A claude whose start cannot be read is taken for the pane's own, as every
+    /// claude was before, so a `/proc` the hook cannot see costs the lifecycle
+    /// nothing. Only the argv, which a nested claude can break, waits for proof.
+    #[test]
+    fn a_claude_that_cannot_be_read_still_reports_its_state() {
+        let prefix = (RESUME_PREFIX_VAR, "dl ws -- claude --resume");
+        for pid in ["", "999999999"] {
+            let calls = run_hook("start", SESSION_START, &[prefix, ("CLAUDE_PID", pid)]);
+            assert_eq!(calls.len(), 1, "{pid:?}: {calls:?}");
+            assert_eq!(calls[0][..2], ["pane", "report-agent"]);
+            let calls = run_hook("release", SESSION_START, &[prefix, ("CLAUDE_PID", pid)]);
+            assert_eq!(calls.len(), 1, "{pid:?}: {calls:?}");
+            assert_eq!(calls[0][..2], ["pane", "release-agent"]);
+        }
+    }
+
     /// Every other event is exactly what it was: no argv, so herdr keeps the one
     /// it has.
     #[test]
@@ -1524,6 +1559,18 @@ BIN="${HERDR_BIN_PATH:-/usr/local/bin/herdr}"
 [ -x "$BIN" ] || exit 0
 state="${1:-}"
 
+# Only the pane's own claude reports. One the agent starts through its Bash tool
+# inherits all of the above, and its SessionEnd would release the pane's agent --
+# and the resume argv herdr keeps with it. Claude Code hands a hook CLAUDE_PID,
+# the claude that fired it, and exports CLAUDECODE=1 to what that claude runs; so
+# a claude *started* with CLAUDECODE=1 -- /proc's environ is the one it was
+# exec'd with -- was started by another. A claude that cannot be read reports, as
+# every claude did before, so an unreadable /proc costs the pane nothing.
+if [ -r "/proc/${CLAUDE_PID:-}/environ" ] \
+  && tr '\0' '\n' <"/proc/$CLAUDE_PID/environ" | grep -qx 'CLAUDECODE=1'; then
+  exit 0
+fi
+
 # Claude Code hands a hook its JSON on stdin, and it is always drained so the
 # writer never blocks. The one field read is the session id, by sed, because
 # there is no python3 or jq to read it with -- and only where it is used.
@@ -1558,15 +1605,12 @@ esac
 # the id left off, words split on spaces (dl sends none holding one); the id is
 # taken only if it is nothing but letters, digits and dashes.
 #
-# Only the pane's own claude may: one the agent starts through its Bash tool
-# inherits all of this, and its one-shot session would replace the pane's. Claude
-# Code hands a hook CLAUDE_PID, the claude that fired it, and exports CLAUDECODE=1
-# to what that claude runs; so a claude that was *started* with CLAUDECODE=1 --
-# /proc's environ is the one it was exec'd with -- was started by another.
+# That needs proof the claude is the pane's own, which the check above could not
+# give when /proc was unreadable: a nested session's id here is a restore that
+# opens the wrong conversation.
 [ "$state" = start ] || exit 0
 [ -n "${DEVLAUNCH_HERDR_RESUME:-}" ] || exit 0
 [ -r "/proc/${CLAUDE_PID:-}/environ" ] || exit 0
-tr '\0' '\n' <"/proc/$CLAUDE_PID/environ" | grep -qx 'CLAUDECODE=1' && exit 0
 sid=$(printf '%s' "$input" | tr -d '\n' \
   | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 case "$sid" in ''|*[!0-9A-Za-z-]*) exit 0 ;; esac
