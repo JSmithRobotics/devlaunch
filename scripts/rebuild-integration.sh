@@ -37,6 +37,8 @@ TOPICS=(
     feat/claude-profiles-json           # PR #650
     fix/agent-socket-private-directory  # PR #648
     fix/agent-socket-own-directory      # held, pending a repro on upstream main
+    feat/claude-profile-mount           # PR #652
+    fork/public-api-toolchain           # not upstreamable: upstream pins a nightly instead
 )
 
 say() { printf '\n=== %s\n' "$*"; }
@@ -54,11 +56,20 @@ done
 
 say "rebuilding $INTEGRATION from $UPSTREAM ($(git rev-parse --short "$UPSTREAM"))"
 
-# -B moves the branch even if it exists. Refuse while it is checked out here,
-# which would silently reset the working tree instead.
-current="$(git symbolic-ref --quiet --short HEAD || true)"
-if [ "$current" = "$INTEGRATION" ]; then
-    echo "$INTEGRATION is checked out in this worktree; run from another one" >&2
+# Refuse while the branch is checked out ANYWHERE, not merely here: git itself
+# rejects a force-update of a branch held by any worktree, and the first version
+# of this check only looked at the current one, so the script got as far as
+# printing "rebuilding" before git refused underneath it. Ask git for the whole
+# list instead of guessing.
+held_by="$(git worktree list --porcelain \
+    | awk -v want="refs/heads/$INTEGRATION" '
+        /^worktree /  { wt = substr($0, 10) }
+        /^branch /    { if (substr($0, 8) == want) print wt }
+    ')"
+if [ -n "$held_by" ]; then
+    echo "$INTEGRATION is checked out at:" >&2
+    echo "$held_by" | sed 's/^/    /' >&2
+    echo "Remove that worktree, or check out something else there, and re-run." >&2
     exit 1
 fi
 git branch -f "$INTEGRATION" "$UPSTREAM"
@@ -70,10 +81,17 @@ git worktree add --quiet "$work" "$INTEGRATION"
 for topic in "${TOPICS[@]}"; do
     say "merging $topic"
     if ! git -C "$work" merge --no-edit --no-ff "$topic"; then
-        # rerere may have staged a resolution already; a clean index means it did.
-        if git -C "$work" diff --check --quiet && \
-           ! git -C "$work" ls-files --unmerged | grep -q .; then
-            echo "rerere resolved it; committing"
+        # Ask rerere what is STILL unresolved, rather than reading the index.
+        # rerere rewrites the working tree but leaves the path unmerged until it
+        # is added, so `ls-files --unmerged` reports a file rerere has already
+        # fixed and this script used to bail on a conflict it had just replayed.
+        # `rerere remaining` is the question actually being asked.
+        remaining="$(git -C "$work" rerere remaining 2>/dev/null || true)"
+        if [ -z "$remaining" ] && [ -n "$(git -C "$work" ls-files --unmerged)" ]; then
+            echo "rerere replayed every conflict; staging and committing"
+            git -C "$work" ls-files --unmerged --format='%(path)' \
+                | sort -u \
+                | while IFS= read -r path; do git -C "$work" add -- "$path"; done
             git -C "$work" commit --no-edit
         else
             echo >&2
