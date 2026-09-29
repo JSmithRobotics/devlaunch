@@ -532,6 +532,58 @@ fn a_change_of_indentation_alone_is_not_a_copy() {
     assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
 }
 
+/// The commits on the left of *range* that `rev-list --cherry-mark` marks `=`,
+/// the patch-id match the copy rule starts from.
+fn cherry_marked(clone: &Path, range: &str) -> Vec<String> {
+    git(
+        clone,
+        &[
+            "rev-list",
+            "--cherry-mark",
+            "--left-only",
+            "--no-merges",
+            range,
+        ],
+    )
+    .lines()
+    .filter_map(|line| line.strip_prefix('='))
+    .map(str::to_owned)
+    .collect()
+}
+
+#[test]
+fn the_same_edit_in_another_place_is_not_a_copy() {
+    // Two blocks with the same context make the same hunk, line numbers aside,
+    // and the local edit to the first block is on no remote.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    let block = |x: &str| format!("p\nq\nr\nx = {x}\ns\nt\nu\n");
+    write(
+        &clone.join("f.py"),
+        &format!("{}\n\n\n\n{}", block("1"), block("1")),
+    );
+    commit(&clone, "two blocks");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(
+        &mate.join("f.py"),
+        &format!("{}\n\n\n\n{}", block("1"), block("2")),
+    );
+    commit(&mate, "the second block");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    write(
+        &clone.join("f.py"),
+        &format!("{}\n\n\n\n{}", block("2"), block("1")),
+    );
+    commit(&clone, "the first block");
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+    assert_eq!(cherry_marked(&clone, "feature...origin/feature").len(), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
 #[test]
 fn a_merged_parent_with_no_copy_is_still_unsaved() {
     // The merge adds nothing of its own, so it drops out, but the commit it

@@ -12,10 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`rm` no longer refuses over commits the remote holds as new commits.** After a
   rebase, a cherry-pick or a squash merge, the old commits are on no remote ref, so
   `rm` and `dl --ls --json` counted them as unpushed although nothing in them was
-  lost. A commit whose patch a local branch's upstream, the same-named remote branch
-  or `origin/HEAD` already holds is no longer counted, and nor is a merge that adds
-  nothing to its parents. A merge with a conflict resolved by hand, the stash, and
-  every commit with no copy still count.
+  lost. A commit whose exact change a local branch's upstream, the same-named remote
+  branch or `origin/HEAD` already holds as a commit of its own is no longer counted:
+  git replays the commit on that copy's parent and must get the copy's tree. Nor is
+  a merge that adds nothing to its parents. A merge with a conflict resolved by hand,
+  the stash, and every commit with no copy still count.
 
 - **The picker no longer panics when `TERM` names no usable terminal.** With `TERM` unset,
   or naming a terminfo entry the machine does not have, `dl`'s workspace picker (and

@@ -46,6 +46,7 @@
 //! module, so the spans are wired in M4b/M5 against the real registry rather than
 //! guessed at here. The names above are the list to wire.
 
+use std::collections::HashMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -747,9 +748,9 @@ impl<'r> Git<'r> {
     /// The commits on *tip* that *other* does not contain but holds a copy of,
     /// as full hashes.
     ///
-    /// A copy is a commit with the same patch, byte for byte but for line
-    /// numbers and the `index` line. A rebase, a cherry-pick and the squash of a
-    /// one-commit branch all leave one.
+    /// A copy is a commit that makes the same change in the same place: put the
+    /// local commit on the copy's parent and git gets the copy's tree. A rebase,
+    /// a cherry-pick and the squash of a one-commit branch all leave one.
     ///
     /// This is the question the SHA count cannot ask. A branch the remote
     /// rebased has its old commits on no remote-tracking ref, so they count as
@@ -759,9 +760,12 @@ impl<'r> Git<'r> {
     /// patch id, which is what `git cherry` and `git rebase` use, and a patch id
     /// strips all whitespace, with no option to keep it. In Python, a Makefile or
     /// YAML the indentation is the change, so a commit that only reindents would
-    /// match the commit it changed. Each candidate is therefore confirmed against
-    /// the patches themselves, and a left commit is a copy only when some right
-    /// commit's patch is the same. The two sides are asked for apart because
+    /// match the commit it changed. Each candidate is therefore paired with the
+    /// right commits whose patch is the same byte for byte, line numbers and the
+    /// `index` line aside, and each pair is confirmed by [`Git::replays_as`].
+    /// The patch text alone is not enough: without its line numbers, the same
+    /// edit to either of two blocks that look alike reads the same, and those
+    /// are two different changes. The two sides are asked for apart because
     /// `--left-right` marks a match `=` on either side, and a match between two
     /// left commits is two local copies, not one on the remote.
     ///
@@ -807,21 +811,54 @@ impl<'r> Git<'r> {
         ];
         args.extend(left.iter().chain(&right).map(String::as_str));
         self.about(clone, &args).map(|stdout| {
-            let patches = patches_in(&stdout);
-            let patch_of = |hash: &String| {
-                patches
-                    .iter()
-                    .find(|(commit, _)| commit == hash)
-                    .map(|(_, patch)| patch)
-            };
+            let patches: HashMap<String, String> = patches_in(&stdout).into_iter().collect();
+            let mut copies_by_patch: HashMap<&str, Vec<&str>> = HashMap::new();
+            for copy in &right {
+                if let Some(patch) = patches.get(copy) {
+                    copies_by_patch.entry(patch).or_default().push(copy);
+                }
+            }
             left.iter()
-                .filter(|hash| {
-                    patch_of(hash)
-                        .is_some_and(|patch| right.iter().any(|copy| patch_of(copy) == Some(patch)))
+                .filter(|commit| {
+                    patches
+                        .get(*commit)
+                        .and_then(|patch| copies_by_patch.get(patch.as_str()))
+                        .is_some_and(|copies| {
+                            copies.iter().any(|copy| {
+                                matches!(
+                                    self.replays_as(clone, commit, copy),
+                                    GitAnswer::Said(true)
+                                )
+                            })
+                        })
                 })
                 .cloned()
                 .collect()
         })
+    }
+
+    /// Whether *commit*, put on *copy*'s parent, gives exactly *copy*'s tree.
+    ///
+    /// The one test of a copy that line numbers cannot fool: git replays the
+    /// change where it was made, as a rebase would, and the result is compared
+    /// as a tree. `merge-tree --write-tree` with *commit*'s parent as the base
+    /// is that replay, done in the object store alone, so the work tree and the
+    /// index are never touched. It writes the trees it makes as objects, which
+    /// nothing refers to and `gc` removes.
+    ///
+    /// A conflict exits 1, which is a refusal, and a commit with no parent has
+    /// no `^` to name, which git refuses too: neither is a copy.
+    fn replays_as(&self, clone: &Path, commit: &str, copy: &str) -> GitAnswer<bool> {
+        let base = format!("--merge-base={commit}^");
+        let onto = format!("{copy}^");
+        let replayed =
+            match self.about(clone, &["merge-tree", "--write-tree", &base, &onto, commit]) {
+                GitAnswer::Said(replayed) => replayed,
+                GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
+            };
+        let tree = format!("{copy}^{{tree}}");
+        self.about(clone, &["rev-parse", "--verify", &tree])
+            .map(|copy_tree| !copy_tree.is_empty() && replayed == copy_tree)
     }
 
     /// The unpushed two-parent merges in *clone* that add nothing of their own,

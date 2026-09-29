@@ -1324,6 +1324,97 @@ fn an_empty_listing_parses_to_nothing_rather_than_to_one_empty_name() {
     assert!(nul_separated("\0").is_empty());
 }
 
+const LOCAL: &str = "1111111111111111111111111111111111111111";
+const COPY: &str = "2222222222222222222222222222222222222222";
+const TREE: &str = "3333333333333333333333333333333333333333";
+
+/// A clone where *LOCAL* and *COPY* have the same patch, and the replay of
+/// *LOCAL* on *COPY*'s parent answers *replayed*.
+fn a_patch_match(root: &Path, replayed: Response, copy_tree: Response) -> ScriptedRunner {
+    let pinned = |verb: &[&str]| {
+        let mut argv = vec![
+            "git".to_owned(),
+            format!("--git-dir={}", root.join(".git").display()),
+            format!("--work-tree={}", root.display()),
+        ];
+        argv.extend(verb.iter().map(|arg| (*arg).to_owned()));
+        argv
+    };
+    let patch = "\ndiff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n";
+    ScriptedRunner::new()
+        .with_script(
+            pinned(&["rev-list", "--cherry-mark", "--left-only"]),
+            Response::stdout(format!("={LOCAL}\n")),
+        )
+        .with_script(
+            pinned(&["rev-list", "--cherry-mark", "--right-only"]),
+            Response::stdout(format!("={COPY}\n")),
+        )
+        .with_script(
+            pinned(&["log"]),
+            Response::stdout(format!("\0{LOCAL}{patch}\0{COPY}{patch}")),
+        )
+        .with_script(pinned(&["merge-tree"]), replayed)
+        .with_script(pinned(&["rev-parse"]), copy_tree)
+}
+
+#[test]
+fn a_patch_match_is_a_copy_only_when_git_replays_it_as_the_copy() {
+    let (dir, root) = a_clone();
+    let tree = || Response::stdout(format!("{TREE}\n"));
+
+    let fake = a_patch_match(&root, tree(), tree());
+    assert_eq!(
+        Git::new(&fake)
+            .patches_already_on(
+                dir.path(),
+                "refs/heads/feature",
+                "refs/remotes/origin/feature"
+            )
+            .said(),
+        Some(vec![LOCAL.to_owned()])
+    );
+    let replay = fake
+        .calls()
+        .iter()
+        .map(Call::argv)
+        .find(|argv| argv.get(3).map(String::as_str) == Some("merge-tree"))
+        .expect("the pair is replayed");
+    assert_eq!(
+        strs(&replay)[3..],
+        [
+            "merge-tree",
+            "--write-tree",
+            &format!("--merge-base={LOCAL}^"),
+            &format!("{COPY}^"),
+            LOCAL,
+        ]
+    );
+
+    for (replayed, copy_tree, why) in [
+        (Response::exited(1), tree(), "a conflict"),
+        (tree(), Response::exited(128), "no tree for the copy"),
+        (
+            Response::stdout("4444444444444444444444444444444444444444\n"),
+            tree(),
+            "another tree",
+        ),
+    ] {
+        let fake = a_patch_match(&root, replayed, copy_tree);
+        assert_eq!(
+            Git::new(&fake)
+                .patches_already_on(
+                    dir.path(),
+                    "refs/heads/feature",
+                    "refs/remotes/origin/feature"
+                )
+                .said(),
+            Some(vec![]),
+            "{why} clears nothing"
+        );
+    }
+}
+
 #[test]
 fn a_merge_with_a_remerge_diff_is_not_one_that_adds_nothing() {
     assert_eq!(

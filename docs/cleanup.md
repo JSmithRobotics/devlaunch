@@ -986,12 +986,17 @@ hash, so by hash the old commit is on no remote ref. A kinisi_ros workspace refu
 been rebased, a merged PR had been squashed into `main`, and five of the commits
 were merges of `origin/main`. Two more rules now run after the count:
 
-- A commit drops out when a remote ref holds a copy with the same patch. The
-  candidates come from the patch id, which is the test `git cherry` and
-  `git rebase` use to skip a commit already upstream, but a patch id ignores
-  whitespace, and in Python, a Makefile or YAML the indentation is the change. So
-  each candidate is then compared with its copy byte for byte, line numbers
-  aside, and whitespace counts.
+- A commit drops out when a remote ref holds a copy of it: a commit that makes
+  the same change in the same place. The candidates come from the patch id,
+  which is the test `git cherry` and `git rebase` use to skip a commit already
+  upstream, but a patch id ignores whitespace, and in Python, a Makefile or YAML
+  the indentation is the change. So each candidate is paired with the remote
+  commits whose patch is the same byte for byte, line numbers aside, and
+  whitespace counts. A patch without its line numbers still reads the same for
+  one edit made to either of two blocks that look alike, so git confirms each
+  pair: `git merge-tree` puts the local commit on the copy's parent, and the
+  commit is a copy only when the result is the copy's tree exactly. A conflict
+  is no copy.
   Each local branch that holds unpushed commits is compared with a few remote
   refs: the upstream of every local branch, the remote branch of the same name,
   and `origin/HEAD`, which is where a squashed one-commit PR lands. Every
