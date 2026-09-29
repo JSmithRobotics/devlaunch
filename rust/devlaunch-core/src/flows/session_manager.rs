@@ -1427,6 +1427,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_report_for_a_pane_the_file_does_not_hold_yet_is_sent_again() {
+        let runner = ScriptedRunner::new().with_script(["herdr"], Response::ok());
+        let reads = std::cell::Cell::new(0);
+        let ended = report_resume(
+            &runner,
+            &resume_report(),
+            &|| 1,
+            &|_| {
+                reads.set(reads.get() + 1);
+                Some(if reads.get() > RESUME_UNSAVED_TICKS as usize {
+                    saved(Some(HELD))
+                } else {
+                    r#"{"workspaces":[]}"#.to_owned()
+                })
+            },
+            &|_| true,
+        );
+        assert_eq!(ended, ResumeReported::Saved);
+        assert_eq!(reports(&runner).len(), 2);
+    }
+
     /// The hook reports the session claude really opened, after the host's
     /// guess: sending the guess again would restore the wrong session.
     #[test]

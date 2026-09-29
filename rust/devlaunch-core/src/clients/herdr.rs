@@ -1893,14 +1893,14 @@ pub(crate) enum Saved {
     Holds,
     /// It holds another argv.
     Other,
-    /// It holds none.
+    /// It holds none, or does not hold the pane yet.
     Empty,
     /// The file could not be read as herdr's session, so it cannot say.
     Unreadable,
 }
 
 /// The saved argv of one pane: `None` when the file cannot be read that way,
-/// `Some(None)` when the pane holds none.
+/// `Some(None)` when the pane holds none or the file does not hold the pane yet.
 ///
 /// herdr's pane ids are `w<workspace>:p<public number>`, and the file keys panes by
 /// an internal number that `public_pane_numbers` maps to the public one.
@@ -1908,23 +1908,30 @@ fn saved_argv(session_json: &str, pane_id: &str) -> Option<Option<Vec<String>>> 
     let (workspace_id, public) = pane_id.split_once(":p")?;
     let public: u64 = public.parse().ok()?;
     let session: serde_json::Value = serde_json::from_str(session_json).ok()?;
-    let workspace = session
+    let Some(workspace) = session
         .get("workspaces")?
         .as_array()?
         .iter()
-        .find(|workspace| workspace.get("id").and_then(|id| id.as_str()) == Some(workspace_id))?;
-    let key = workspace
+        .find(|workspace| workspace.get("id").and_then(|id| id.as_str()) == Some(workspace_id))
+    else {
+        return Some(None);
+    };
+    let Some((key, _)) = workspace
         .get("public_pane_numbers")?
         .as_object()?
         .iter()
-        .find(|(_, number)| number.as_u64() == Some(public))?
-        .0
-        .clone();
-    let pane = workspace
+        .find(|(_, number)| number.as_u64() == Some(public))
+    else {
+        return Some(None);
+    };
+    let Some(pane) = workspace
         .get("tabs")?
         .as_array()?
         .iter()
-        .find_map(|tab| tab.get("panes")?.get(&key))?;
+        .find_map(|tab| tab.get("panes")?.get(key))
+    else {
+        return Some(None);
+    };
     Some(
         pane.get("agent_resume")
             .and_then(|resume| resume.get("argv"))
@@ -2176,7 +2183,17 @@ mod resume_tests {
     #[test]
     fn a_file_that_is_not_herdrs_session_says_nothing() {
         assert_eq!(report().saved_in("not json"), Saved::Unreadable);
-        assert_eq!(report().saved_in(r#"{"workspaces":[]}"#), Saved::Unreadable);
+        assert_eq!(report().saved_in(r#"{"workspaces":{}}"#), Saved::Unreadable);
+    }
+
+    /// herdr saves on a debounce: a pane it has not saved yet holds no argv.
+    #[test]
+    fn a_pane_the_file_does_not_hold_yet_lacks_an_argv() {
+        assert_eq!(report().saved_in(r#"{"workspaces":[]}"#), Saved::Empty);
+        let other_pane = session(r#"["dl","ws"]"#).replace(r#""4":3"#, r#""4":9"#);
+        assert_eq!(report().saved_in(&other_pane), Saved::Empty);
+        let no_tab = session(r#"["dl","ws"]"#).replace(r#""4":{"cwd""#, r#""8":{"cwd""#);
+        assert_eq!(report().saved_in(&no_tab), Saved::Empty);
     }
 
     #[test]
