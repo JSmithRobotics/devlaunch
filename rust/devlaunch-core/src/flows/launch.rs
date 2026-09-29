@@ -221,6 +221,10 @@ pub struct Host {
     pub(crate) herdr_tab_id: Option<String>,
     /// `HERDR_BIN_PATH`: which herdr to ask, falling back to `PATH`.
     pub(crate) herdr_bin: Option<String>,
+    /// How the agent this launch starts is started again after herdr restarts,
+    /// when the caller knows. Not read from the environment: `aid` knows it because
+    /// it wrote the agent's line, and hands it over with [`Self::with_agent_resume`].
+    pub(crate) agent_resume: Option<herdr::AgentResume>,
     pub(crate) stdin_tty: bool,
     pub(crate) stdout_tty: bool,
     /// Whether stderr is a terminal, which is the stream the title is written to
@@ -292,6 +296,7 @@ impl Host {
             no_title: crate::osext::env_str(TITLE_DISABLE_VAR),
             herdr_tab_id: crate::osext::env_str(HERDR_TAB_VAR),
             herdr_bin: herdr::binary_from_process(),
+            agent_resume: None,
             stdin_tty: is_a_terminal(libc::STDIN_FILENO),
             stdout_tty: is_a_terminal(libc::STDOUT_FILENO),
             stderr_tty: is_a_terminal(libc::STDERR_FILENO),
@@ -314,6 +319,17 @@ impl Host {
     #[must_use]
     pub fn with_claude_profile(mut self, profile: Option<String>) -> Self {
         self.claude.profile = profile;
+        self
+    }
+
+    /// Say how the agent this run starts is started again after herdr restarts.
+    ///
+    /// A builder for [`Self::with_claude_profile`]'s reason. Read only by a launch
+    /// running a command in a herdr pane, which reports it so that a restored pane
+    /// comes back into the agent's own session (`clients::herdr::AgentResume`).
+    #[must_use]
+    pub fn with_agent_resume(mut self, resume: Option<herdr::AgentResume>) -> Self {
+        self.agent_resume = resume;
         self
     }
 
@@ -2819,35 +2835,48 @@ pub(crate) fn workspace_ssh(
         agent,
         reporting: relay.as_ref().map(|(reporting, _)| reporting),
     };
-    let session_outcome = match route(payload.as_ref(), &terminal, workspace_id, notices) {
-        Route::Terminal { payload, config } => ssh_with_terminal(
-            session,
-            workspace_id,
-            payload,
-            config,
-            workdir,
-            visibility,
-            notices,
-        ),
-        Route::DevpodAttach => devpod_session(
-            session,
-            workspace_id,
-            None,
-            workdir,
-            visibility,
-            forward,
-            notices,
-        ),
-        Route::DevpodCommand(payload) => devpod_session(
-            session,
-            workspace_id,
-            Some(payload),
-            workdir,
-            visibility,
-            forward,
-            notices,
-        ),
-    };
+    // The argv a restored pane types, reported from here beside the session and
+    // never in front of it: herdr takes it only once it has detected the agent in
+    // the pane, which it does by reading the transport child this is about to start.
+    let resume = session.host.agent_resume.as_ref().and_then(|resume| {
+        herdr::ResumeReport::resolve(
+            &session.host.herdr,
+            session.host.herdr_bin.as_deref(),
+            agent,
+            resume.argv(workspace_id, session.host.claude.profile.as_deref()),
+        )
+    });
+    let session_outcome = beside_resume_report(session.runner, resume.as_ref(), || {
+        match route(payload.as_ref(), &terminal, workspace_id, notices) {
+            Route::Terminal { payload, config } => ssh_with_terminal(
+                session,
+                workspace_id,
+                payload,
+                config,
+                workdir,
+                visibility,
+                notices,
+            ),
+            Route::DevpodAttach => devpod_session(
+                session,
+                workspace_id,
+                None,
+                workdir,
+                visibility,
+                forward,
+                notices,
+            ),
+            Route::DevpodCommand(payload) => devpod_session(
+                session,
+                workspace_id,
+                Some(payload),
+                workdir,
+                visibility,
+                forward,
+                notices,
+            ),
+        }
+    });
     // The forward outlives the session by nothing: the socket it carries is only
     // meaningful while an agent is in there to report through it, and an ssh left
     // holding a listen path in a container is the kind of thing that is still
@@ -2856,6 +2885,71 @@ pub(crate) fn workspace_ssh(
         forward.stop(session.runner);
     }
     session_outcome
+}
+
+/// Run `session` with the resume argv reported beside it, on a thread of its own.
+///
+/// The report is retried for seconds and the session lasts hours, so the report
+/// cannot be in front of the session; and the session blocks this thread, so the
+/// report cannot be after it either. It is told to stop when the session ends and
+/// is joined then, which costs at most the one herdr call in flight.
+fn beside_resume_report<T>(
+    runner: &dyn Runner,
+    report: Option<&herdr::ResumeReport>,
+    session: impl FnOnce() -> T,
+) -> T {
+    let Some(report) = report else {
+        return session();
+    };
+    let stop = Stop::default();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            session_manager::report_resume(
+                runner,
+                report,
+                &|| {
+                    SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map_or(0, |since| since.as_nanos())
+                },
+                &|path| std::fs::read_to_string(path).ok(),
+                &|pause| stop.wait(pause),
+            )
+        });
+        let outcome = session();
+        stop.now();
+        outcome
+    })
+}
+
+/// A flag one thread raises and another sleeps on.
+#[derive(Default)]
+struct Stop {
+    raised: std::sync::Mutex<bool>,
+    signal: std::sync::Condvar,
+}
+
+impl Stop {
+    fn now(&self) {
+        *self
+            .raised
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.signal.notify_all();
+    }
+
+    /// Sleep for `pause` or until raised; `true` when it was not raised.
+    fn wait(&self, pause: Duration) -> bool {
+        let raised = self
+            .raised
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (raised, _) = self
+            .signal
+            .wait_timeout_while(raised, pause, |raised| !*raised)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !*raised
+    }
 }
 
 /// Prepare the container and open the forward, reporting whichever part failed.
@@ -9190,6 +9284,86 @@ mod tests {
             binary: Some("/opt/herdr/bin/herdr".to_owned()),
         };
         scene
+    }
+
+    /// A Scene in a herdr pane that has not consented to container reporting, with
+    /// `aid`'s resume line handed over.
+    fn in_a_pane_resuming(mut scene: Scene, line: &[&str]) -> Scene {
+        scene.host.herdr = crate::clients::herdr::HostEnv {
+            in_pane: Some("1".to_owned()),
+            pane_id: Some("w1:p3".to_owned()),
+            socket: Some("/nonexistent/herdr.sock".to_owned()),
+            ..crate::clients::herdr::HostEnv::default()
+        };
+        scene.host.herdr_bin = Some("/opt/herdr/bin/herdr".to_owned());
+        scene.host.agent_resume = Some(herdr::AgentResume::new(
+            NonEmpty::of(line.iter().map(|word| (*word).to_owned())).expect("a line"),
+            None,
+        ));
+        scene
+    }
+
+    fn resume_reports(scene: &Scene) -> Vec<Vec<String>> {
+        scene
+            .runner
+            .args_to("/opt/herdr/bin/herdr")
+            .into_iter()
+            .filter(|args| {
+                args.get(1)
+                    .is_some_and(|verb| verb == "report-agent-session")
+            })
+            .collect()
+    }
+
+    /// The wiring: a launch in a pane reports the line a restored pane types.
+    #[test]
+    fn an_agent_launched_in_a_pane_tells_herdr_how_to_start_it_again() {
+        let scene = in_a_pane_resuming(
+            Scene::new().on_a_terminal(&["myws"]).with_running("myws"),
+            &["claude", "--resume", "u-1"],
+        );
+
+        let _ = a_session(
+            &scene,
+            Some(&RemoteCommand::argv(&[
+                "claude",
+                "--session-id",
+                "u-1",
+                "hi",
+            ])),
+        );
+
+        let reports = resume_reports(&scene);
+        let report = reports.first().expect("a resume report");
+        assert_eq!(report[2], "w1:p3");
+        let argv_at = report
+            .iter()
+            .position(|word| word == "--")
+            .expect("an argv")
+            + 1;
+        assert_eq!(
+            report[argv_at..],
+            ["dl", "myws", "--", "claude", "--resume", "u-1"]
+        );
+    }
+
+    /// Nothing to resume without a command that is an agent, or outside a pane.
+    #[test]
+    fn a_launch_that_starts_no_agent_or_is_in_no_pane_reports_nothing() {
+        let scene = in_a_pane_resuming(
+            Scene::new().on_a_terminal(&["myws"]).with_running("myws"),
+            &["claude", "--resume", "u-1"],
+        );
+        let _ = a_session(&scene, Some(&RemoteCommand::argv(&["make", "test"])));
+        assert_eq!(resume_reports(&scene), Vec::<Vec<String>>::new());
+
+        let mut scene = in_a_pane_resuming(
+            Scene::new().on_a_terminal(&["myws"]).with_running("myws"),
+            &["claude", "--resume", "u-1"],
+        );
+        scene.host.herdr.in_pane = None;
+        let _ = a_session(&scene, Some(&RemoteCommand::argv(&["claude"])));
+        assert_eq!(resume_reports(&scene), Vec::<Vec<String>>::new());
     }
 
     #[test]

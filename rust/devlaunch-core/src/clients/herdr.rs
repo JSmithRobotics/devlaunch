@@ -1465,3 +1465,502 @@ pub(crate) fn process_info_in(answer: &str) -> Option<PaneProcessInfo> {
         .ok()
         .map(|envelope| envelope.result.process_info)
 }
+
+// ===========================================================================
+// starting the agent again after herdr restarts
+// ===========================================================================
+//
+// herdr saves one argv per pane (`agent_resume.argv` in `session.json`) and, on
+// restore, spawns the pane's shell in the saved cwd and *types* that argv. So the
+// whole of what dl owes a restart is one argv, reported once, that reopens the
+// agent's own session: `dl <workspace> -- <agent line> --resume <id>`.
+//
+// Reported from the host, under the one source the container hook already uses:
+// herdr lets a second source replace the first, and refuses a source's argv while
+// another source holds the pane, so two sources for one pane would fight. Measured
+// against herdr 0.9.2.
+
+/// How the agent a launch starts is started again, after the manager restarts.
+///
+/// Words that run *inside the workspace*, like the `-- <command>` they sit beside:
+/// the `dl <workspace> --` in front of them is core's to add, because core is what
+/// knows the workspace id and the profile this launch forwards.
+///
+/// Two lines and not one, because a session can change under the agent. `line`
+/// reopens the session this launch knows about (`claude ... --resume <uuid>` for a
+/// fresh launch, `--continue` when aid does not know the id). `by_id` is the same
+/// line with its id left off, for the container hook to complete when the agent
+/// reports a new session id (`/clear`, an in-agent `/resume`); `None` for an agent
+/// with no hook.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentResume {
+    line: NonEmpty<String>,
+    by_id: Option<NonEmpty<String>>,
+}
+
+impl AgentResume {
+    /// The line that reopens this session, and the line an id completes.
+    pub fn new(line: NonEmpty<String>, by_id: Option<NonEmpty<String>>) -> Self {
+        Self { line, by_id }
+    }
+}
+
+/// herdr's limits on a resume argv, as `pane report-agent-session` states them.
+const RESUME_MAX_ARGS: usize = 64;
+const RESUME_MAX_BYTES: usize = 8192;
+
+/// The container variable that carries [`AgentResume`]'s `by_id` line to the hook.
+///
+/// Space-separated words, which is why a line holding whitespace is never sent:
+/// the hook splits it with the shell's own field splitting, having nothing else.
+pub(crate) const RESUME_PREFIX_VAR: &str = "DEVLAUNCH_HERDR_RESUME";
+
+/// Whether herdr will take this argv: a plain command name first, no apostrophe
+/// anywhere, at most 64 words and 8192 bytes.
+///
+/// Checked here because herdr's refusal is a round trip that says nothing useful
+/// to anyone, and a line herdr would refuse is one to skip rather than retry.
+fn herdr_accepts(argv: &[String]) -> bool {
+    let Some(program) = argv.first() else {
+        return false;
+    };
+    let bytes: usize = argv.iter().map(|word| word.len() + 1).sum();
+    !program.is_empty()
+        && !program.contains('/')
+        && !program.starts_with('-')
+        && argv.iter().all(|word| !word.contains('\''))
+        && argv.len() <= RESUME_MAX_ARGS
+        && bytes <= RESUME_MAX_BYTES
+}
+
+/// `dl [<workspace> --claude-profile <name>] -- <words>`, as herdr will type it.
+fn restore_line<'a>(
+    workspace_id: &str,
+    profile: Option<&str>,
+    words: impl Iterator<Item = &'a String>,
+) -> Vec<String> {
+    let mut argv = vec![RESTORE_PROGRAM.to_owned(), workspace_id.to_owned()];
+    if let Some(profile) = profile {
+        argv.push("--claude-profile".to_owned());
+        argv.push(profile.to_owned());
+    }
+    argv.push("--".to_owned());
+    argv.extend(words.cloned());
+    argv
+}
+
+/// The program a restored pane runs: `dl` by name, which is also herdr's rule.
+///
+/// By name and not by path for the pane shell's reason (`dl-herdr-shell`): the
+/// directory a path names is replaced by `pixi global update`.
+const RESTORE_PROGRAM: &str = "dl";
+
+impl AgentResume {
+    /// The argv herdr types into the restored pane, or `None` when herdr would
+    /// refuse it.
+    pub(crate) fn argv(&self, workspace_id: &str, profile: Option<&str>) -> Option<Vec<String>> {
+        let argv = restore_line(workspace_id, profile, self.line.iter());
+        herdr_accepts(&argv).then_some(argv)
+    }
+
+    /// The `by_id` line as the hook reads it: words joined by single spaces.
+    ///
+    /// `None` when there is no such line, or when a word holds whitespace or an
+    /// apostrophe, because the hook can split on neither safely. Checked with a
+    /// UUID's worth of id on the end, so a line the id would push over herdr's
+    /// limits is not handed to a hook that will then be refused.
+    pub(crate) fn hook_prefix(&self, workspace_id: &str, profile: Option<&str>) -> Option<String> {
+        let by_id = self.by_id.as_ref()?;
+        let prefix = restore_line(workspace_id, profile, by_id.iter());
+        if prefix
+            .iter()
+            .any(|word| word.is_empty() || word.contains(char::is_whitespace))
+        {
+            return None;
+        }
+        let mut probe = prefix.clone();
+        probe.push("00000000-0000-4000-8000-000000000000".to_owned());
+        herdr_accepts(&probe).then(|| prefix.join(" "))
+    }
+}
+
+/// One pane to report a resume argv for, from the host.
+///
+/// No consent is asked for, unlike [`Reporting`]: this costs one herdr call from
+/// this host and nothing in the container, and it is what makes a restart bring
+/// the agent back at all. What it does need is a pane (`HERDR_ENV`, a pane id) and
+/// the socket, because the socket's directory is where herdr saves the session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResumeReport {
+    binary: String,
+    pane_id: String,
+    session_file: PathBuf,
+    agent: &'static str,
+    argv: Vec<String>,
+}
+
+impl ResumeReport {
+    /// What `host` can report, or nothing.
+    ///
+    /// `binary` is [`crate::flows::launch::Host`]'s `herdr_bin`, with the tab
+    /// rename's fallback to a `PATH` lookup: one rule for which herdr to ask.
+    pub(crate) fn resolve(
+        host: &HostEnv,
+        binary: Option<&str>,
+        agent: Option<&'static str>,
+        argv: Option<Vec<String>>,
+    ) -> Option<Self> {
+        if !crate::flows::provision::provisioning_disabled(host.in_pane.as_deref()) {
+            return None;
+        }
+        let pane_id = non_empty(host.pane_id.as_deref())?;
+        let socket = non_empty(host.socket.as_deref())?;
+        let session_file = Path::new(&socket).parent()?.join("session.json");
+        Some(Self {
+            binary: non_empty(binary)
+                .unwrap_or_else(|| crate::flows::launch::HERDR_BIN_FALLBACK.to_owned()),
+            pane_id,
+            session_file,
+            agent: agent?,
+            argv: argv?,
+        })
+    }
+
+    pub(crate) fn binary(&self) -> &str {
+        &self.binary
+    }
+
+    /// Where herdr saves the session this pane belongs to.
+    pub(crate) fn session_file(&self) -> &Path {
+        &self.session_file
+    }
+
+    /// `pane report-agent-session`, carrying the argv and nothing about state.
+    ///
+    /// No `--state`, deliberately: `report-agent` would make this source's word the
+    /// pane's state and stop herdr reading the screen, which is the only thing that
+    /// knows the state when the container hook is off. `--seq` because herdr drops a
+    /// report older than the source's last one, silently, and the container hook
+    /// numbers its reports by the same clock.
+    pub(crate) fn report_argv(&self, seq: u128) -> Vec<String> {
+        let mut args = vec![
+            "pane".to_owned(),
+            "report-agent-session".to_owned(),
+            self.pane_id.clone(),
+            "--source".to_owned(),
+            report_source(self.agent),
+            "--agent".to_owned(),
+            self.agent.to_owned(),
+            "--seq".to_owned(),
+            seq.to_string(),
+            "--".to_owned(),
+        ];
+        args.extend(self.argv.iter().cloned());
+        args
+    }
+
+    /// Whether herdr's saved session holds this argv for this pane.
+    ///
+    /// The one read-back there is: herdr's socket answers nothing about a pane's
+    /// resume argv, and a report it drops still exits 0.
+    pub(crate) fn saved_in(&self, session_json: &str) -> Saved {
+        match saved_argv(session_json, &self.pane_id) {
+            None => Saved::Unreadable,
+            Some(Some(argv)) if argv == self.argv => Saved::Holds,
+            Some(_) => Saved::Lacks,
+        }
+    }
+}
+
+/// The source a report names: `devlaunch:<agent>`, which for claude is the hook's.
+fn report_source(agent: &str) -> String {
+    format!("devlaunch:{agent}")
+}
+
+/// What herdr's saved session says about one pane's resume argv.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Saved {
+    /// It holds exactly the argv reported.
+    Holds,
+    /// It holds another argv, or none.
+    Lacks,
+    /// The file could not be read as herdr's session, so it cannot say.
+    Unreadable,
+}
+
+/// The saved argv of one pane: `None` when the file cannot be read that way,
+/// `Some(None)` when the pane holds none.
+///
+/// herdr's pane ids are `w<workspace>:p<public number>`, and the file keys panes by
+/// an internal number that `public_pane_numbers` maps to the public one.
+fn saved_argv(session_json: &str, pane_id: &str) -> Option<Option<Vec<String>>> {
+    let (workspace_id, public) = pane_id.split_once(":p")?;
+    let public: u64 = public.parse().ok()?;
+    let session: serde_json::Value = serde_json::from_str(session_json).ok()?;
+    let workspace = session
+        .get("workspaces")?
+        .as_array()?
+        .iter()
+        .find(|workspace| workspace.get("id").and_then(|id| id.as_str()) == Some(workspace_id))?;
+    let key = workspace
+        .get("public_pane_numbers")?
+        .as_object()?
+        .iter()
+        .find(|(_, number)| number.as_u64() == Some(public))?
+        .0
+        .clone();
+    let pane = workspace
+        .get("tabs")?
+        .as_array()?
+        .iter()
+        .find_map(|tab| tab.get("panes")?.get(&key))?;
+    Some(
+        pane.get("agent_resume")
+            .and_then(|resume| resume.get("argv"))
+            .and_then(|argv| serde_json::from_value(argv.clone()).ok()),
+    )
+}
+
+/// Whether a failed report is one worth sending again.
+///
+/// Only herdr's `resume_not_accepted`, which is what it answers before it has
+/// detected the agent in the pane: the transport child is seconds old, and herdr
+/// reads a pane's processes on its own schedule. Every other refusal (an unknown
+/// pane, a herdr too old to know the command) will be the same next time.
+pub(crate) fn worth_retrying(stderr: &str) -> bool {
+    stderr.contains("resume_not_accepted")
+}
+
+use crate::domain::workspace_state::NonEmpty;
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    fn words(line: &[&str]) -> NonEmpty<String> {
+        NonEmpty::of(line.iter().map(|word| (*word).to_owned())).expect("a line")
+    }
+
+    fn claude_resume() -> AgentResume {
+        AgentResume::new(
+            words(&["IS_SANDBOX=1", "claude", "--resume", "u-1"]),
+            Some(words(&["IS_SANDBOX=1", "claude", "--resume"])),
+        )
+    }
+
+    #[test]
+    fn a_restored_pane_runs_dl_on_the_workspace_it_left() {
+        assert_eq!(
+            claude_resume().argv("ws-id", None),
+            Some(
+                [
+                    "dl",
+                    "ws-id",
+                    "--",
+                    "IS_SANDBOX=1",
+                    "claude",
+                    "--resume",
+                    "u-1"
+                ]
+                .map(str::to_owned)
+                .to_vec()
+            )
+        );
+    }
+
+    /// A profile is per launch and stored nowhere, so the restored line has to say it.
+    #[test]
+    fn the_profile_this_launch_forwarded_is_named_again() {
+        let argv = claude_resume()
+            .argv("ws-id", Some("work"))
+            .expect("acceptable");
+        assert_eq!(argv[..5], ["dl", "ws-id", "--claude-profile", "work", "--"]);
+    }
+
+    /// Each of herdr's four rules, broken once.
+    #[test]
+    fn a_line_herdr_would_refuse_is_not_offered() {
+        let apostrophe = AgentResume::new(words(&["claude", "it's"]), None);
+        assert_eq!(apostrophe.argv("ws", None), None);
+
+        // `dl ws --` is three of the 64.
+        let long = AgentResume::new(words(&vec!["x"; 62]), None);
+        assert_eq!(long.argv("ws", None).map(|argv| argv.len()), None);
+        let fits = AgentResume::new(words(&vec!["x"; 61]), None);
+        assert_eq!(fits.argv("ws", None).map(|argv| argv.len()), Some(64));
+
+        let big = "y".repeat(RESUME_MAX_BYTES);
+        let heavy = AgentResume::new(words(&["claude", &big]), None);
+        assert_eq!(heavy.argv("ws", None), None);
+
+        assert!(!herdr_accepts(&["/usr/bin/dl".to_owned()]));
+        assert!(!herdr_accepts(&[]));
+    }
+
+    #[test]
+    fn the_hook_gets_the_line_an_id_completes() {
+        assert_eq!(
+            claude_resume().hook_prefix("ws-id", None).as_deref(),
+            Some("dl ws-id -- IS_SANDBOX=1 claude --resume")
+        );
+        let no_hook = AgentResume::new(words(&["codex", "resume", "--last"]), None);
+        assert_eq!(no_hook.hook_prefix("ws-id", None), None);
+    }
+
+    /// The hook splits on spaces, so a word holding one would arrive as two.
+    #[test]
+    fn a_line_the_hook_cannot_split_is_not_sent_to_it() {
+        let spaced = AgentResume::new(
+            words(&["claude", "--resume", "u"]),
+            Some(words(&["claude", "--name", "a b", "--resume"])),
+        );
+        assert_eq!(spaced.hook_prefix("ws", None), None);
+        assert_eq!(
+            spaced.argv("ws", None).map(|argv| argv.len()),
+            Some(6),
+            "the host's own report does not split, so it still goes"
+        );
+    }
+
+    fn in_a_pane() -> HostEnv {
+        HostEnv {
+            enabled: None,
+            in_pane: Some("1".to_owned()),
+            pane_id: Some("w1:p3".to_owned()),
+            socket: Some("/home/u/.config/herdr/sessions/s/herdr.sock".to_owned()),
+            binary: None,
+        }
+    }
+
+    fn report() -> ResumeReport {
+        ResumeReport::resolve(
+            &in_a_pane(),
+            None,
+            Some("claude"),
+            Some(vec!["dl".to_owned(), "ws".to_owned()]),
+        )
+        .expect("a pane")
+    }
+
+    /// No consent: a host-side report is one herdr call and nothing in the container.
+    #[test]
+    fn a_pane_reports_without_the_containers_consent() {
+        let report = report();
+        assert_eq!(report.binary(), "herdr");
+        assert_eq!(
+            report.session_file(),
+            Path::new("/home/u/.config/herdr/sessions/s/session.json")
+        );
+    }
+
+    #[test]
+    fn outside_a_pane_or_without_an_agent_nothing_is_reported() {
+        let argv = || Some(vec!["dl".to_owned()]);
+        for host in [
+            HostEnv {
+                in_pane: None,
+                ..in_a_pane()
+            },
+            HostEnv {
+                pane_id: Some(" ".to_owned()),
+                ..in_a_pane()
+            },
+            HostEnv {
+                socket: None,
+                ..in_a_pane()
+            },
+        ] {
+            assert_eq!(
+                ResumeReport::resolve(&host, None, Some("claude"), argv()),
+                None
+            );
+        }
+        assert_eq!(
+            ResumeReport::resolve(&in_a_pane(), None, None, argv()),
+            None
+        );
+        assert_eq!(
+            ResumeReport::resolve(&in_a_pane(), None, Some("claude"), None),
+            None
+        );
+    }
+
+    /// The argv herdr 0.9.2 took, in the order it took it: pane first, `--` last.
+    #[test]
+    fn the_report_names_the_argv_and_no_state() {
+        let argv = ResumeReport::resolve(
+            &in_a_pane(),
+            Some("/opt/herdr"),
+            Some("claude"),
+            Some(vec!["dl".to_owned(), "ws".to_owned()]),
+        )
+        .expect("a pane")
+        .report_argv(42);
+        assert_eq!(
+            argv,
+            [
+                "pane",
+                "report-agent-session",
+                "w1:p3",
+                "--source",
+                "devlaunch:claude",
+                "--agent",
+                "claude",
+                "--seq",
+                "42",
+                "--",
+                "dl",
+                "ws"
+            ]
+        );
+        assert!(!argv.iter().any(|word| word == "--state"));
+    }
+
+    /// One source for the host and the hook, or each would refuse the other.
+    #[test]
+    fn claudes_report_goes_under_the_hooks_source() {
+        assert_eq!(report_source("claude"), REPORT_SOURCE);
+        assert!(HOOK.contains(&format!("--source {REPORT_SOURCE}")));
+    }
+
+    /// Shaped like herdr 0.9.2's own file: pane `w1:p3` is internal key 4.
+    fn session(argv: &str) -> String {
+        format!(
+            r#"{{"version":3,"workspaces":[
+              {{"id":"w2","public_pane_numbers":{{"4":3}},"tabs":[{{"panes":{{"4":{{"cwd":"/"}}}}}}]}},
+              {{"id":"w1","public_pane_numbers":{{"1":1,"4":3}},"tabs":[
+                {{"panes":{{"1":{{"cwd":"/"}}}}}},
+                {{"panes":{{"4":{{"cwd":"/","agent_resume":{{"source":"devlaunch:claude","agent":"claude","argv":{argv}}}}}}}}}
+              ]}}
+            ]}}"#
+        )
+    }
+
+    #[test]
+    fn the_saved_session_is_read_by_the_panes_public_number() {
+        let report = report();
+        assert_eq!(report.saved_in(&session(r#"["dl","ws"]"#)), Saved::Holds);
+        assert_eq!(report.saved_in(&session(r#"["dl","other"]"#)), Saved::Lacks);
+    }
+
+    #[test]
+    fn a_pane_with_no_argv_lacks_one() {
+        let json = session(r#"["dl","ws"]"#).replace("\"agent_resume\"", "\"other\"");
+        assert_eq!(report().saved_in(&json), Saved::Lacks);
+    }
+
+    #[test]
+    fn a_file_that_is_not_herdrs_session_says_nothing() {
+        assert_eq!(report().saved_in("not json"), Saved::Unreadable);
+        assert_eq!(report().saved_in(r#"{"workspaces":[]}"#), Saved::Unreadable);
+    }
+
+    #[test]
+    fn only_herdrs_not_yet_is_worth_asking_again() {
+        assert!(worth_retrying(
+            r#"{"error":{"code":"resume_not_accepted","message":"..."}}"#
+        ));
+        assert!(!worth_retrying(r#"{"error":{"code":"pane_not_found"}}"#));
+        assert!(!worth_retrying("error: unexpected argument"));
+    }
+}
