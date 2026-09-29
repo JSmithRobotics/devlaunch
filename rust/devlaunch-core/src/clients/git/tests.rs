@@ -1464,6 +1464,31 @@ fn a_patch_match_is_a_copy_only_when_git_replays_it_as_the_copy() {
 }
 
 #[test]
+fn two_patches_pair_when_only_their_blobs_and_line_numbers_differ() {
+    let patch = |index: &str, hunk: &str, added: &str| {
+        format!(
+            "\ndiff --git a/f b/f\nindex {index} 100644\n--- a/f\n+++ b/f\n\
+             @@ {hunk} @@ def f():\n     a\n-    b\n+{added}\n"
+        )
+    };
+    assert_eq!(
+        normalized(&patch("1111111..2222222", "-1,2 +1,2", "    c")),
+        normalized(&patch("3333333..4444444", "-10,2 +12,2", "    c")),
+    );
+    assert_ne!(
+        normalized(&patch("1111111..2222222", "-1,2 +1,2", "    c")),
+        normalized(&patch("1111111..2222222", "-1,2 +1,2", "   c")),
+        "one space is a different change"
+    );
+    let last = patch("1111111..2222222", "-1,2 +1,2", "    c");
+    assert_eq!(
+        normalized(&last),
+        normalized(last.trim_end_matches('\n')),
+        "the last patch in the output, with its trailing newline trimmed away"
+    );
+}
+
+#[test]
 fn a_merge_with_a_remerge_diff_is_not_one_that_adds_nothing() {
     assert_eq!(
         merges_without_a_diff_in(&format!("\0{LOCAL}\n\0{COPY}\ndiff --git x\n")),

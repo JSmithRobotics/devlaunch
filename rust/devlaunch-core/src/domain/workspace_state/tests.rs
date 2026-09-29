@@ -557,6 +557,133 @@ fn a_change_of_indentation_alone_is_not_a_copy() {
     git_as_author(&clone, &["commit", "-q", "--amend", "--no-edit"]);
     git(&clone, &["fetch", "-q", "origin"]);
     assert_eq!(by_sha(&clone, "feature"), 1);
+    assert_eq!(cherry_marked(&clone, "feature...origin/feature").len(), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+/// A clone whose pushed `guard.py` commit was amended to indent its body with
+/// *indent* instead of *pushed*.
+fn reindented_after_the_push(fixture: &Fixture, pushed: &str, indent: &str) -> PathBuf {
+    let clone = fixture.clone();
+    write(&clone.join("guard.py"), &format!("if a:\n{pushed}x()\n"));
+    commit(&clone, "guard");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    write(&clone.join("guard.py"), &format!("if a:\n{indent}x()\n"));
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["commit", "-q", "--amend", "--no-edit"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    clone
+}
+
+#[test]
+fn indentation_changed_but_not_removed_is_not_a_copy() {
+    // A run of whitespace that only changes its length, or a tab that turns
+    // into spaces, is still the change.
+    for (pushed, indent) in [("    ", "  "), ("\t", "    ")] {
+        let fixture = Fixture::new();
+        let clone = reindented_after_the_push(&fixture, pushed, indent);
+        assert_eq!(by_sha(&clone, "feature"), 1);
+        assert_eq!(
+            cherry_marked(&clone, "feature...origin/feature").len(),
+            1,
+            "the premise: the patch id matches {pushed:?} with {indent:?}"
+        );
+
+        assert_eq!(
+            would_lose(&held(&clone)),
+            "1 unpushed commit(s)",
+            "{pushed:?} became {indent:?}"
+        );
+    }
+}
+
+#[test]
+fn a_mode_change_added_to_a_pushed_commit_is_not_a_copy() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    make_executable(&clone.join("feature.txt"));
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["commit", "-q", "--amend", "--no-edit"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_mode_change_the_remote_rebased_is_saved() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    make_executable(&clone.join("feature.txt"));
+    commit(&clone, "executable");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 2);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+#[test]
+fn a_binary_change_the_remote_rebased_is_saved() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    let blob = clone.join("blob.bin");
+    std::fs::write(&blob, b"\x00\x01binary\xff\n").expect("written");
+    commit(&clone, "binary");
+    std::fs::write(&blob, b"\x00\x02binary, changed\xfe\n").expect("written");
+    commit(&clone, "binary changed");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_rename_with_an_edit_the_remote_rebased_is_saved() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    let lines: String = (1..=10).map(|n| format!("line {n}\n")).collect();
+    write(&clone.join("notes.txt"), &lines);
+    commit(&clone, "notes");
+    git(&clone, &["mv", "notes.txt", "moved.txt"]);
+    write(
+        &clone.join("moved.txt"),
+        &lines.replace("line 5", "line five"),
+    );
+    commit(&clone, "move the notes");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_commit_reindented_after_the_remote_rebase_is_the_one_counted() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    for name in ["a", "b"] {
+        write(&clone.join(format!("{name}.py")), "if a:\n    x()\n");
+        commit(&clone, name);
+    }
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    write(&clone.join("b.py"), "if a:\n  x()\n");
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["commit", "-q", "--amend", "--no-edit"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+    assert_eq!(cherry_marked(&clone, "feature...origin/feature").len(), 3);
 
     assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
 }
