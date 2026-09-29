@@ -514,7 +514,7 @@ impl<'r> Git<'r> {
     /// ref off the old commits, and by hash those commits then count. That is the
     /// truth about the remote, not a regression: the old commits are no longer on
     /// it. What clears them is the copy rule the guard applies after the count, a
-    /// patch-id match against the rewritten branch (see
+    /// patch match against the rewritten branch (see
     /// [`Git::patches_already_on`]).
     ///
     /// `GIT_TERMINAL_PROMPT=0` because this runs under *limit*: a credential
@@ -747,17 +747,29 @@ impl<'r> Git<'r> {
     /// The commits on *tip* that *other* does not contain but holds a copy of,
     /// as full hashes.
     ///
-    /// A copy is a commit with the same patch id: the same diff, give or take
-    /// line numbers and whitespace, which is what `git cherry` and
-    /// `git rebase` use to skip a commit already upstream. A rebase, a
-    /// cherry-pick and the squash of a one-commit branch all leave one.
+    /// A copy is a commit with the same patch, byte for byte but for line
+    /// numbers and the `index` line. A rebase, a cherry-pick and the squash of a
+    /// one-commit branch all leave one.
     ///
     /// This is the question the SHA count cannot ask. A branch the remote
     /// rebased has its old commits on no remote-tracking ref, so they count as
     /// unpushed, although every one of them is on the remote in its new form.
     ///
+    /// **Whitespace counts.** `rev-list --cherry-mark` finds the candidates by
+    /// patch id, which is what `git cherry` and `git rebase` use, and a patch id
+    /// strips all whitespace, with no option to keep it. In Python, a Makefile or
+    /// YAML the indentation is the change, so a commit that only reindents would
+    /// match the commit it changed. Each candidate is therefore confirmed against
+    /// the patches themselves, and a left commit is a copy only when some right
+    /// commit's patch is the same. The two sides are asked for apart because
+    /// `--left-right` marks a match `=` on either side, and a match between two
+    /// left commits is two local copies, not one on the remote.
+    ///
     /// `--no-merges` because a merge's patch id is not defined. Merges are
-    /// [`Git::merges_with_nothing_of_their_own`]'s question.
+    /// [`Git::merges_with_nothing_of_their_own`]'s question. `--binary` so a
+    /// binary change is compared by its content and not by "Binary files
+    /// differ", and `--no-renames` so rename detection cannot fold two different
+    /// contents into one similarity line. Any refusal clears nothing.
     pub(crate) fn patches_already_on(
         &self,
         clone: &Path,
@@ -765,21 +777,49 @@ impl<'r> Git<'r> {
         other: &str,
     ) -> GitAnswer<Vec<String>> {
         let range = format!("{tip}...{other}");
-        self.about(
-            clone,
-            &[
-                "rev-list",
-                "--cherry-mark",
-                "--left-only",
-                "--no-merges",
-                &range,
-            ],
-        )
-        .map(|stdout| {
-            stdout
-                .lines()
-                .filter_map(|line| line.strip_prefix('='))
-                .map(str::to_owned)
+        let copies_on = |side: &str| {
+            self.about(
+                clone,
+                &["rev-list", "--cherry-mark", side, "--no-merges", &range],
+            )
+            .map(|stdout| cherry_marked_in(&stdout))
+        };
+        let left = match copies_on("--left-only") {
+            GitAnswer::Said(left) if left.is_empty() => return GitAnswer::Said(left),
+            GitAnswer::Said(left) => left,
+            GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
+        };
+        let right = match copies_on("--right-only") {
+            GitAnswer::Said(right) => right,
+            GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
+        };
+        let mut args: Vec<&str> = vec![
+            "log",
+            "--no-walk",
+            "--no-merges",
+            "-p",
+            "--binary",
+            "--no-renames",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--format=%x00%H",
+        ];
+        args.extend(left.iter().chain(&right).map(String::as_str));
+        self.about(clone, &args).map(|stdout| {
+            let patches = patches_in(&stdout);
+            let patch_of = |hash: &String| {
+                patches
+                    .iter()
+                    .find(|(commit, _)| commit == hash)
+                    .map(|(_, patch)| patch)
+            };
+            left.iter()
+                .filter(|hash| {
+                    patch_of(hash)
+                        .is_some_and(|patch| right.iter().any(|copy| patch_of(copy) == Some(patch)))
+                })
+                .cloned()
                 .collect()
         })
     }
@@ -1780,6 +1820,52 @@ fn local_branches_in(output: &str) -> Vec<LocalBranch> {
         .map(|(name, upstream)| LocalBranch {
             name: name.to_owned(),
             upstream: (!upstream.is_empty()).then(|| upstream.to_owned()),
+        })
+        .collect()
+}
+
+/// The commits `rev-list --cherry-mark` marked `=`, a match by patch id.
+fn cherry_marked_in(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix('='))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Each commit in [`Git::patches_already_on`]'s `git log -p` output, with its
+/// patch in the form two copies share.
+///
+/// Each commit is a NUL, its hash on the rest of that line, then its patch, for
+/// [`merges_without_a_diff_in`]'s reason. Two things differ between copies
+/// that hold the same change, and only those are dropped: the `index` line,
+/// which names blobs the rest of the tree decides, and the line numbers in each
+/// hunk header, which move with whatever is above the hunk. The header's
+/// function context goes with them, because it is read from outside the hunk.
+/// Trailing newlines go too, because [`Git::about`] trims them off the last
+/// commit's patch alone.
+fn patches_in(output: &str) -> Vec<(String, String)> {
+    output
+        .split('\0')
+        .filter_map(|entry| {
+            let (hash, patch) = entry.split_once('\n').unwrap_or((entry, ""));
+            let hash = hash.trim();
+            (!hash.is_empty()).then(|| (hash.to_owned(), normalized(patch)))
+        })
+        .collect()
+}
+
+fn normalized(patch: &str) -> String {
+    patch
+        .trim_end_matches('\n')
+        .split_inclusive('\n')
+        .filter(|line| !line.starts_with("index "))
+        .map(|line| {
+            if line.starts_with("@@ ") {
+                "@@\n"
+            } else {
+                line
+            }
         })
         .collect()
 }

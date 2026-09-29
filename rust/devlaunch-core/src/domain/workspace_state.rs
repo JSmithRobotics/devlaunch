@@ -636,8 +636,8 @@ fn unsaved(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Unsaved {
 /// and five of the commits were merges of `origin/main`. So two more things
 /// count as already on a remote:
 ///
-/// - A commit with a copy on a remote ref, found by patch id
-///   ([`Git::patches_already_on`]).
+/// - A commit with a copy on a remote ref, the same patch byte for byte and
+///   whitespace included ([`Git::patches_already_on`]).
 /// - A merge that adds nothing of its own to its parents
 ///   ([`Git::merges_with_nothing_of_their_own`]). Its parents are asked about
 ///   in their own right.

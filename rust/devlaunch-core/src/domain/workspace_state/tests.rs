@@ -479,6 +479,24 @@ fn a_merge_with_a_conflict_resolved_by_hand_is_still_unsaved() {
 }
 
 #[test]
+fn a_change_of_indentation_alone_is_not_a_copy() {
+    // git's patch id drops whitespace, and in Python, a Makefile or YAML the
+    // indentation is the change.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("guard.py"), "if a:\n    x()\n");
+    commit(&clone, "guard");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    write(&clone.join("guard.py"), "if a:\nx()\n");
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["commit", "-q", "--amend", "--no-edit"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
 fn a_copy_on_another_local_branch_is_not_a_copy_on_a_remote() {
     // Two local copies of one change are still the only two copies.
     let fixture = Fixture::new();
