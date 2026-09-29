@@ -697,8 +697,12 @@ mod tests {
 
     /// A hook run with `state` and `stdin`, against a stub herdr that records every
     /// call it is given, one argv per line with words separated by `|`.
+    ///
+    /// The hook is fired by a stand-in for a claude the pane itself started, unless
+    /// `env` names another in `CLAUDE_PID`.
     fn run_hook(state: &str, stdin: &str, env: &[(&str, &str)]) -> Vec<Vec<String>> {
         use std::io::Write as _;
+        let claude = StandIn::claude(None);
         let dir = tempfile::tempdir().expect("a scratch directory");
         let hook = dir.path().join("herdr-hook.sh");
         std::fs::write(&hook, HOOK).expect("the hook");
@@ -724,6 +728,7 @@ mod tests {
             .env("HERDR_SOCKET_PATH", &socket)
             .env("HERDR_BIN_PATH", &binary)
             .env_remove(RESUME_PREFIX_VAR)
+            .env("CLAUDE_PID", claude.pid())
             .envs(env.iter().copied())
             .stdin(std::process::Stdio::piped())
             .spawn()
@@ -740,6 +745,38 @@ mod tests {
             .lines()
             .map(|line| line.split('|').map(str::to_owned).collect())
             .collect()
+    }
+
+    /// A process standing in for a claude, started with the environment a claude
+    /// is: `CLAUDECODE=1` and its parent's `CLAUDE_PID` when another claude's Bash
+    /// tool started it, and neither when a pane did.
+    struct StandIn(std::process::Child);
+
+    impl StandIn {
+        fn claude(started_by: Option<&StandIn>) -> Self {
+            let mut command = std::process::Command::new("sleep");
+            command
+                .arg("60")
+                .env_remove("CLAUDECODE")
+                .env_remove("CLAUDE_PID");
+            if let Some(parent) = started_by {
+                command
+                    .env("CLAUDECODE", "1")
+                    .env("CLAUDE_PID", parent.pid());
+            }
+            Self(command.spawn().expect("a stand-in claude"))
+        }
+
+        fn pid(&self) -> String {
+            self.0.id().to_string()
+        }
+    }
+
+    impl Drop for StandIn {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
 
     const SESSION_START: &str = "{\"session_id\":\"9b2e7c1a-0d3f-4e5a-8b6c-7d8e9f0a1b2c\",\
@@ -802,6 +839,27 @@ mod tests {
             assert_eq!(calls.len(), 1, "{stdin}: {calls:?}");
             assert_eq!(calls[0][..2], ["pane", "report-agent"]);
         }
+    }
+
+    /// A claude the agent starts through its Bash tool inherits the pane's
+    /// environment, prefix and all, and fires a SessionStart of its own. Its
+    /// one-shot session is not the pane's, and a restore must not reopen it.
+    #[test]
+    fn a_claude_started_by_the_panes_claude_leaves_the_argv_alone() {
+        let top = StandIn::claude(None);
+        let nested = StandIn::claude(Some(&top));
+        let calls = run_hook(
+            "start",
+            SESSION_START,
+            &[
+                (RESUME_PREFIX_VAR, "dl ws -- claude --resume"),
+                ("CLAUDE_PID", &nested.pid()),
+            ],
+        );
+        assert!(
+            calls.iter().all(|call| call[1] != "report-agent-session"),
+            "{calls:?}"
+        );
     }
 
     /// Every other event is exactly what it was: no argv, so herdr keeps the one
@@ -1499,8 +1557,16 @@ esac
 # the one the pane was launched with. DEVLAUNCH_HERDR_RESUME is that line with
 # the id left off, words split on spaces (dl sends none holding one); the id is
 # taken only if it is nothing but letters, digits and dashes.
+#
+# Only the pane's own claude may: one the agent starts through its Bash tool
+# inherits all of this, and its one-shot session would replace the pane's. Claude
+# Code hands a hook CLAUDE_PID, the claude that fired it, and exports CLAUDECODE=1
+# to what that claude runs; so a claude that was *started* with CLAUDECODE=1 --
+# /proc's environ is the one it was exec'd with -- was started by another.
 [ "$state" = start ] || exit 0
 [ -n "${DEVLAUNCH_HERDR_RESUME:-}" ] || exit 0
+[ -r "/proc/${CLAUDE_PID:-}/environ" ] || exit 0
+tr '\0' '\n' <"/proc/$CLAUDE_PID/environ" | grep -qx 'CLAUDECODE=1' && exit 0
 sid=$(printf '%s' "$input" | tr -d '\n' \
   | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 case "$sid" in ''|*[!0-9A-Za-z-]*) exit 0 ;; esac
