@@ -106,7 +106,7 @@
         "XDG_CONFIG_HOME": "/home/vscode/.config",
         "XDG_CACHE_HOME": "/home/vscode/.cache",
         "XDG_DATA_HOME": "/home/vscode/.local/share",
-        "SSH_AUTH_SOCK": "/home/vscode/.ssh/agent.sock"
+        "SSH_AUTH_SOCK": "/home/vscode/.ssh/agent/agent.sock"
     },
     "mounts": [
         "source=${localWorkspaceFolderBasename}-pixi,target=${containerWorkspaceFolder}/.pixi,type=volume",
@@ -152,14 +152,33 @@
         // has the three arms and what each protects.
         //
         // containerEnv hardcodes the *target*, and that stays hardcoded. Inside
-        // the container SSH_AUTH_SOCK is /home/vscode/.ssh/agent.sock whatever
-        // the host called it, so the container end of the contract is
+        // the container SSH_AUTH_SOCK is /home/vscode/.ssh/agent/agent.sock
+        // whatever the host called it, so the container end of the contract is
         // unchanged by any of this.
+        //
+        // That target is a directory of its own, and it has to be. devpod's
+        // SetupContainer chowns the agent socket to the container user by
+        // walking `filepath.Dir(SSH_AUTH_SOCK)` recursively and `lchown`ing
+        // every entry it finds (`ChownAgentSock`, pkg/devcontainer/setup).
+        // With the socket directly in ~/.ssh, that walk reaches the read-only
+        // known_hosts bind two lines below, and the create dies:
+        //
+        //     chown ssh agent sock file: lchown /home/vscode/.ssh/known_hosts:
+        //     read-only file system
+        //
+        // Nothing about that is specific to known_hosts: the walk is over a
+        // whole directory, so ANY read-only mount that lands beside the socket
+        // breaks the create, and the failure arrives at container setup rather
+        // than at the mount that caused it. Giving the socket a directory
+        // nothing else is mounted into is what bounds the walk to one file. A
+        // new read-only mount under ~/.ssh is safe now; one under
+        // ~/.ssh/agent/ is not, which is why a test holds that directory to
+        // the socket alone rather than leaving it to be rediscovered.
         //
         // Still fixed at create: docker resolves the source on the host when it
         // makes the container, so an agent that appears afterwards is not seen
         // until `recreate`. The direct binding had the same limit.
-        "source=${localEnv:HOME}/.ssh/agent.sock,target=/home/vscode/.ssh/agent.sock,type=bind",
+        "source=${localEnv:HOME}/.ssh/agent.sock,target=/home/vscode/.ssh/agent/agent.sock,type=bind",
         "source=${localEnv:HOME}/.ssh/known_hosts,target=/home/vscode/.ssh/known_hosts,type=bind,readonly",
         "source=${localEnv:HOME}/.config/gh,target=/home/vscode/.config/gh,type=bind"
     ],

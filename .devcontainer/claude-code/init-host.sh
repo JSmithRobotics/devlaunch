@@ -128,9 +128,12 @@ heal_stale_file_mount() {
 # /tmp/ssh-XXXX path). The fallback keeps the old path in the list rather than
 # dropping it, so a container created before that change still has its stale
 # socket mount healed. Run *inside* a container this repo built, $SSH_AUTH_SOCK
-# is /home/vscode/.ssh/agent.sock, which is exactly the mount that can be stale
+# is the socket under ~/.ssh/agent, which is exactly the mount that can be stale
 # there -- so the variable is the right name to heal at both ends, which the
-# hardcoded path was only ever by coincidence.
+# hardcoded path was only ever by coincidence. (Inside a container built since
+# the socket was given a directory of its own, that value is
+# /home/vscode/.ssh/agent/agent.sock; reading the variable is what makes this
+# loop follow the move without being told about it.)
 for mounted_file in "$HOME/.claude/CLAUDE.md" "$HOME/.claude/settings.json" \
     "$HOME/.claude/.credentials.json" "$HOME/.claude/.claude.json" \
     "$HOME/.ssh/known_hosts" "$HOME/.ssh/agent.sock" \
