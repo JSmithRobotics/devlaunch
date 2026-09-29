@@ -609,6 +609,29 @@ fn an_empty_commit_is_never_a_copy() {
 }
 
 #[test]
+fn a_root_commit_is_never_a_copy() {
+    // `log.showRoot=false` prints a root commit with no patch at all, and even
+    // with its patch printed there is no parent to replay it on.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["config", "log.showRoot", "false"]);
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(&mate.join("n.txt"), "x\n");
+    commit(&mate, "n");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git(&clone, &["checkout", "-q", "--orphan", "orphan"]);
+    git(&clone, &["rm", "-q", "-r", "-f", "."]);
+    write(&clone.join("n.txt"), "x\n");
+    commit(&clone, "a root of its own");
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "orphan"), 1);
+    assert_eq!(cherry_marked(&clone, "orphan...origin/feature").len(), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
 fn a_merged_parent_with_no_copy_is_still_unsaved() {
     // The merge adds nothing of its own, so it drops out, but the commit it
     // brought in is on no remote.

@@ -1374,6 +1374,31 @@ fn a_patch_match_is_a_copy_only_when_git_replays_it_as_the_copy() {
             .said(),
         Some(vec![LOCAL.to_owned()])
     );
+    let log = fake
+        .calls()
+        .iter()
+        .map(Call::argv)
+        .find(|argv| argv.get(3).map(String::as_str) == Some("log"))
+        .expect("the patches are read");
+    assert_eq!(
+        strs(&log)[3..],
+        [
+            "log",
+            "--no-walk",
+            "--no-merges",
+            "--root",
+            "-p",
+            "--binary",
+            "--no-renames",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--format=%x00%H",
+            LOCAL,
+            COPY,
+        ],
+        "`--root`, or `log.showRoot=false` prints a root commit with no patch"
+    );
     let replay = fake
         .calls()
         .iter()

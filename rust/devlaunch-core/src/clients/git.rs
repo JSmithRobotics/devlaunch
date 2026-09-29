@@ -773,7 +773,10 @@ impl<'r> Git<'r> {
     /// [`Git::merges_with_nothing_of_their_own`]'s question. `--binary` so a
     /// binary change is compared by its content and not by "Binary files
     /// differ", and `--no-renames` so rename detection cannot fold two different
-    /// contents into one similarity line. Any refusal clears nothing.
+    /// contents into one similarity line. `--root` so that `log.showRoot=false`
+    /// cannot print a root commit as an empty patch. A root commit is still
+    /// never a copy, because [`Git::replays_as`] has no parent to put it on.
+    /// Any refusal clears nothing.
     pub(crate) fn patches_already_on(
         &self,
         clone: &Path,
@@ -801,6 +804,7 @@ impl<'r> Git<'r> {
             "log",
             "--no-walk",
             "--no-merges",
+            "--root",
             "-p",
             "--binary",
             "--no-renames",

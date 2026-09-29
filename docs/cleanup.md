@@ -997,7 +997,8 @@ were merges of `origin/main`. Two more rules now run after the count:
   pair: `git merge-tree` puts the local commit on the copy's parent, and the
   commit is a copy only when the result is the copy's tree exactly. A conflict
   is no copy, and nor is an empty commit: its message is all it holds, and any
-  other empty commit would replay as it.
+  other empty commit would replay as it. A root commit is never a copy either,
+  because it has no parent to replay it on.
   Each local branch that holds unpushed commits is compared with a few remote
   refs: the upstream of every local branch, the remote branch of the same name,
   and `origin/HEAD`, which is where a squashed one-commit PR lands. Every
