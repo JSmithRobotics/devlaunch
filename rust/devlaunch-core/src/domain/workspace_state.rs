@@ -71,7 +71,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::clients::git::{Git, GitAnswer, TagRef};
+use crate::clients::git::{Git, GitAnswer, LocalBranch, REFS_HEADS, RemoteRef, TagRef};
 
 /// The bare cache a clone was made from, when there is one to consult.
 ///
@@ -286,6 +286,17 @@ impl ByLocalTags {
                     .to_owned()
             }))?,
             commits: NonEmpty::of(commits)?,
+        })
+    }
+
+    /// The attribution without the commits a remote already holds a copy of,
+    /// or nothing when that leaves none.
+    ///
+    /// So the tag share stays a share of the count it is printed beside.
+    fn leaving_out(self, copied: &[String]) -> Option<Self> {
+        Some(Self {
+            commits: NonEmpty::of(not_among(self.commits.iter(), copied))?,
+            tags: self.tags,
         })
     }
 }
@@ -591,9 +602,13 @@ fn unsaved(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Unsaved {
     };
     match git.unpushed_commits(clone, &local_tags) {
         GitAnswer::Said(unpushed) => {
-            if let Some(commits) = NonEmpty::of(unpushed.lines().map(str::to_owned)) {
-                let by_tags = owed_to_tags(git, clone, &local_tags);
-                losses.push(Loss::Unpushed { commits, by_tags });
+            if let Some(listed) = NonEmpty::of(unpushed.lines().map(str::to_owned)) {
+                let copied = already_on_a_remote(git, clone, &local_tags);
+                if let Some(commits) = NonEmpty::of(not_among(listed.iter(), &copied)) {
+                    let by_tags = owed_to_tags(git, clone, &local_tags)
+                        .and_then(|by_tags| by_tags.leaving_out(&copied));
+                    losses.push(Loss::Unpushed { commits, by_tags });
+                }
             }
         }
         GitAnswer::Refused(refused) => {
@@ -607,6 +622,115 @@ fn unsaved(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Unsaved {
         Some(losses) => Unsaved::WouldLose(losses),
         None => Unsaved::NothingToLose,
     }
+}
+
+/// The unpushed commits whose content a remote already holds, as full hashes.
+///
+/// The SHA count in [`Git::unpushed_commits`] asks whether a remote holds *this
+/// commit*. A rebase, a cherry-pick and a squash merge each put the same change
+/// on the remote as a *new* commit, so the old one counts as unpushed although
+/// nothing in it is lost. A kinisi_ros workspace refused `rm` over 23 commits
+/// that way: its remote branch had been rebased, a merged PR had been squashed,
+/// and five of the commits were merges of `origin/main`. So two more things
+/// count as already on a remote:
+///
+/// - A commit with a copy on a remote ref, the same patch byte for byte and
+///   whitespace included ([`Git::patches_already_on`]).
+/// - A merge that adds nothing of its own to its parents
+///   ([`Git::merges_with_nothing_of_their_own`]). Its parents are asked about
+///   in their own right.
+///
+/// **Each local branch is compared with a handful of remote refs, not with all
+/// of them.** They are the upstream of *every* local branch, the remote branch
+/// of the same name, and `origin/HEAD`, which catches the squash of a one-commit
+/// PR. Every upstream rather than the branch's own, because the branch that
+/// holds the old commits is often a backup with no upstream at all: on the host
+/// this was measured on, `backup/modex-pre-rebase-pull` and `sim-gate-backup`
+/// held 28 old commits whose copies were all on another local branch's
+/// upstream. A clone can hold thousands of remote refs, and the listing asks this
+/// of every workspace, so a copy on a remote branch nothing local tracks is not
+/// found, and its commit stays counted, which is the safe side.
+///
+/// A branch stops being compared once every one of its unpushed commits is
+/// accounted for, so the usual clone pays one comparison per unpushed branch.
+///
+/// **Every failure here counts less as copied, never more.** A question git
+/// refuses adds nothing to the answer, so the commits it was about stay
+/// counted. The same holds for a commit that no local branch reaches (a stash,
+/// a detached worktree HEAD, a local tag): no branch is compared for it, so
+/// only the merge rule can clear it.
+fn already_on_a_remote(git: &Git<'_>, clone: &Path, local_tags: &[String]) -> Vec<String> {
+    let mut copied = git
+        .merges_with_nothing_of_their_own(clone, local_tags)
+        .said()
+        .unwrap_or_default();
+    let branches = git
+        .branches_with_upstreams(clone)
+        .said()
+        .unwrap_or_default();
+    let upstreams: Vec<&RemoteRef> = branches
+        .iter()
+        .filter_map(|branch| branch.upstream.as_ref())
+        .collect();
+    for branch in &branches {
+        let Some(unpushed) = git.unpushed_commits_from(clone, &branch.name).said() else {
+            continue;
+        };
+        for other in remote_refs_to_compare(branch, &upstreams) {
+            if unpushed.lines().all(|line| is_among(line, &copied)) {
+                break;
+            }
+            if let Some(hashes) = git.patches_already_on(clone, &branch.name, &other).said() {
+                copied.extend(hashes);
+            }
+        }
+    }
+    copied
+}
+
+/// The remote refs [`already_on_a_remote`] compares *branch* with, its own
+/// upstream first because that is where a rebased copy usually is.
+///
+/// `origin` by name, as [`Git::fetch_origin`] names it. A ref the clone has not
+/// got is still listed: git refuses the comparison, and a refusal adds nothing.
+///
+/// **Only a [`RemoteRef`] is ever listed.** An upstream can be a local branch
+/// (`branch -u feature other`), and a copy there is one more local copy: comparing
+/// with it would clear the only commit that holds the change. The type is what
+/// keeps it out, since [`LocalBranch::upstream`] never holds a local one.
+fn remote_refs_to_compare(branch: &LocalBranch, upstreams: &[&RemoteRef]) -> Vec<RemoteRef> {
+    let short = branch.name.strip_prefix(REFS_HEADS).unwrap_or(&branch.name);
+    let candidates = branch
+        .upstream
+        .iter()
+        .cloned()
+        .chain([RemoteRef::of("origin", short)])
+        .chain(upstreams.iter().map(|upstream| (*upstream).clone()))
+        .chain([RemoteRef::of("origin", "HEAD")]);
+    let mut refs: Vec<RemoteRef> = Vec::new();
+    for candidate in candidates {
+        if !refs.contains(&candidate) {
+            refs.push(candidate);
+        }
+    }
+    refs
+}
+
+/// The `git log --oneline` lines whose commit is not among *hashes*.
+///
+/// A line starts with an abbreviated hash, and git makes that abbreviation
+/// unique in the repository it printed it for, so a full hash that starts with
+/// it is that commit.
+fn not_among<'a>(lines: impl Iterator<Item = &'a String>, hashes: &[String]) -> Vec<String> {
+    lines
+        .filter(|line| !is_among(line, hashes))
+        .cloned()
+        .collect()
+}
+
+fn is_among(line: &str, hashes: &[String]) -> bool {
+    let abbreviated = line.split(' ').next().unwrap_or_default();
+    !abbreviated.is_empty() && hashes.iter().any(|hash| hash.starts_with(abbreviated))
 }
 
 /// Which of the unpushed commits nothing but a local tag reaches, if any.

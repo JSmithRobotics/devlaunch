@@ -46,6 +46,7 @@
 //! module, so the spans are wired in M4b/M5 against the real registry rather than
 //! guessed at here. The names above are the list to wire.
 
+use std::collections::HashMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -61,6 +62,9 @@ pub(crate) const PROGRAM: &str = "git";
 
 /// `refs/heads/` — `branch_manager.py`'s `REFS_HEADS_PREFIX`.
 pub(crate) const REFS_HEADS: &str = "refs/heads/";
+
+/// `refs/remotes/`, the namespace of every remote-tracking ref.
+pub(crate) const REFS_REMOTES: &str = "refs/remotes/";
 
 /// How long a question *about one repository* may take (`workspace_state._git`).
 ///
@@ -508,8 +512,11 @@ impl<'r> Git<'r> {
     ///   it off.
     ///
     /// The refspec forces. So a branch the remote rewrote does move its tracking
-    /// ref off the old commits, and those commits then count. That is the truth
-    /// about the remote, not a regression: the old commits are no longer on it.
+    /// ref off the old commits, and by hash those commits then count. That is the
+    /// truth about the remote, not a regression: the old commits are no longer on
+    /// it. What clears them is the copy rule the guard applies after the count, a
+    /// patch match against the rewritten branch (see
+    /// [`Git::patches_already_on`]).
     ///
     /// `GIT_TERMINAL_PROMPT=0` because this runs under *limit*: a credential
     /// prompt would eat the deadline and then be killed. A remote that asks for
@@ -652,12 +659,15 @@ impl<'r> Git<'r> {
     /// Answers on a clone with no refs at all, where there is nothing to be
     /// unpushed: git exits 0 with no output rather than refusing, so a clone of an
     /// empty repository needs no gate here and does not get one.
+    ///
+    /// `--no-color` because each line has to start with its hash: the copy rule
+    /// reads the hash back, and `color.ui=always` puts an escape code before it.
     pub(crate) fn unpushed_commits(
         &self,
         clone: &Path,
         local_tags: &[String],
     ) -> GitAnswer<String> {
-        let mut args: Vec<&str> = vec!["log", "--oneline"];
+        let mut args: Vec<&str> = vec!["log", "--oneline", "--no-color"];
         args.extend(NOT_WORK);
         args.push("--all");
         args.extend(local_tags.iter().map(String::as_str));
@@ -709,12 +719,200 @@ impl<'r> Git<'r> {
         clone: &Path,
         local_tags: &[String],
     ) -> GitAnswer<String> {
-        let mut args: Vec<&str> = vec!["log", "--oneline"];
+        let mut args: Vec<&str> = vec!["log", "--oneline", "--no-color"];
         args.extend(local_tags.iter().map(String::as_str));
         args.extend(["--not", "--remotes"]);
         args.extend(NOT_WORK);
         args.push("--all");
         self.about(clone, &args)
+    }
+
+    /// Every local branch in *clone*, with the upstream each one tracks.
+    ///
+    /// Full refnames on both sides, `refs/heads/feature` and
+    /// `refs/remotes/origin/feature`, so neither can be read as an option or be
+    /// ambiguous against a tag. A branch with no upstream carries `None`, and so
+    /// does one whose upstream is another local branch (see [`RemoteRef`]).
+    ///
+    /// Asked only to choose which remote refs to compare an unpushed branch
+    /// against (see [`Git::patches_already_on`]), never to decide what is
+    /// unpushed: that stays [`Git::unpushed_commits`]'s question.
+    pub(crate) fn branches_with_upstreams(&self, clone: &Path) -> GitAnswer<Vec<LocalBranch>> {
+        self.about(
+            clone,
+            &[
+                "for-each-ref",
+                "--format=%(refname)%00%(upstream)",
+                REFS_HEADS,
+            ],
+        )
+        .map(|stdout| local_branches_in(&stdout))
+    }
+
+    /// The commits on *tip* that the remote ref *other* does not contain but
+    /// holds a copy of, as full hashes.
+    ///
+    /// A copy is a commit that makes the same change in the same place: put the
+    /// local commit on the copy's parent and git gets the copy's tree. A rebase,
+    /// a cherry-pick and the squash of a one-commit branch all leave one.
+    ///
+    /// This is the question the SHA count cannot ask. A branch the remote
+    /// rebased has its old commits on no remote-tracking ref, so they count as
+    /// unpushed, although every one of them is on the remote in its new form.
+    ///
+    /// **Whitespace counts.** `rev-list --cherry-mark` finds the candidates by
+    /// patch id, which is what `git cherry` and `git rebase` use, and a patch id
+    /// strips all whitespace, with no option to keep it. In Python, a Makefile or
+    /// YAML the indentation is the change, so a commit that only reindents would
+    /// match the commit it changed. Each candidate is therefore paired with the
+    /// right commits whose patch is the same byte for byte, line numbers and the
+    /// `index` line aside, and each pair is confirmed by [`Git::replays_as`].
+    /// The patch text alone is not enough: without its line numbers, the same
+    /// edit to either of two blocks that look alike reads the same, and those
+    /// are two different changes. The two sides are asked for apart because
+    /// `--left-right` marks a match `=` on either side, and a match between two
+    /// left commits is two local copies, not one on the remote.
+    ///
+    /// `--no-merges` because a merge's patch id is not defined. Merges are
+    /// [`Git::merges_with_nothing_of_their_own`]'s question. `--binary` so a
+    /// binary change is compared by its content and not by "Binary files
+    /// differ", and `--no-renames` so rename detection cannot fold two different
+    /// contents into one similarity line. `--root` so that `log.showRoot=false`
+    /// cannot print a root commit as an empty patch. A root commit is still
+    /// never a copy, because [`Git::replays_as`] has no parent to put it on.
+    /// Any refusal clears nothing.
+    pub(crate) fn patches_already_on(
+        &self,
+        clone: &Path,
+        tip: &str,
+        other: &RemoteRef,
+    ) -> GitAnswer<Vec<String>> {
+        let range = format!("{tip}...{}", other.as_str());
+        let copies_on = |side: &str| {
+            self.about(
+                clone,
+                &["rev-list", "--cherry-mark", side, "--no-merges", &range],
+            )
+            .map(|stdout| cherry_marked_in(&stdout))
+        };
+        let left = match copies_on("--left-only") {
+            GitAnswer::Said(left) if left.is_empty() => return GitAnswer::Said(left),
+            GitAnswer::Said(left) => left,
+            GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
+        };
+        let right = match copies_on("--right-only") {
+            GitAnswer::Said(right) => right,
+            GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
+        };
+        let mut args: Vec<&str> = vec![
+            "log",
+            "--no-walk",
+            "--no-merges",
+            "--root",
+            "-p",
+            "--binary",
+            "--no-renames",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--format=%x00%H",
+        ];
+        args.extend(left.iter().chain(&right).map(String::as_str));
+        self.about(clone, &args).map(|stdout| {
+            let patches: HashMap<String, String> = patches_in(&stdout).into_iter().collect();
+            let mut copies_by_patch: HashMap<&str, Vec<&str>> = HashMap::new();
+            for copy in &right {
+                if let Some(patch) = patches.get(copy) {
+                    copies_by_patch.entry(patch).or_default().push(copy);
+                }
+            }
+            left.iter()
+                .filter(|commit| {
+                    patches
+                        .get(*commit)
+                        .and_then(|patch| copies_by_patch.get(patch.as_str()))
+                        .is_some_and(|copies| {
+                            copies.iter().any(|copy| {
+                                matches!(
+                                    self.replays_as(clone, commit, copy),
+                                    GitAnswer::Said(true)
+                                )
+                            })
+                        })
+                })
+                .cloned()
+                .collect()
+        })
+    }
+
+    /// Whether *commit*, put on *copy*'s parent, gives exactly *copy*'s tree.
+    ///
+    /// The one test of a copy that line numbers cannot fool: git replays the
+    /// change where it was made, as a rebase would, and the result is compared
+    /// as a tree. `merge-tree --write-tree` with *commit*'s parent as the base
+    /// is that replay, done in the object store alone, so the work tree and the
+    /// index are never touched. It writes the trees it makes as objects, which
+    /// nothing refers to and `gc` removes.
+    ///
+    /// A conflict exits 1, which is a refusal, and a commit with no parent has
+    /// no `^` to name, which git refuses too: neither is a copy.
+    fn replays_as(&self, clone: &Path, commit: &str, copy: &str) -> GitAnswer<bool> {
+        let base = format!("--merge-base={commit}^");
+        let onto = format!("{copy}^");
+        let replayed =
+            match self.about(clone, &["merge-tree", "--write-tree", &base, &onto, commit]) {
+                GitAnswer::Said(replayed) => replayed,
+                GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
+            };
+        let tree = format!("{copy}^{{tree}}");
+        self.about(clone, &["rev-parse", "--verify", &tree])
+            .map(|copy_tree| !copy_tree.is_empty() && replayed == copy_tree)
+    }
+
+    /// The unpushed two-parent merges in *clone* that add nothing of their own,
+    /// as full hashes.
+    ///
+    /// A merge adds something of its own only where it differs from what git
+    /// would have merged by itself: a conflict resolved by hand, or an edit made
+    /// in the merge. `--remerge-diff` prints exactly that difference, so a merge
+    /// it prints nothing for is one git can make again from its parents. Those
+    /// parents are still asked about, one by one, so a parent that exists
+    /// nowhere else keeps the clone.
+    ///
+    /// The refs asked about are [`Git::unpushed_commits`]' own, in the same
+    /// order, so this answers about a subset of what that query counted.
+    /// `--max-parents=2` because an octopus merge has no remerge diff, and one
+    /// is kept rather than guessed at.
+    ///
+    /// **`refs/stash` is left out.** git writes a stash as a merge of `HEAD` and
+    /// the index, and a stash of staged work has no remerge diff, so the rule
+    /// would clear the stash commit itself. A stash is work nobody merged, and
+    /// it stays counted whole.
+    ///
+    /// `--no-ext-diff` and `--no-textconv` because the question is about bytes,
+    /// and an external diff driver can print nothing for a change.
+    pub(crate) fn merges_with_nothing_of_their_own(
+        &self,
+        clone: &Path,
+        local_tags: &[String],
+    ) -> GitAnswer<Vec<String>> {
+        let mut args: Vec<&str> = vec![
+            "log",
+            "--remerge-diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--merges",
+            "--max-parents=2",
+            "--format=%x00%H",
+        ];
+        args.extend(NOT_WORK);
+        args.push("--exclude=refs/stash");
+        args.push("--all");
+        args.extend(local_tags.iter().map(String::as_str));
+        args.extend(["--not", "--remotes"]);
+        self.about(clone, &args)
+            .map(|stdout| merges_without_a_diff_in(&stdout))
     }
 
     /// Every tag in the bare cache at *bare*, with the object each one names.
@@ -847,7 +1045,10 @@ impl<'r> Git<'r> {
     /// question that has to attribute its answer to one worktree's checkout
     /// rather than to the clone as a whole.
     pub(crate) fn unpushed_commits_from(&self, clone: &Path, rev: &str) -> GitAnswer<String> {
-        self.about(clone, &["log", "--oneline", rev, "--not", "--remotes"])
+        self.about(
+            clone,
+            &["log", "--oneline", "--no-color", rev, "--not", "--remotes"],
+        )
     }
 
     /// How many commits are reachable from *rev* and from no ref in *repo*.
@@ -1536,7 +1737,7 @@ pub(crate) fn refs_heads(branch: &str) -> String {
 /// `refs/remotes/<remote>/<branch>` — the ref [`Git::verify_ref`] is asked for a
 /// remote-tracking branch.
 pub(crate) fn refs_remotes(remote: &str, branch: &str) -> String {
-    format!("refs/remotes/{remote}/{branch}")
+    format!("{REFS_REMOTES}{remote}/{branch}")
 }
 
 /// The branch a symbolic ref names, with its namespace prefix removed.
@@ -1642,6 +1843,154 @@ pub(crate) struct TagRef {
     /// unambiguous as a revision argument and can never read as an option.
     pub(crate) name: String,
     pub(crate) object: String,
+}
+
+/// One local branch, and the upstream it tracks when it tracks one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LocalBranch {
+    /// The full refname, `refs/heads/feature`, for [`TagRef::name`]'s reason.
+    pub(crate) name: String,
+    /// The upstream, when it is a remote-tracking ref.
+    ///
+    /// `branch -u <local>`, `--track <local>` and `branch.autoSetupMerge=always`
+    /// all give a `refs/heads/` upstream, and it reads as `None` here: a copy on
+    /// a local branch is one more local copy, and it must never clear the only
+    /// commit that holds a change.
+    pub(crate) upstream: Option<RemoteRef>,
+}
+
+/// A remote-tracking ref, `refs/remotes/origin/feature`.
+///
+/// Only a refname in `refs/remotes/` makes one, so a question that takes a
+/// `RemoteRef` cannot be asked about a local branch. The copy rule is the reason
+/// it exists: a copy it finds clears a commit, and only a copy on a remote may.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RemoteRef(String);
+
+impl RemoteRef {
+    /// *refname* as a remote ref, or `None` when it names anything else.
+    pub(crate) fn parse(refname: &str) -> Option<Self> {
+        refname
+            .strip_prefix(REFS_REMOTES)
+            .is_some_and(|rest| !rest.is_empty())
+            .then(|| Self(refname.to_owned()))
+    }
+
+    /// `refs/remotes/<remote>/<branch>`, as [`refs_remotes`] spells it.
+    pub(crate) fn of(remote: &str, branch: &str) -> Self {
+        Self(refs_remotes(remote, branch))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The branches in [`Git::branches_with_upstreams`] output, one per
+/// `<refname>NUL<upstream>` line, the upstream empty where there is none.
+fn local_branches_in(output: &str) -> Vec<LocalBranch> {
+    output
+        .lines()
+        .filter_map(|line| line.split_once('\0'))
+        .filter(|(name, _)| name.starts_with(REFS_HEADS))
+        .map(|(name, upstream)| LocalBranch {
+            name: name.to_owned(),
+            upstream: RemoteRef::parse(upstream),
+        })
+        .collect()
+}
+
+/// The commits `rev-list --cherry-mark` marked `=`, a match by patch id.
+fn cherry_marked_in(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix('='))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Each commit in [`Git::patches_already_on`]'s `git log -p` output, with its
+/// patch in the form two copies share, or none when the output cannot be read.
+///
+/// Read as [`hashed_entries`] reads it. Two things differ between copies
+/// that hold the same change, and only those are dropped: the `index` line,
+/// which names blobs the rest of the tree decides, and the line numbers in each
+/// hunk header, which move with whatever is above the hunk. The header's
+/// function context goes with them, because it is read from outside the hunk.
+/// Trailing newlines go too, because [`Git::about`] trims them off the last
+/// commit's patch alone.
+///
+/// A commit with an empty patch is left out. It holds a message and nothing
+/// else, so every other empty commit replays as it, and the message may be the
+/// one record of something.
+fn patches_in(output: &str) -> Vec<(String, String)> {
+    hashed_entries(output)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(hash, patch)| {
+            let patch = normalized(patch);
+            (!patch.is_empty()).then(|| (hash.to_owned(), patch))
+        })
+        .collect()
+}
+
+fn normalized(patch: &str) -> String {
+    patch
+        .trim_end_matches('\n')
+        .split_inclusive('\n')
+        .filter(|line| !line.starts_with("index "))
+        .map(|line| {
+            if line.starts_with("@@ ") {
+                "@@\n"
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+/// The merges in [`Git::merges_with_nothing_of_their_own`] output that git
+/// printed no diff for, or none when the output cannot be read.
+///
+/// Read as [`hashed_entries`] reads it, each merge's text its remerge diff, if
+/// it has one.
+fn merges_without_a_diff_in(output: &str) -> Vec<String> {
+    hashed_entries(output)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, diff)| diff.trim().is_empty())
+        .map(|(hash, _)| hash.to_owned())
+        .collect()
+}
+
+/// The entries in `--format=%x00%H` output: a NUL, a full hash on the rest of
+/// that line, then the text git printed for that commit.
+///
+/// **A NUL can turn up inside the text too.** A `diff` gitattribute makes git
+/// print a file that holds one as text, so a split on NUL can cut one entry in
+/// two, and the piece after the cut starts with whatever the file held. So each
+/// entry has to start with a hash in full, SHA-1's 40 or SHA-256's 64 lowercase
+/// hex digits, and one entry in any other shape leaves the whole output unread:
+/// the entry before the cut lost the rest of its text, and nothing says which
+/// one that was.
+fn hashed_entries(output: &str) -> Option<Vec<(&str, &str)>> {
+    let mut entries = output.split('\0');
+    if !entries.next().is_some_and(str::is_empty) {
+        return None;
+    }
+    entries
+        .map(|entry| {
+            let (hash, text) = entry.split_once('\n').unwrap_or((entry, ""));
+            is_a_full_hash(hash).then_some((hash, text))
+        })
+        .collect()
+}
+
+fn is_a_full_hash(text: &str) -> bool {
+    matches!(text.len(), 40 | 64)
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// The tags in [`TAG_REFS_QUERY`] output, one per `<object> <refname>` line.
