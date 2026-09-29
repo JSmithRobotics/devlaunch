@@ -559,9 +559,14 @@ enum Sent {
 }
 
 fn send_report(runner: &dyn Runner, report: &herdr::ResumeReport, seq: u128) -> Sent {
+    // stdin is `/dev/null`, never the terminal: this runs *while* the session
+    // does, and a herdr handed the terminal the agent is reading took the session
+    // down with it (ssh exited 255 the moment the first report went, measured
+    // against herdr 0.9.2). The tab rename closes every stream for the same reason.
     let spec = SpawnSpec::new(
         Invocation::new(report.binary().to_owned()).with_args(report.report_argv(seq)),
     )
+    .with_stdin_null()
     .with_timeout(herdr::ANSWER_WITHIN);
     match runner.capture(&spec) {
         Outcome::Ran { exit, .. } if exit.is_success() => Sent::Taken,
@@ -1358,6 +1363,12 @@ mod tests {
         assert_eq!(ended, ResumeReported::Saved);
         let sent = reports(&runner);
         assert_eq!(sent.len(), 1, "{sent:?}");
+        // Beside a live session, so never the terminal the agent is reading.
+        let call = runner.calls_to("herdr").remove(0);
+        assert_eq!(
+            call.spec().map(|spec| spec.stdin.clone()),
+            Some(crate::runner::StdinPlan::Null)
+        );
         assert_eq!(sent[0][..2], ["pane", "report-agent-session"]);
         assert_eq!(sent[0][7..9], ["--seq", "7"]);
     }
