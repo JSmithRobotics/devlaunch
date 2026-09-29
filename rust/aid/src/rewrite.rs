@@ -2694,6 +2694,36 @@ mod tests {
         );
     }
 
+    /// `aid resume --codex` and `--gemini` open the agent's own picker too, and
+    /// neither has a hook: a restore reopens the latest session in its own spelling.
+    #[test]
+    fn a_picked_codex_or_gemini_session_is_reopened_as_the_latest_one() {
+        for (flag, expected) in [
+            (
+                "--codex",
+                &[
+                    "codex",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "resume",
+                    "--last",
+                ][..],
+            ),
+            ("--gemini", &["gemini", "--yolo", "--resume"][..]),
+        ] {
+            let launch = build_launch(
+                &parsed(&[flag, "resume", "owner/repo"]),
+                &id_of,
+                Some(SESSION),
+            )
+            .expect("an agent line");
+            assert_eq!(
+                launch.resume,
+                dl::AgentResume::new(line(expected), None),
+                "{flag}"
+            );
+        }
+    }
+
     /// No id to hand (the kernel's random source was unreadable): the latest session.
     #[test]
     fn without_an_id_a_fresh_session_is_reopened_as_the_latest_one() {
