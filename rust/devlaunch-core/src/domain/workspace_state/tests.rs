@@ -421,8 +421,8 @@ fn only_the_commits_the_rebased_remote_has_a_copy_of_drop_out() {
 #[test]
 fn a_commit_squash_merged_into_the_default_branch_is_saved() {
     // A one-commit PR squashed into `main` lands as a new commit with the same
-    // patch. The branch's own remote ref never got the commit, so only
-    // `origin/HEAD` can say the remote has it.
+    // patch. The branch's own remote ref never got the commit, and with no local
+    // `main` tracking `origin/main`, only `origin/HEAD` can say the remote has it.
     let fixture = Fixture::new();
     let clone = fixture.clone();
     write(&clone.join("fix.txt"), "the fix\n");
@@ -433,9 +433,45 @@ fn a_commit_squash_merged_into_the_default_branch_is_saved() {
     commit(&mate, "fix (#1)");
     git(&mate, &["push", "-q", "origin", "main"]);
     git(&clone, &["fetch", "-q", "origin"]);
+    git(&clone, &["branch", "-q", "-D", "main"]);
     assert_eq!(by_sha(&clone, "feature"), 1);
 
     assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_branch_that_tracks_nothing_is_compared_with_its_namesake_on_the_remote() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["branch", "-q", "--unset-upstream", "feature"]);
+    git(&clone, &["branch", "-q", "-D", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_squash_of_several_commits_leaves_each_of_them_counted() {
+    // No one commit's patch is the squash's, and telling a squash from a
+    // coincidence is not a question patches can answer.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    for name in ["a", "b"] {
+        write(&clone.join(format!("{name}.txt")), "work\n");
+        commit(&clone, name);
+    }
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "main"]);
+    for name in ["a", "b"] {
+        write(&mate.join(format!("{name}.txt")), "work\n");
+    }
+    commit(&mate, "a and b (#2)");
+    git(&mate, &["push", "-q", "origin", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
 }
 
 #[test]
@@ -491,6 +527,42 @@ fn a_change_of_indentation_alone_is_not_a_copy() {
     git(&clone, &["add", "-A"]);
     git_as_author(&clone, &["commit", "-q", "--amend", "--no-edit"]);
     git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_merged_parent_with_no_copy_is_still_unsaved() {
+    // The merge adds nothing of its own, so it drops out, but the commit it
+    // brought in is on no remote.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["checkout", "-q", "-b", "side"]);
+    write(&clone.join("side.txt"), "side work\n");
+    commit(&clone, "side");
+    git(&clone, &["checkout", "-q", "feature"]);
+    git_as_author(&clone, &["merge", "-q", "--no-ff", "--no-edit", "side"]);
+    assert_eq!(by_sha(&clone, "feature"), 2);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn an_octopus_merge_with_an_edit_of_its_own_is_still_unsaved() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    for name in ["a", "b"] {
+        git(&clone, &["checkout", "-q", "-b", name, "origin/main"]);
+        write(&clone.join(format!("{name}.txt")), "pushed\n");
+        commit(&clone, name);
+        git(&clone, &["push", "-q", "origin", name]);
+    }
+    git(&clone, &["checkout", "-q", "feature"]);
+    git_as_author(&clone, &["merge", "-q", "--no-ff", "--no-commit", "a", "b"]);
+    write(&clone.join("feature.txt"), "edited in the merge\n");
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["commit", "-q", "--no-edit"]);
     assert_eq!(by_sha(&clone, "feature"), 1);
 
     assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");

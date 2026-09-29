@@ -1324,6 +1324,49 @@ fn an_empty_listing_parses_to_nothing_rather_than_to_one_empty_name() {
     assert!(nul_separated("\0").is_empty());
 }
 
+#[test]
+fn a_merge_with_a_remerge_diff_is_not_one_that_adds_nothing() {
+    assert_eq!(
+        merges_without_a_diff_in("\0aaa\n\0bbb\ndiff --git x\n"),
+        ["aaa".to_owned()]
+    );
+    assert_eq!(
+        merges_without_a_diff_in("\0ccc"),
+        ["ccc".to_owned()],
+        "the last merge, with its trailing newline trimmed away"
+    );
+    assert!(merges_without_a_diff_in("").is_empty());
+}
+
+#[test]
+fn a_branch_with_an_empty_upstream_field_tracks_nothing() {
+    let output = concat!(
+        "refs/heads/backup\0\n",
+        "refs/heads/feature\0refs/remotes/origin/feature\n",
+        "refs/heads/other\0refs/heads/feature\n",
+        "no-nul-here\n",
+    );
+
+    assert_eq!(
+        local_branches_in(output),
+        [
+            LocalBranch {
+                name: "refs/heads/backup".to_owned(),
+                upstream: None,
+            },
+            LocalBranch {
+                name: "refs/heads/feature".to_owned(),
+                upstream: Some("refs/remotes/origin/feature".to_owned()),
+            },
+            LocalBranch {
+                name: "refs/heads/other".to_owned(),
+                upstream: Some("refs/heads/feature".to_owned()),
+            },
+        ],
+        "a local upstream is reported as it is; the copy rule refuses to compare with it"
+    );
+}
+
 // ------------------------------------------------------- the pointer sniff
 
 #[test]
