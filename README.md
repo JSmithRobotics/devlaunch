@@ -390,7 +390,7 @@ aid blooop/devlaunch@fix/42 fix the flaky test
 is exactly
 
 ```bash
-dl blooop/devlaunch@fix/42 -- IS_SANDBOX=1 claude --dangerously-skip-permissions --remote-control=devlaunch-fix-42-eshv 'fix the flaky test'
+dl blooop/devlaunch@fix/42 -- IS_SANDBOX=1 claude --dangerously-skip-permissions --remote-control=devlaunch-fix-42-eshv --session-id <new uuid> 'fix the flaky test'
 ```
 
 Same clone, same workspace, same container. Everything after the workspace is the prompt, flags
@@ -445,7 +445,10 @@ After a restart, `aid resume` is the way back into an agent session in one comma
 opens `dl`'s picker, starts the workspace you pick, and starts the agent with its own
 resume picker, Remote Control and full auto included. `aid resume <workspace>` skips the
 first picker. [docs/cli.md](docs/cli.md#aid-resume-back-into-a-session-after-a-restart)
-has the words per agent.
+has the words per agent. In a [herdr](https://herdr.dev) pane you need neither: `aid` tells
+herdr how to reopen the session, and a herdr restart or a reboot brings the pane back into
+its own conversation. See
+[docs/workspace-tools.md](docs/workspace-tools.md#coming-back-after-herdr-restarts).
 
 ## What every workspace gets
 
