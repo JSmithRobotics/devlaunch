@@ -450,6 +450,14 @@ pub enum LaunchNotice {
     /// calls. Narrow, and honestly so.
     PixiCacheNotADirectory { source: PathBuf },
 
+    // --- lxcfs (`HostProcView`)
+    /// The host runs lxcfs and this container gets its `/proc` view, so what the
+    /// container reads about memory and CPUs is its own cgroup's rather than the
+    /// machine's. Said once per create, because it changes how every build tool
+    /// inside sizes itself and a silent change of that kind is the thing worth
+    /// announcing.
+    HostProcViewBound { entries: usize },
+
     // --- the launch lock (dl.py `workspace_up`)
     /// Another launch of this workspace holds the lock, and this one is about to
     /// wait. Handed over *before* the blocking acquisition, which is the only
@@ -929,6 +937,105 @@ fn write_options_cache(cache_path: &Path, options: &BTreeMap<String, String>) {
 /// last one already fetched. One host directory bound into all of them makes the
 /// second container's sync an 18–28s unpack from disk (devlaunch#232).
 ///
+/// Where lxcfs serves its per-container `/proc`. Fixed by the package on every
+/// distribution that ships it, and not configurable here: a path this did not
+/// recognise would be a path nothing mounts.
+const LXCFS_ROOT: &str = "/var/lib/lxcfs";
+
+/// The `/proc` entries worth taking from lxcfs, and only these.
+///
+/// Each is a file the kernel does NOT namespace, so a container reads the
+/// host's value however tightly it is capped. Measured on a 47Gi/32-core host:
+/// a container started with `--cpus=4 --memory=8g` reports `nproc` 32 and
+/// `MemTotal` 47Gi from inside; `--cpuset-cpus=0-3` brings `nproc` to 4 and
+/// leaves `MemTotal` at 47Gi. A cgroup bounds what a process may USE, and
+/// nothing stops it reading the machine's numbers and sizing itself for a
+/// machine it does not have -- which is how a build in a capped container
+/// launches as many parallel compiles as the host would bear and is killed for
+/// the difference.
+///
+/// `/proc/swaps` and `/proc/uptime` are lxcfs's too and are deliberately left
+/// out: nothing sizes a build from them, and every entry here is a bind mount
+/// that can fail a create.
+const LXCFS_PROC_ENTRIES: [&str; 4] = ["meminfo", "cpuinfo", "stat", "diskstats"];
+
+/// Whether this launch can hand the container an honest view of its own limits.
+///
+/// Absent is the ordinary case and carries no notice: a host without lxcfs is
+/// not misconfigured, it simply has nothing to offer, and a warning on every
+/// launch for a facility nobody asked for is noise. Installing lxcfs is the
+/// opt-in -- a deliberate act by whoever provisions the host -- so this reads
+/// the host rather than taking a flag, and says so once when it finds one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HostProcView {
+    /// lxcfs is serving; these entries exist and will be bound.
+    Bound { entries: Vec<PathBuf> },
+    /// No lxcfs on this host, or it is not serving the entries we want.
+    Absent,
+}
+
+impl HostProcView {
+    /// Read the host, taking only entries that are actually there.
+    ///
+    /// Each entry is checked rather than assumed present from the root existing.
+    /// lxcfs serves what its version knows about, the set has grown over
+    /// releases, and a bind mount naming a source that does not exist is refused
+    /// by the runtime -- which would turn "no /proc virtualisation" into "no
+    /// container", a far worse trade than the one this exists to make.
+    pub(crate) fn ensure(root: &Path) -> Self {
+        let proc = root.join("proc");
+        let entries: Vec<PathBuf> = LXCFS_PROC_ENTRIES
+            .iter()
+            .map(|name| proc.join(name))
+            .filter(|path| path.exists())
+            .collect();
+        if entries.is_empty() {
+            Self::Absent
+        } else {
+            Self::Bound { entries }
+        }
+    }
+
+    /// Said once, and only when something was bound.
+    pub(crate) fn notice(&self) -> Option<LaunchNotice> {
+        match self {
+            Self::Bound { entries } => Some(LaunchNotice::HostProcViewBound {
+                entries: entries.len(),
+            }),
+            Self::Absent => None,
+        }
+    }
+
+    /// The `--mount` flags, or nothing.
+    ///
+    /// Read-only, because a container has no business writing to a view of its
+    /// own limits, and `bind-propagation=rslave` so that an lxcfs restart on the
+    /// host reaches a running container rather than leaving it on a detached
+    /// mount that answers nothing.
+    ///
+    /// Only when this call actually creates or rebuilds the container: a
+    /// `--mount` lands at create and nowhere else, so emitting it on an attach
+    /// is an argument devpod has no use for.
+    pub(crate) fn up_args(&self, creating_container: bool) -> Vec<String> {
+        match self {
+            Self::Bound { entries } if creating_container => entries
+                .iter()
+                .flat_map(|source| {
+                    let name = source.file_name().unwrap_or_default().to_string_lossy();
+                    vec![
+                        "--mount".to_owned(),
+                        format!(
+                            "type=bind,source={},target=/proc/{name},readonly,bind-propagation=rslave",
+                            source.display()
+                        ),
+                    ]
+                })
+                .collect(),
+            Self::Bound { .. } | Self::Absent => Vec::new(),
+        }
+    }
+}
+
 /// A sum rather than an `Option<PathBuf>` beside a warning, because each way of
 /// failing names a different directory state and both have to be reportable: the
 /// launch survives either way, and a silent degradation here is permanent.
@@ -1261,6 +1368,7 @@ pub(crate) fn up_args(
     request: &UpRequest<'_>,
     options: &ContextOptions,
     pixi: &PixiCache,
+    host_proc: &HostProcView,
     token: &[String],
 ) -> Vec<String> {
     let mut args = vec!["up".to_owned(), request.source.to_owned()];
@@ -1283,6 +1391,14 @@ pub(crate) fn up_args(
     }
     args.extend(options.up_args());
     args.extend(pixi.up_args());
+    // A `--mount` is read at container create and ignored on an attach, so the
+    // flags go out only when this call is actually going to make one: a create
+    // (`naming` hands out an id to create as) or a rebuild (`rebuild` has a flag
+    // for devpod). Asked of the request rather than tracked separately, so it
+    // cannot drift from what the rest of this function decides.
+    let creating_container =
+        request.naming.create_as().is_some() || request.rebuild.flag().is_some();
+    args.extend(host_proc.up_args(creating_container));
     args.extend(token.iter().cloned());
     args
 }
@@ -1738,6 +1854,8 @@ fn up_under_stage(
     );
     let pixi = PixiCache::ensure(host.pixi_cache_source());
     notices.say_all(pixi.notice());
+    let host_proc = HostProcView::ensure(Path::new(LXCFS_ROOT));
+    notices.say_all(host_proc.notice());
 
     // Taken here, so the lock covers the state re-check, the `up` and the tools:
     // a launch waiting on a prewarm must not attach before the tools land.
@@ -1812,7 +1930,7 @@ fn up_under_stage(
         .as_ref()
         .map(StagedToken::up_args)
         .unwrap_or_default();
-    let args = up_args(request, &options, &pixi, &token_args);
+    let args = up_args(request, &options, &pixi, &host_proc, &token_args);
     // Said here rather than where the options are read, so the line and the argv
     // cannot disagree: this is the one production site that turns those options
     // into flags, and it is on the far side of every arm that returns without
@@ -5505,6 +5623,89 @@ mod tests {
     //! chains, the repo-lock cycle counts per launch shape — are pinned through
     //! [`Launch::run`], which is the same composition without the process.
 
+    // --- lxcfs / HostProcView -------------------------------------------------
+
+    /// A host with no lxcfs is the ordinary case, and must stay silent.
+    ///
+    /// The absence of a facility nobody asked for is not a warning, and a line
+    /// on every launch about it would be noise on every host that has not opted
+    /// in by installing it.
+    #[test]
+    fn a_host_without_lxcfs_binds_nothing_and_says_nothing() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let view = HostProcView::ensure(empty.path());
+        assert_eq!(view, HostProcView::Absent);
+        assert!(view.notice().is_none());
+        assert!(view.up_args(true).is_empty());
+    }
+
+    /// Only the entries that exist are bound.
+    ///
+    /// lxcfs serves what its version knows about and the set has grown over
+    /// releases, so a source named but absent is the realistic case. A bind
+    /// mount whose source does not exist is refused by the runtime, which would
+    /// turn "no /proc virtualisation" into "no container" -- the opposite of the
+    /// trade this makes.
+    #[test]
+    fn only_the_lxcfs_entries_that_exist_are_bound() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let proc = root.path().join("proc");
+        std::fs::create_dir_all(&proc).expect("mkdir");
+        std::fs::write(proc.join("meminfo"), "MemTotal: 1 kB\n").expect("write");
+        std::fs::write(proc.join("cpuinfo"), "processor: 0\n").expect("write");
+        // `stat` and `diskstats` deliberately absent.
+
+        let view = HostProcView::ensure(root.path());
+        let HostProcView::Bound { ref entries } = view else {
+            panic!("expected Bound, got {view:?}");
+        };
+        assert_eq!(entries.len(), 2, "{entries:?}");
+
+        let args = view.up_args(true);
+        let joined = args.join(" ");
+        assert!(joined.contains("target=/proc/meminfo"), "{joined}");
+        assert!(joined.contains("target=/proc/cpuinfo"), "{joined}");
+        assert!(!joined.contains("/proc/stat"), "{joined}");
+        assert!(!joined.contains("/proc/diskstats"), "{joined}");
+    }
+
+    /// Read-only, and rslave.
+    ///
+    /// A container has no business writing to a view of its own limits, and a
+    /// private mount would leave a running container on a detached view if lxcfs
+    /// restarts on the host -- answering nothing, silently, which is the failure
+    /// mode hardest to notice from inside.
+    #[test]
+    fn the_lxcfs_mounts_are_readonly_and_follow_the_host() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let proc = root.path().join("proc");
+        std::fs::create_dir_all(&proc).expect("mkdir");
+        std::fs::write(proc.join("meminfo"), "MemTotal: 1 kB\n").expect("write");
+
+        let args = HostProcView::ensure(root.path()).up_args(true);
+        let spec = args.last().expect("a mount spec");
+        assert!(spec.contains("readonly"), "{spec}");
+        assert!(spec.contains("bind-propagation=rslave"), "{spec}");
+        assert!(spec.starts_with("type=bind,source="), "{spec}");
+    }
+
+    /// An attach emits no mount flags at all.
+    ///
+    /// `--mount` is read when the container is created and ignored afterwards,
+    /// so sending it on an attach is an argument devpod has no use for -- and,
+    /// worse, invites the reader to believe an existing container was changed.
+    #[test]
+    fn an_attach_sends_no_lxcfs_mounts() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let proc = root.path().join("proc");
+        std::fs::create_dir_all(&proc).expect("mkdir");
+        std::fs::write(proc.join("meminfo"), "MemTotal: 1 kB\n").expect("write");
+
+        let view = HostProcView::ensure(root.path());
+        assert!(!view.up_args(true).is_empty(), "a create binds");
+        assert!(view.up_args(false).is_empty(), "an attach does not");
+    }
+
     use super::*;
 
     use std::sync::{Mutex, PoisonError};
@@ -7745,7 +7946,13 @@ mod tests {
             },
         );
 
-        let args = up_args(&request, &ContextOptions::default(), &pixi, &[]);
+        let args = up_args(
+            &request,
+            &ContextOptions::default(),
+            &pixi,
+            &HostProcView::Absent,
+            &[],
+        );
 
         assert_eq!(
             args,
@@ -7788,6 +7995,7 @@ mod tests {
             &PixiCache::NotADirectory {
                 source: PathBuf::from("/nope"),
             },
+            &HostProcView::Absent,
             &[],
         );
 
@@ -7816,6 +8024,7 @@ mod tests {
             &PixiCache::NotADirectory {
                 source: PathBuf::from("/nope"),
             },
+            &HostProcView::Absent,
             &[],
         );
 
@@ -7853,6 +8062,7 @@ mod tests {
                 &UpRequest::new("myws", Naming::Anonymous).with_rebuild(rebuild),
                 &ContextOptions::default(),
                 &nothing,
+                &HostProcView::Absent,
                 &[],
             )
         };
@@ -7883,6 +8093,7 @@ mod tests {
             &PixiCache::NotADirectory {
                 source: PathBuf::from("/nope"),
             },
+            &HostProcView::Absent,
             &[],
         );
 
@@ -7921,6 +8132,7 @@ mod tests {
             &PixiCache::NotADirectory {
                 source: PathBuf::from("/nope"),
             },
+            &HostProcView::Absent,
             &[],
         );
 
@@ -7945,6 +8157,7 @@ mod tests {
             &PixiCache::NotADirectory {
                 source: PathBuf::from("/nope"),
             },
+            &HostProcView::Absent,
             &[],
         );
 
