@@ -892,6 +892,7 @@ fn agent_flag(word: &str) -> Option<&'static str> {
 /// `=`-joined into one argv word, is what makes that impossible. An agent whose table
 /// row has no Remote Control flag ignores the name rather than inventing one — a
 /// state [`parse_aid_args`] settles before it can be built.
+#[cfg(test)]
 pub(crate) fn build_agent_command(
     agent: &str,
     prompt: &str,

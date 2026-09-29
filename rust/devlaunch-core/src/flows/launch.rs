@@ -2824,7 +2824,13 @@ pub(crate) fn workspace_ssh(
     // unless the consent variable is set, and then only inside a manager's pane.
     // Started before the session and stopped after it, whichever transport the
     // session turns out to take.
+    // With the line the container hook completes when the agent reports a new
+    // session id, so a restart after `/clear` reopens the session in the pane.
+    let hook_prefix = session.host.agent_resume.as_ref().and_then(|resume| {
+        resume.hook_prefix(workspace_id, session.host.claude.profile.as_deref())
+    });
     let relay = herdr::Reporting::resolve(&session.host.herdr)
+        .map(|reporting| reporting.with_resume_prefix(hook_prefix))
         .and_then(|reporting| begin_reporting(session, workspace_id, &options, reporting, notices));
     // Both halves of what a manager can be told, and every route gets both. The
     // agent's name used to reach the OpenSSH route alone, which is a route the

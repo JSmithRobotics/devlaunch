@@ -469,6 +469,29 @@ mod tests {
         );
     }
 
+    /// The hook's resume line travels with the coordinates, on both transports,
+    /// and only when there is one.
+    #[test]
+    fn the_resume_line_travels_beside_the_coordinates() {
+        let line = "dl ws -- claude --resume";
+        let reporting = Reporting::resolve(&in_a_pane())
+            .expect("resolvable")
+            .with_resume_prefix(Some(line.to_owned()));
+        assert_eq!(
+            reporting.coordinates().last(),
+            Some(&(RESUME_PREFIX_VAR.to_owned(), line.to_owned()))
+        );
+        assert!(
+            reporting
+                .devpod_flags()
+                .contains(&format!("{RESUME_PREFIX_VAR}={line}"))
+        );
+        let without = Reporting::resolve(&in_a_pane())
+            .expect("resolvable")
+            .with_resume_prefix(None);
+        assert_eq!(without.coordinates().len(), 4);
+    }
+
     #[test]
     fn the_devpod_transport_sets_the_coordinates_rather_than_asking_for_them() {
         let reporting = Reporting::resolve(&in_a_pane()).expect("resolvable");
@@ -593,7 +616,7 @@ mod tests {
     fn the_settings_map_every_event_to_a_state() {
         let settings = managed_settings();
         for (event, state) in [
-            ("SessionStart", "idle"),
+            ("SessionStart", "start"),
             ("UserPromptSubmit", "working"),
             ("Notification", "blocked"),
             ("Stop", "idle"),
@@ -664,9 +687,148 @@ mod tests {
         assert!(HOOK.contains("pane report-agent "));
         assert!(HOOK.contains("--state"));
         assert!(HOOK.contains("pane release-agent"));
+        // Session identity rides *after* a lifecycle report, never alone: alone it
+        // makes no pane visible, and herdr refuses its argv from a source that does
+        // not hold the pane.
+        let identity = HOOK.find("report-agent-session").expect("a session report");
+        let lifecycle = HOOK.find("pane report-agent ").expect("a lifecycle report");
+        assert!(lifecycle < identity, "{HOOK}");
+    }
+
+    /// A hook run with `state` and `stdin`, against a stub herdr that records every
+    /// call it is given, one argv per line with words separated by `|`.
+    fn run_hook(state: &str, stdin: &str, env: &[(&str, &str)]) -> Vec<Vec<String>> {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let hook = dir.path().join("herdr-hook.sh");
+        std::fs::write(&hook, HOOK).expect("the hook");
+        let socket = dir.path().join("herdr.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("a socket");
+        let log = dir.path().join("calls");
+        let binary = dir.path().join("herdr");
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\n(IFS='|'; printf '%s\\n' \"$*\") >> {}\n",
+                log.display()
+            ),
+        )
+        .expect("the stub");
+        std::fs::set_permissions(&binary, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("an executable stub");
+        let mut child = std::process::Command::new("sh")
+            .arg(&hook)
+            .arg(state)
+            .env("HERDR_ENV", "1")
+            .env("HERDR_PANE_ID", "w1:p3")
+            .env("HERDR_SOCKET_PATH", &socket)
+            .env("HERDR_BIN_PATH", &binary)
+            .env_remove(RESUME_PREFIX_VAR)
+            .envs(env.iter().copied())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("the hook runs under sh");
+        child
+            .stdin
+            .take()
+            .expect("a stdin")
+            .write_all(stdin.as_bytes())
+            .expect("the hook reads its stdin");
+        assert_eq!(child.wait().expect("the hook ends").code(), Some(0));
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| line.split('|').map(str::to_owned).collect())
+            .collect()
+    }
+
+    const SESSION_START: &str = "{\"session_id\":\"9b2e7c1a-0d3f-4e5a-8b6c-7d8e9f0a1b2c\",\
+        \"transcript_path\":\"/home/v/.claude/projects/x/9b2e.jsonl\",\"source\":\"clear\"}";
+
+    /// `/clear` and an in-agent `/resume` start a session under a new id, and the
+    /// argv herdr holds has to follow it or a restore reopens the wrong one.
+    #[test]
+    fn a_session_that_starts_tells_herdr_how_to_reopen_it_by_id() {
+        let calls = run_hook(
+            "start",
+            SESSION_START,
+            &[(RESUME_PREFIX_VAR, "dl ws -- IS_SANDBOX=1 claude --resume")],
+        );
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(calls[0][..2], ["pane", "report-agent"]);
+        assert!(calls[0].contains(&"idle".to_owned()), "{:?}", calls[0]);
+        let session = &calls[1];
+        assert_eq!(session[..3], ["pane", "report-agent-session", "w1:p3"]);
+        let id = "9b2e7c1a-0d3f-4e5a-8b6c-7d8e9f0a1b2c";
+        let at = session
+            .iter()
+            .position(|word| word == "--agent-session-id")
+            .expect("an id");
+        assert_eq!(session[at + 1], id);
+        let argv = session
+            .iter()
+            .position(|word| word == "--")
+            .expect("an argv")
+            + 1;
+        assert_eq!(
+            session[argv..],
+            ["dl", "ws", "--", "IS_SANDBOX=1", "claude", "--resume", id]
+        );
+        let seq = |call: &[String]| -> u128 {
+            let at = call
+                .iter()
+                .position(|word| word == "--seq")
+                .expect("a --seq");
+            call[at + 1].parse().expect("digits")
+        };
         assert!(
-            !HOOK.contains("report-agent-session"),
-            "session identity alone does not make a pane visible"
+            seq(session) > seq(&calls[0]),
+            "herdr would drop it as stale"
+        );
+    }
+
+    /// No prefix (a claude typed at a `dl <ws>` shell), or an id the hook cannot
+    /// trust: the lifecycle report alone, as before.
+    #[test]
+    fn a_session_with_nothing_to_reopen_it_by_reports_its_state_alone() {
+        let prefix = [(RESUME_PREFIX_VAR, "dl ws -- claude --resume")];
+        for (stdin, env) in [
+            (SESSION_START, &[][..]),
+            ("{\"session_id\":\"x';rm -rf /\"}", &prefix[..]),
+            ("not json at all", &prefix[..]),
+            ("", &prefix[..]),
+        ] {
+            let calls = run_hook("start", stdin, env);
+            assert_eq!(calls.len(), 1, "{stdin}: {calls:?}");
+            assert_eq!(calls[0][..2], ["pane", "report-agent"]);
+        }
+    }
+
+    /// Every other event is exactly what it was: no argv, so herdr keeps the one
+    /// it has.
+    #[test]
+    fn the_other_events_send_no_argv() {
+        let prefix = [(RESUME_PREFIX_VAR, "dl ws -- claude --resume")];
+        for state in ["idle", "working", "blocked", "release"] {
+            let calls = run_hook(state, SESSION_START, &prefix);
+            assert_eq!(calls.len(), 1, "{state}: {calls:?}");
+            assert!(!calls[0].contains(&"--".to_owned()), "{state}: {calls:?}");
+        }
+    }
+
+    /// A container prepared by an older dl holds a hook that knows nothing of the
+    /// resume line, and the probe has to see that rather than call it prepared.
+    #[test]
+    fn the_probe_asks_for_this_hook_and_not_just_a_hook() {
+        let command = probe_command(17_740_520, "/tmp/devlaunch-herdr-w1-p3.sock");
+        assert!(
+            command.contains(&format!("grep -qF {RESUME_PREFIX_VAR} {CONTAINER_HOOK}")),
+            "{command}"
+        );
+        assert!(HOOK.contains(RESUME_PREFIX_VAR));
+        assert!(
+            command.contains(&format!("{CONTAINER_HOOK} start")),
+            "settings from before SessionStart said `start` pass: {command}"
         );
     }
 
@@ -693,7 +855,7 @@ mod tests {
         std::fs::set_permissions(&binary, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .expect("an executable stub");
 
-        for state in ["idle", "working", "blocked", "release"] {
+        for state in ["idle", "working", "blocked", "release", "start"] {
             let status = std::process::Command::new("sh")
                 .arg(&hook)
                 .arg(state)
@@ -965,6 +1127,9 @@ pub(crate) struct Reporting {
     pane_id: String,
     host_socket: PathBuf,
     host_binary: PathBuf,
+    /// [`RESUME_PREFIX_VAR`]'s value, when this launch has a line for the hook to
+    /// complete ([`AgentResume::hook_prefix`]).
+    resume_prefix: Option<String>,
 }
 
 impl Reporting {
@@ -987,7 +1152,15 @@ impl Reporting {
             pane_id,
             host_socket: PathBuf::from(host_socket),
             host_binary: PathBuf::from(host_binary),
+            resume_prefix: None,
         })
+    }
+
+    /// Carry the hook's resume line into the container, beside the coordinates.
+    #[must_use]
+    pub(crate) fn with_resume_prefix(mut self, prefix: Option<String>) -> Self {
+        self.resume_prefix = prefix;
+        self
     }
 
     /// The pane this launch reports against.
@@ -1055,12 +1228,16 @@ impl Reporting {
     /// The socket and the binary are the container's paths, not the host's, which
     /// is the whole of the rewrite: the names are herdr's and the values are dl's.
     pub(crate) fn coordinates(&self) -> Vec<(String, String)> {
-        vec![
+        let mut coordinates = vec![
             (IN_PANE_VAR.to_owned(), "1".to_owned()),
             (PANE_VAR.to_owned(), self.pane_id.clone()),
             (SOCKET_VAR.to_owned(), self.container_socket()),
             (BIN_VAR.to_owned(), CONTAINER_BINARY.to_owned()),
-        ]
+        ];
+        if let Some(prefix) = &self.resume_prefix {
+            coordinates.push((RESUME_PREFIX_VAR.to_owned(), prefix.clone()));
+        }
+        coordinates
     }
 
     /// The coordinates as `devpod ssh --set-env` flags.
@@ -1170,7 +1347,9 @@ pub(crate) fn probe_command(host_binary_len: u64, container_socket: &str) -> Str
          test -x {CONTAINER_BINARY} \
          && test \"$(stat -c %s {CONTAINER_BINARY})\" = {host_binary_len} \
          && test -x {CONTAINER_HOOK} \
-         && grep -qF {CONTAINER_HOOK} {CONTAINER_SETTINGS}"
+         && grep -qF {RESUME_PREFIX_VAR} {CONTAINER_HOOK} \
+         && grep -qF {CONTAINER_HOOK} {CONTAINER_SETTINGS} \
+         && grep -qF '{CONTAINER_HOOK} start' {CONTAINER_SETTINGS}"
     )
 }
 
@@ -1230,9 +1409,13 @@ pub(crate) fn install_command() -> String {
 /// Five events, and the mapping is the whole state machine: a turn starts
 /// (`UserPromptSubmit`) and the agent is working; it ends (`Stop`) and the agent is
 /// idle; a permission dialog or a wait for input (`Notification`) is blocked; a
-/// session appears (`SessionStart`) idle and leaves (`SessionEnd`) reporting
-/// nothing at all, which releases the pane rather than leaving it claiming an
-/// agent that has gone.
+/// session appears (`SessionStart`, as `start`) idle and leaves (`SessionEnd`)
+/// reporting nothing at all, which releases the pane rather than leaving it
+/// claiming an agent that has gone.
+///
+/// `start` is `idle` plus one more report: the session's id, and the line that
+/// reopens it after herdr restarts ([`RESUME_PREFIX_VAR`]). `SessionStart` is the
+/// one event that fires whenever claude's session id changes, `/clear` included.
 ///
 /// A lifecycle report and not a session-identity one, which was measured: herdr's
 /// `pane report-agent-session` reports a session id *for a pane that already has an
@@ -1251,7 +1434,7 @@ pub(crate) fn managed_settings() -> String {
         )
     };
     let events = [
-        event("SessionStart", "idle"),
+        event("SessionStart", "start"),
         event("UserPromptSubmit", "working"),
         event("Notification", "blocked"),
         event("Stop", "idle"),
@@ -1281,10 +1464,12 @@ pub(crate) const HOOK: &str = r#"#!/bin/sh
 [ -S "${HERDR_SOCKET_PATH}" ] || exit 0
 BIN="${HERDR_BIN_PATH:-/usr/local/bin/herdr}"
 [ -x "$BIN" ] || exit 0
+state="${1:-}"
 
-# Claude Code hands a hook its JSON on stdin. Nothing here reads it -- there is no
-# python3 or jq to read it with -- but it is drained so the writer never blocks.
-cat >/dev/null 2>&1
+# Claude Code hands a hook its JSON on stdin, and it is always drained so the
+# writer never blocks. The one field read is the session id, by sed, because
+# there is no python3 or jq to read it with -- and only where it is used.
+input=$(cat 2>/dev/null)
 
 # Nanoseconds since the epoch: herdr orders reports by --seq, and two hooks can
 # land inside one second. Filtered to digits rather than trusted, because a `date`
@@ -1298,15 +1483,32 @@ seq=$(date +%s%N 2>/dev/null | tr -dc 0-9)
 # end has gone -- which outlives the forward, since devpod's own server creates it
 # and does not clean it up -- passes the `-S` guard above and then fails to
 # connect, so this is reachable in the ordinary course of a day.
-case "${1:-}" in
+case "$state" in
   release)
     "$BIN" pane release-agent "$HERDR_PANE_ID" --source devlaunch:claude >/dev/null 2>&1
     ;;
-  idle|working|blocked)
+  idle|working|blocked|start)
+    [ "$state" = start ] && report=idle || report="$state"
     "$BIN" pane report-agent "$HERDR_PANE_ID" --source devlaunch:claude \
-      --agent claude --state "$1" --seq "$seq" >/dev/null 2>&1
+      --agent claude --state "$report" --seq "$seq" >/dev/null 2>&1
     ;;
 esac
+
+# A session that has just started: tell herdr how to reopen it by its id, so a
+# restart after `/clear` or an in-agent `/resume` reopens this session and not
+# the one the pane was launched with. DEVLAUNCH_HERDR_RESUME is that line with
+# the id left off, words split on spaces (dl sends none holding one); the id is
+# taken only if it is nothing but letters, digits and dashes.
+[ "$state" = start ] || exit 0
+[ -n "${DEVLAUNCH_HERDR_RESUME:-}" ] || exit 0
+sid=$(printf '%s' "$input" | tr -d '\n' \
+  | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+case "$sid" in ''|*[!0-9A-Za-z-]*) exit 0 ;; esac
+set -f
+# shellcheck disable=SC2086 # the split is the point
+set -- $DEVLAUNCH_HERDR_RESUME "$sid"
+"$BIN" pane report-agent-session "$HERDR_PANE_ID" --source devlaunch:claude \
+  --agent claude --agent-session-id "$sid" --seq "$((seq + 1))" -- "$@" >/dev/null 2>&1
 exit 0
 "#;
 
