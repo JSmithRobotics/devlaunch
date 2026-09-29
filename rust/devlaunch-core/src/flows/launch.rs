@@ -9504,6 +9504,136 @@ mod tests {
         );
     }
 
+    /// A Scene whose pane has consented to container reporting and reaches the
+    /// manager's `Ready` arm, with `aid`'s resume line and its `by_id` handed over.
+    ///
+    /// The binary is a real file, because `prepare` measures it; the forward and
+    /// the probe are the fake's unscripted successes.
+    fn consenting_and_resuming(scene: Scene, line: &[&str], by_id: Option<&[&str]>) -> Scene {
+        let words = |words: &[&str]| words.iter().map(|word| (*word).to_owned()).collect();
+        let mut scene = reporting_in_a_pane(scene);
+        let binary = scene.dir.path().join("herdr");
+        std::fs::write(&binary, "herdr").expect("a herdr binary");
+        scene.host.herdr.binary = Some(binary.display().to_string());
+        scene.host.agent_resume = herdr::AgentResume::new(words(line), by_id.map(words));
+        scene
+    }
+
+    /// The OpenSSH session: the one ssh call that carries the pane's coordinates.
+    fn coordinated_ssh(scene: &Scene) -> crate::runner::Invocation {
+        let pane = format!("SendEnv={}", herdr::PANE_VAR);
+        let sessions: Vec<_> = scene
+            .runner
+            .calls_to("ssh")
+            .into_iter()
+            .map(|call| call.invocation().clone())
+            .filter(|invocation| invocation.args.contains(&pane))
+            .collect();
+        assert_eq!(sessions.len(), 1, "{sessions:?}");
+        sessions.into_iter().next().expect("one session")
+    }
+
+    /// The devpod session: `devpod ssh` with the pane's coordinates set.
+    fn coordinated_devpod(scene: &Scene) -> Vec<String> {
+        let pane = format!("{}=w1:p3", herdr::PANE_VAR);
+        let sessions: Vec<Vec<String>> = scene
+            .runner
+            .args_to("devpod")
+            .into_iter()
+            .filter(|args| args.first().is_some_and(|verb| verb == "ssh") && args.contains(&pane))
+            .collect();
+        assert_eq!(sessions.len(), 1, "{sessions:?}");
+        sessions.into_iter().next().expect("one session")
+    }
+
+    /// The wiring behind a restart after `/clear`: the hook's line reaches the
+    /// container beside the other coordinates, on both transports, without the id.
+    #[test]
+    fn a_consented_pane_hands_the_container_the_line_to_resume_by_id() {
+        let prefix = "dl myws -- IS_SANDBOX=1 claude --resume";
+        let line = ["IS_SANDBOX=1", "claude", "--resume", "u-1"];
+        let by_id: &[&str] = &["IS_SANDBOX=1", "claude", "--resume"];
+        let command = RemoteCommand::argv(&["claude", "--session-id", "u-1"]);
+
+        let scene = consenting_and_resuming(
+            Scene::new().on_a_terminal(&["myws"]).with_running("myws"),
+            &line,
+            Some(by_id),
+        );
+        let (_, notices, _) = a_session(&scene, Some(&command));
+        assert!(
+            notices
+                .iter()
+                .any(|notice| matches!(notice, LaunchNotice::SessionManagerReady { .. })),
+            "{notices:?}"
+        );
+        let ssh = coordinated_ssh(&scene);
+        assert!(
+            ssh.args
+                .contains(&format!("SendEnv={}", herdr::RESUME_PREFIX_VAR)),
+            "{ssh:?}"
+        );
+        assert_eq!(
+            ssh.env
+                .entries
+                .get(herdr::RESUME_PREFIX_VAR)
+                .map(String::as_str),
+            Some(prefix)
+        );
+
+        let mut scene = consenting_and_resuming(
+            Scene::new().on_a_terminal(&["myws"]).with_running("myws"),
+            &line,
+            Some(by_id),
+        );
+        scene.host.stdout_tty = false;
+        let _ = a_session(&scene, Some(&command));
+        let devpod = coordinated_devpod(&scene);
+        let at = devpod
+            .iter()
+            .position(|arg| *arg == format!("{}={prefix}", herdr::RESUME_PREFIX_VAR))
+            .unwrap_or_else(|| panic!("no resume line: {devpod:?}"));
+        assert_eq!(devpod[at - 1], "--set-env");
+    }
+
+    /// A line that cannot be reopened by id (codex, gemini, `--continue`) gives the
+    /// hook nothing, rather than a prefix it would complete wrongly.
+    #[test]
+    fn a_consented_pane_with_no_line_by_id_hands_the_container_none() {
+        let command = RemoteCommand::argv(&["codex"]);
+        let line = ["codex", "resume", "--last"];
+
+        let scene = consenting_and_resuming(
+            Scene::new().on_a_terminal(&["myws"]).with_running("myws"),
+            &line,
+            None,
+        );
+        let _ = a_session(&scene, Some(&command));
+        let ssh = coordinated_ssh(&scene);
+        assert!(
+            !ssh.args
+                .iter()
+                .any(|arg| arg.contains(herdr::RESUME_PREFIX_VAR)),
+            "{ssh:?}"
+        );
+        assert_eq!(ssh.env.entries.get(herdr::RESUME_PREFIX_VAR), None);
+
+        let mut scene = consenting_and_resuming(
+            Scene::new().on_a_terminal(&["myws"]).with_running("myws"),
+            &line,
+            None,
+        );
+        scene.host.stdout_tty = false;
+        let _ = a_session(&scene, Some(&command));
+        let devpod = coordinated_devpod(&scene);
+        assert!(
+            !devpod
+                .iter()
+                .any(|arg| arg.contains(herdr::RESUME_PREFIX_VAR)),
+            "{devpod:?}"
+        );
+    }
+
     #[test]
     fn the_profile_label_is_reported_even_when_the_manager_cannot_be_reached() {
         // The stale-label clear used to sit in `begin_reporting`'s `Ready` arm, which
