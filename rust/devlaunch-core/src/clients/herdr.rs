@@ -1702,8 +1702,14 @@ pub struct AgentResume {
 
 impl AgentResume {
     /// The line that reopens this session, and the line an id completes.
-    pub fn new(line: NonEmpty<String>, by_id: Option<NonEmpty<String>>) -> Self {
-        Self { line, by_id }
+    ///
+    /// `None` for an empty line, which reopens nothing: `dl <ws> --` with nothing
+    /// after it is a plain attach. An empty `by_id` is no `by_id`.
+    pub fn new(line: Vec<String>, by_id: Option<Vec<String>>) -> Option<Self> {
+        Some(Self {
+            line: NonEmpty::of(line)?,
+            by_id: by_id.and_then(NonEmpty::of),
+        })
     }
 }
 
@@ -1939,12 +1945,25 @@ use crate::domain::workspace_state::NonEmpty;
 mod resume_tests {
     use super::*;
 
-    fn words(line: &[&str]) -> NonEmpty<String> {
-        NonEmpty::of(line.iter().map(|word| (*word).to_owned())).expect("a line")
+    fn words(line: &[&str]) -> Vec<String> {
+        line.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    fn resume_of(line: Vec<String>, by_id: Option<Vec<String>>) -> AgentResume {
+        AgentResume::new(line, by_id).expect("a line")
+    }
+
+    #[test]
+    fn an_empty_line_reopens_nothing() {
+        assert_eq!(AgentResume::new(Vec::new(), None), None);
+        assert_eq!(
+            AgentResume::new(words(&["claude"]), Some(Vec::new())),
+            AgentResume::new(words(&["claude"]), None)
+        );
     }
 
     fn claude_resume() -> AgentResume {
-        AgentResume::new(
+        resume_of(
             words(&["IS_SANDBOX=1", "claude", "--resume", "u-1"]),
             Some(words(&["IS_SANDBOX=1", "claude", "--resume"])),
         )
@@ -1982,17 +2001,17 @@ mod resume_tests {
     /// Each of herdr's four rules, broken once.
     #[test]
     fn a_line_herdr_would_refuse_is_not_offered() {
-        let apostrophe = AgentResume::new(words(&["claude", "it's"]), None);
+        let apostrophe = resume_of(words(&["claude", "it's"]), None);
         assert_eq!(apostrophe.argv("ws", None), None);
 
         // `dl ws --` is three of the 64.
-        let long = AgentResume::new(words(&vec!["x"; 62]), None);
+        let long = resume_of(words(&vec!["x"; 62]), None);
         assert_eq!(long.argv("ws", None).map(|argv| argv.len()), None);
-        let fits = AgentResume::new(words(&vec!["x"; 61]), None);
+        let fits = resume_of(words(&vec!["x"; 61]), None);
         assert_eq!(fits.argv("ws", None).map(|argv| argv.len()), Some(64));
 
         let big = "y".repeat(RESUME_MAX_BYTES);
-        let heavy = AgentResume::new(words(&["claude", &big]), None);
+        let heavy = resume_of(words(&["claude", &big]), None);
         assert_eq!(heavy.argv("ws", None), None);
 
         assert!(!herdr_accepts(&["/usr/bin/dl".to_owned()]));
@@ -2005,14 +2024,14 @@ mod resume_tests {
             claude_resume().hook_prefix("ws-id", None).as_deref(),
             Some("dl ws-id -- IS_SANDBOX=1 claude --resume")
         );
-        let no_hook = AgentResume::new(words(&["codex", "resume", "--last"]), None);
+        let no_hook = resume_of(words(&["codex", "resume", "--last"]), None);
         assert_eq!(no_hook.hook_prefix("ws-id", None), None);
     }
 
     /// The hook splits on spaces, so a word holding one would arrive as two.
     #[test]
     fn a_line_the_hook_cannot_split_is_not_sent_to_it() {
-        let spaced = AgentResume::new(
+        let spaced = resume_of(
             words(&["claude", "--resume", "u"]),
             Some(words(&["claude", "--name", "a b", "--resume"])),
         );

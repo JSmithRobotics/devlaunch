@@ -1095,7 +1095,10 @@ pub(crate) fn build_launch(
                 .iter()
                 .any(|(name, it)| name == agent && it.session_id.is_some())
         });
-        Some(dl::AgentResume::new(line, by_id))
+        dl::AgentResume::new(
+            line.iter().cloned().collect(),
+            by_id.map(|by_id| by_id.iter().cloned().collect()),
+        )
     });
     args.push("--".to_owned());
     args.extend(command.iter().cloned());
@@ -2628,8 +2631,8 @@ mod tests {
 
     const SESSION: &str = "0f3c9a4e-8d1b-4c2a-9e7f-5b6a1d2c3e4f";
 
-    fn line(words: &[&str]) -> NonEmpty<String> {
-        NonEmpty::of(words.iter().map(|word| (*word).to_owned())).expect("a line")
+    fn line(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
     }
 
     const CLAUDE: &[&str] = &[
@@ -2661,10 +2664,10 @@ mod tests {
         );
         assert_eq!(
             launch.resume,
-            Some(dl::AgentResume::new(
+            dl::AgentResume::new(
                 line(&with(CLAUDE, &["--resume", SESSION])),
                 Some(line(&with(CLAUDE, &["--resume"]))),
-            ))
+            )
         );
     }
 
@@ -2682,10 +2685,10 @@ mod tests {
         );
         assert_eq!(
             launch.resume,
-            Some(dl::AgentResume::new(
+            dl::AgentResume::new(
                 line(&with(CLAUDE, &["--continue"])),
                 Some(line(&with(CLAUDE, &["--resume"]))),
-            ))
+            )
         );
     }
 
@@ -2697,10 +2700,10 @@ mod tests {
         assert!(!launch.dl_args.iter().any(|word| word == "--session-id"));
         assert_eq!(
             launch.resume,
-            Some(dl::AgentResume::new(
+            dl::AgentResume::new(
                 line(&with(CLAUDE, &["--continue"])),
                 Some(line(&with(CLAUDE, &["--resume"]))),
-            ))
+            )
         );
     }
 
@@ -2725,7 +2728,7 @@ mod tests {
             assert!(!launch.dl_args.iter().any(|word| word == SESSION), "{flag}");
             assert_eq!(
                 launch.resume,
-                Some(dl::AgentResume::new(line(expected), None)),
+                dl::AgentResume::new(line(expected), None),
                 "{flag}"
             );
         }

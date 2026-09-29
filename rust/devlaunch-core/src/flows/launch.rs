@@ -9302,10 +9302,8 @@ mod tests {
             ..crate::clients::herdr::HostEnv::default()
         };
         scene.host.herdr_bin = Some("/opt/herdr/bin/herdr".to_owned());
-        scene.host.agent_resume = Some(herdr::AgentResume::new(
-            NonEmpty::of(line.iter().map(|word| (*word).to_owned())).expect("a line"),
-            None,
-        ));
+        scene.host.agent_resume =
+            herdr::AgentResume::new(line.iter().map(|word| (*word).to_owned()).collect(), None);
         scene
     }
 
