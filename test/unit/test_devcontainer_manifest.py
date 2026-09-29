@@ -959,6 +959,50 @@ def test_the_agent_socket_is_bound_from_the_path_the_host_hook_maintains(devcont
     )
 
 
+def test_the_agent_socket_has_a_directory_no_other_mount_lands_in(devcontainer, mounts):
+    """Nothing may be mounted beside the agent socket, because devpod chowns its whole directory.
+
+    devpod's `SetupContainer` hands the agent socket to the container user by
+    walking ``filepath.Dir(SSH_AUTH_SOCK)`` recursively and ``lchown``ing every
+    entry (``ChownAgentSock``, ``pkg/devcontainer/setup``). It is the *directory*
+    that is walked, not the socket, so any mount that happens to share it is
+    chowned too -- and a read-only one cannot be, which fails the create rather
+    than the mount:
+
+        chown ssh agent sock file: lchown /home/vscode/.ssh/known_hosts:
+        read-only file system
+
+    That is what this repo shipped: the socket sat directly in ``~/.ssh``,
+    beside the read-only ``known_hosts`` bind, so devpod's own setup step could
+    not finish. Moving the socket into a directory of its own bounds the walk to
+    one file and fixes it, but only for as long as the directory *stays* empty,
+    which nothing about the manifest makes self-evident -- a later mount added
+    under it would reintroduce the failure, and the error names a chown rather
+    than the mount that caused it.
+
+    So the invariant is held here rather than left to be rediscovered: the
+    socket's parent directory is the socket's alone. A read-only mount anywhere
+    else under ``~/.ssh`` is fine and deliberately not restricted.
+    """
+    agent_socket = devcontainer["containerEnv"]["SSH_AUTH_SOCK"]
+    socket_dir = agent_socket.rsplit("/", 1)[0]
+    assert socket_dir != CONTAINER_SSH_DIR, (
+        f"the agent socket is at {agent_socket}, directly in {CONTAINER_SSH_DIR}, so "
+        f"devpod's recursive chown of its directory covers every other mount there -- "
+        f"including the read-only known_hosts bind, which fails the create"
+    )
+    trespassers = {
+        mount["target"]
+        for mount in mounts
+        if mount.get("target", "").startswith(f"{socket_dir}/") and mount["target"] != agent_socket
+    }
+    assert not trespassers, (
+        f"{trespassers} share {socket_dir} with the agent socket, and devpod chowns "
+        f"that whole directory to the container user; a read-only one among them fails "
+        f"the create. Mount them elsewhere under {CONTAINER_SSH_DIR}"
+    )
+
+
 def test_the_host_hook_heals_the_socket_it_is_mounted_from(devcontainer, mounts):
     """The heal list names the path the manifest actually binds.
 
