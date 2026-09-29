@@ -104,5 +104,36 @@ for topic in "${TOPICS[@]}"; do
     fi
 done
 
+# --- fixups -----------------------------------------------------------------
+# Reconciliations between topics that are each correct alone and clash only once
+# merged. Expressed as patches rather than as a branch because the merge is
+# rebuilt with fresh SHAs every time, so anything anchored to its history goes
+# stale immediately; a patch is anchored to content and survives. See
+# integration-fixups/README.md, including the rule that every patch here is a
+# failure to be removed rather than a place to put things.
+fixups_dir="$(git rev-parse --show-toplevel)/integration-fixups"
+if [ -d "$fixups_dir" ]; then
+    for patch in "$fixups_dir"/*.patch; do
+        [ -e "$patch" ] || continue
+        say "applying fixup $(basename "$patch")"
+        if ! git -C "$work" apply --index "$patch"; then
+            echo >&2
+            echo "FIXUP FAILED: $(basename "$patch") no longer applies." >&2
+            echo "That usually means a topic changed underneath it. Re-derive it" >&2
+            echo "against the new merge and replace the file; do not guess at a" >&2
+            echo "three-way merge of a reconciliation nobody reviewed." >&2
+            trap - EXIT
+            exit 1
+        fi
+    done
+    if ! git -C "$work" diff --cached --quiet; then
+        git -C "$work" commit --quiet -m "chore: integration fixups
+
+Applied by scripts/rebuild-integration.sh from integration-fixups/. Each one
+reconciles topics that are correct alone and clash only once merged; see that
+directory's README for why they are patches and not a branch."
+    fi
+fi
+
 say "$INTEGRATION rebuilt: $(git rev-parse --short "$INTEGRATION")"
 git -C "$work" log --oneline "$UPSTREAM..$INTEGRATION" | sed 's/^/    /'
