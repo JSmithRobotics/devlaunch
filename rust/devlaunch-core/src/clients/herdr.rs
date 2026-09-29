@@ -1834,7 +1834,7 @@ const RESUME_MAX_BYTES: usize = 8192;
 pub(crate) const RESUME_PREFIX_VAR: &str = "DEVLAUNCH_HERDR_RESUME";
 
 /// Whether herdr will take this argv: a plain command name first, no apostrophe
-/// anywhere, at most 64 words and 8192 bytes.
+/// anywhere, at most 64 words and 8192 bytes (the words alone, no separators).
 ///
 /// Checked here because herdr's refusal is a round trip that says nothing useful
 /// to anyone, and a line herdr would refuse is one to skip rather than retry.
@@ -1842,7 +1842,7 @@ fn herdr_accepts(argv: &[String]) -> bool {
     let Some(program) = argv.first() else {
         return false;
     };
-    let bytes: usize = argv.iter().map(|word| word.len() + 1).sum();
+    let bytes: usize = argv.iter().map(String::len).sum();
     !program.is_empty()
         && !program.contains('/')
         && !program.starts_with('-')
@@ -2136,6 +2136,49 @@ mod resume_tests {
 
         assert!(!herdr_accepts(&["/usr/bin/dl".to_owned()]));
         assert!(!herdr_accepts(&[]));
+    }
+
+    /// herdr sums the words' own bytes: no separator is counted between them.
+    #[test]
+    fn the_byte_limit_counts_the_words_alone() {
+        let head: usize = ["dl", "ws", "--", "claude"].iter().map(|w| w.len()).sum();
+        let at_limit = "y".repeat(RESUME_MAX_BYTES - head);
+        let fits = resume_of(words(&["claude", &at_limit]), None);
+        assert!(fits.argv("ws", None).is_some(), "exactly the limit");
+
+        let over = format!("{at_limit}y");
+        let heavy = resume_of(words(&["claude", &over]), None);
+        assert_eq!(heavy.argv("ws", None), None, "one byte over");
+    }
+
+    /// A `by_id` line that fits alone can still be pushed over by the id.
+    #[test]
+    fn the_hook_is_not_given_a_line_the_id_would_push_over() {
+        const UUID: usize = 36;
+        let head: usize = ["dl", "ws", "--", "claude", "--resume"]
+            .iter()
+            .map(|w| w.len())
+            .sum();
+        let with_id = |pad: &str| {
+            resume_of(
+                words(&["claude", pad, "--resume", "u"]),
+                Some(words(&["claude", pad, "--resume"])),
+            )
+        };
+
+        let room = "y".repeat(RESUME_MAX_BYTES - head - UUID);
+        assert!(
+            with_id(&room).hook_prefix("ws", None).is_some(),
+            "the id lands exactly on the limit"
+        );
+
+        let crowded = format!("{room}y");
+        assert!(herdr_accepts(&restore_line(
+            "ws",
+            None,
+            words(&["claude", &crowded, "--resume"]).iter()
+        )));
+        assert_eq!(with_id(&crowded).hook_prefix("ws", None), None);
     }
 
     #[test]
