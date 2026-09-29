@@ -385,7 +385,7 @@ pub(crate) enum RemoteControlRequest {
 /// than by anything downstream re-checking.
 ///
 /// No session name is carried, because the name is not a second thing to decide: it
-/// is always the id of the workspace the spec names, which [`build_dl_args`] asks
+/// is always the id of the workspace the spec names, which [`build_launch`] asks
 /// for when it builds the line, and a field holding it beside the spec would be two
 /// fields that must agree and so two fields that can disagree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -924,7 +924,8 @@ enum Opening<'a> {
     Restore(Option<&'a str>),
 }
 
-/// The one builder behind [`build_agent_command`] and [`build_resume_command`].
+/// The one builder behind [`build_agent_command`], [`build_resume_command`] and
+/// [`build_launch`].
 fn agent_line(
     agent: &str,
     opening: Opening<'_>,
@@ -983,7 +984,26 @@ fn agent_line(
     NonEmpty::of(line)
 }
 
-/// The dl command line that does the work.
+/// [`build_launch`]'s command line alone, for a session aid names no id for.
+#[cfg(test)]
+pub(crate) fn build_dl_args(
+    parsed: &AidArgs,
+    workspace_id_of: &dyn Fn(&str) -> Option<String>,
+) -> Option<Vec<String>> {
+    build_launch(parsed, workspace_id_of, None).map(|launch| launch.dl_args)
+}
+
+/// What aid hands dl: the command line, and how the agent it starts is started
+/// again after herdr restarts.
+#[derive(Debug)]
+pub(crate) struct Launch {
+    pub(crate) dl_args: Vec<String>,
+    /// `None` for a line that starts no agent, and for one whose workspace goes
+    /// when the session does (`--rm`): there is nothing to come back to.
+    pub(crate) resume: Option<dl::AgentResume>,
+}
+
+/// The dl command line that does the work, as [`Launch::dl_args`].
 ///
 /// `[<dl options>…, <spec>, "--", <agent argv>…]` — the agent's command and each of
 /// its arguments as their own word, which is the shape `dl` reads: it quotes the tail
@@ -1004,27 +1024,9 @@ fn agent_line(
 /// function rather than the answer, because the answer costs a `devpod status` for
 /// a triple and a line with Remote Control off has no use for it; `main` hands in
 /// [`dl::workspace_id_of`], and a test hands in a table.
-/// [`build_launch`]'s command line alone, for a session aid names no id for.
-#[cfg(test)]
-pub(crate) fn build_dl_args(
-    parsed: &AidArgs,
-    workspace_id_of: &dyn Fn(&str) -> Option<String>,
-) -> Option<Vec<String>> {
-    build_launch(parsed, workspace_id_of, None).map(|launch| launch.dl_args)
-}
-
-/// What aid hands dl: the command line, and how the agent it starts is started
-/// again after herdr restarts.
-#[derive(Debug)]
-pub(crate) struct Launch {
-    pub(crate) dl_args: Vec<String>,
-    /// `None` for a line that starts no agent, and for one whose workspace goes
-    /// when the session does (`--rm`): there is nothing to come back to.
-    pub(crate) resume: Option<dl::AgentResume>,
-}
-
-/// [`build_dl_args`]'s line, with the fresh session named `session` when the
-/// agent takes a name of aid's choosing, and the line that reopens it.
+///
+/// The fresh session is named `session` when the agent takes a name of aid's
+/// choosing, and beside the line goes the one that reopens it.
 ///
 /// The reopening line is the agent's own line with no prompt, so a restore does
 /// not send the prompt again, and with the session's id or the agent's "most
