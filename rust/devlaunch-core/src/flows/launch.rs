@@ -9370,6 +9370,140 @@ mod tests {
         assert_eq!(resume_reports(&scene), Vec::<Vec<String>>::new());
     }
 
+    /// The scene's fake, holding the session open until herdr has had `reports`
+    /// resume reports, and answering the first one `resume_not_accepted`.
+    ///
+    /// The session is what stops the report beside it, so a session that ended at
+    /// once would never let the report reach its second try.
+    use crate::runner::{CapturedText, DetachOutcome, Invocation, Outcome, SpawnSpec};
+
+    struct OpenUntilReported<'a> {
+        fake: &'a FakeRunner,
+        reports: usize,
+        seen: Mutex<usize>,
+        signal: std::sync::Condvar,
+    }
+
+    impl<'a> OpenUntilReported<'a> {
+        const HERDR: &'static str = "/opt/herdr/bin/herdr";
+
+        fn new(fake: &'a FakeRunner, reports: usize) -> Self {
+            fake.script(
+                [Self::HERDR, "pane", "report-agent-session"],
+                Response::failed(
+                    1,
+                    r#"{"error":{"code":"resume_not_accepted","message":"report its state first"}}"#,
+                ),
+            );
+            Self {
+                fake,
+                reports,
+                seen: Mutex::new(0),
+                signal: std::sync::Condvar::new(),
+            }
+        }
+
+        /// Hold a session until the reports are in, or give up after five seconds.
+        fn hold(&self, spec: &SpawnSpec) {
+            if spec.program() == Self::HERDR {
+                return;
+            }
+            let seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+            let _ = self
+                .signal
+                .wait_timeout_while(seen, Duration::from_secs(5), |seen| *seen < self.reports)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    impl Runner for OpenUntilReported<'_> {
+        fn capture(&self, spec: &SpawnSpec) -> Outcome<CapturedText> {
+            let outcome = self.fake.capture(spec);
+            if spec.program() == Self::HERDR
+                && spec.args().get(1).map(String::as_str) == Some("report-agent-session")
+            {
+                let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+                *seen += 1;
+                // herdr has seen the agent by the second try: unscripted is exit 0.
+                self.fake.clear_scripts();
+                self.signal.notify_all();
+            }
+            outcome
+        }
+
+        fn passthrough(&self, spec: &SpawnSpec) -> Outcome {
+            self.hold(spec);
+            self.fake.passthrough(spec)
+        }
+
+        fn session(&self, spec: &SpawnSpec, on_stderr_line: &mut dyn FnMut(&str)) -> Outcome {
+            self.hold(spec);
+            self.fake.session(spec, on_stderr_line)
+        }
+
+        fn watched(&self, spec: &SpawnSpec, on_line: &mut dyn FnMut(&str)) -> Outcome {
+            self.fake.watched(spec, on_line)
+        }
+
+        fn detach(&self, what: &Invocation) -> DetachOutcome {
+            self.fake.detach(what)
+        }
+    }
+
+    /// herdr refuses a report until it has seen the agent, which it sees by reading
+    /// the session the report runs beside: so the report goes again a tick later,
+    /// numbered after the first, and stops once the saved session holds it.
+    #[test]
+    fn a_resume_report_herdr_is_not_ready_for_is_sent_again_while_the_session_runs() {
+        let mut scene = in_a_pane_resuming(
+            Scene::new().on_a_terminal(&["myws"]).with_running("myws"),
+            &["claude", "--resume", "u-1"],
+        );
+        scene.host.herdr.socket = Some(scene.dir.path().join("herdr.sock").display().to_string());
+        std::fs::write(
+            scene.dir.path().join("session.json"),
+            r#"{"workspaces":[{"id":"w1","public_pane_numbers":{"7":3},"tabs":[{"panes":{"7":{"cwd":"/","agent_resume":{"source":"devlaunch:claude","agent":"claude","argv":["dl","myws","--","claude","--resume","u-1"]}}}}]}]}"#,
+        )
+        .expect("a saved session");
+        let runner = OpenUntilReported::new(&scene.runner, 2);
+
+        let token = HostToken::new();
+        let claude_seen = ClaudeSeen::new();
+        let context = SessionContext::new(&runner, &scene.host, &token, &claude_seen);
+        let _ = workspace_ssh(
+            &context,
+            "myws",
+            Some(&RemoteCommand::argv(&[
+                "claude",
+                "--session-id",
+                "u-1",
+                "hi",
+            ])),
+            None,
+            &mut |_| {},
+            &mut no_notices(),
+        );
+
+        let reports = resume_reports(&scene);
+        let seqs: Vec<u128> = reports
+            .iter()
+            .map(|report| {
+                let at = report
+                    .iter()
+                    .position(|word| word == "--seq")
+                    .expect("a seq")
+                    + 1;
+                report[at].parse().expect("a number")
+            })
+            .collect();
+        // Refused, then sent again: the session held open for exactly that.
+        assert_eq!(seqs.len(), 2, "{reports:?}");
+        assert!(
+            seqs[0] < seqs[1],
+            "herdr drops a report older than the last: {seqs:?}"
+        );
+    }
+
     #[test]
     fn the_profile_label_is_reported_even_when_the_manager_cannot_be_reached() {
         // The stale-label clear used to sit in `begin_reporting`'s `Ready` arm, which

@@ -1400,6 +1400,24 @@ mod tests {
         assert_eq!(reports(&runner).len(), 3);
     }
 
+    /// A herdr that did not answer in time is asked again, not given up on.
+    #[test]
+    fn a_report_herdr_did_not_answer_in_time_is_sent_again() {
+        let runner = ScriptedRunner::new().with_script(["herdr"], Response::TimedOut);
+        let ended = report_resume(
+            &runner,
+            &resume_report(),
+            &|| 1,
+            &|_| Some(saved(Some(HELD))),
+            &|_| {
+                runner.clear_scripts().script(["herdr"], Response::ok());
+                true
+            },
+        );
+        assert_eq!(ended, ResumeReported::Saved);
+        assert_eq!(reports(&runner).len(), 2);
+    }
+
     /// herdr answers 0 to a report it drops as stale, so the file is the check.
     #[test]
     fn a_report_herdr_took_and_never_saved_is_sent_again() {
