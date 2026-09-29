@@ -731,7 +731,8 @@ impl<'r> Git<'r> {
     ///
     /// Full refnames on both sides, `refs/heads/feature` and
     /// `refs/remotes/origin/feature`, so neither can be read as an option or be
-    /// ambiguous against a tag. A branch with no upstream carries `None`.
+    /// ambiguous against a tag. A branch with no upstream carries `None`, and so
+    /// does one whose upstream is another local branch (see [`RemoteRef`]).
     ///
     /// Asked only to choose which remote refs to compare an unpushed branch
     /// against (see [`Git::patches_already_on`]), never to decide what is
@@ -748,8 +749,8 @@ impl<'r> Git<'r> {
         .map(|stdout| local_branches_in(&stdout))
     }
 
-    /// The commits on *tip* that *other* does not contain but holds a copy of,
-    /// as full hashes.
+    /// The commits on *tip* that the remote ref *other* does not contain but
+    /// holds a copy of, as full hashes.
     ///
     /// A copy is a commit that makes the same change in the same place: put the
     /// local commit on the copy's parent and git gets the copy's tree. A rebase,
@@ -784,9 +785,9 @@ impl<'r> Git<'r> {
         &self,
         clone: &Path,
         tip: &str,
-        other: &str,
+        other: &RemoteRef,
     ) -> GitAnswer<Vec<String>> {
-        let range = format!("{tip}...{other}");
+        let range = format!("{tip}...{}", other.as_str());
         let copies_on = |side: &str| {
             self.about(
                 clone,
@@ -1849,12 +1850,40 @@ pub(crate) struct TagRef {
 pub(crate) struct LocalBranch {
     /// The full refname, `refs/heads/feature`, for [`TagRef::name`]'s reason.
     pub(crate) name: String,
-    /// The full refname of the upstream, `refs/remotes/origin/feature`.
+    /// The upstream, when it is a remote-tracking ref.
     ///
-    /// Not always a remote-tracking ref: `branch -u <local>`, `--track <local>`
-    /// and `branch.autoSetupMerge=always` all give a `refs/heads/` upstream, so a
-    /// caller that wants a remote checks the namespace itself.
-    pub(crate) upstream: Option<String>,
+    /// `branch -u <local>`, `--track <local>` and `branch.autoSetupMerge=always`
+    /// all give a `refs/heads/` upstream, and it reads as `None` here: a copy on
+    /// a local branch is one more local copy, and it must never clear the only
+    /// commit that holds a change.
+    pub(crate) upstream: Option<RemoteRef>,
+}
+
+/// A remote-tracking ref, `refs/remotes/origin/feature`.
+///
+/// Only a refname in `refs/remotes/` makes one, so a question that takes a
+/// `RemoteRef` cannot be asked about a local branch. The copy rule is the reason
+/// it exists: a copy it finds clears a commit, and only a copy on a remote may.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RemoteRef(String);
+
+impl RemoteRef {
+    /// *refname* as a remote ref, or `None` when it names anything else.
+    pub(crate) fn parse(refname: &str) -> Option<Self> {
+        refname
+            .strip_prefix(REFS_REMOTES)
+            .is_some_and(|rest| !rest.is_empty())
+            .then(|| Self(refname.to_owned()))
+    }
+
+    /// `refs/remotes/<remote>/<branch>`, as [`refs_remotes`] spells it.
+    pub(crate) fn of(remote: &str, branch: &str) -> Self {
+        Self(refs_remotes(remote, branch))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// The branches in [`Git::branches_with_upstreams`] output, one per
@@ -1866,7 +1895,7 @@ fn local_branches_in(output: &str) -> Vec<LocalBranch> {
         .filter(|(name, _)| name.starts_with(REFS_HEADS))
         .map(|(name, upstream)| LocalBranch {
             name: name.to_owned(),
-            upstream: (!upstream.is_empty()).then(|| upstream.to_owned()),
+            upstream: RemoteRef::parse(upstream),
         })
         .collect()
 }

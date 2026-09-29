@@ -71,9 +71,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::clients::git::{
-    Git, GitAnswer, LocalBranch, REFS_HEADS, REFS_REMOTES, TagRef, refs_remotes,
-};
+use crate::clients::git::{Git, GitAnswer, LocalBranch, REFS_HEADS, RemoteRef, TagRef};
 
 /// The bare cache a clone was made from, when there is one to consult.
 ///
@@ -670,7 +668,7 @@ fn already_on_a_remote(git: &Git<'_>, clone: &Path, local_tags: &[String]) -> Ve
         .branches_with_upstreams(clone)
         .said()
         .unwrap_or_default();
-    let upstreams: Vec<&String> = branches
+    let upstreams: Vec<&RemoteRef> = branches
         .iter()
         .filter_map(|branch| branch.upstream.as_ref())
         .collect();
@@ -696,21 +694,22 @@ fn already_on_a_remote(git: &Git<'_>, clone: &Path, local_tags: &[String]) -> Ve
 /// `origin` by name, as [`Git::fetch_origin`] names it. A ref the clone has not
 /// got is still listed: git refuses the comparison, and a refusal adds nothing.
 ///
-/// **Only `refs/remotes/` is ever listed.** An upstream can be a local branch
+/// **Only a [`RemoteRef`] is ever listed.** An upstream can be a local branch
 /// (`branch -u feature other`), and a copy there is one more local copy: comparing
-/// with it would clear the only commit that holds the change.
-fn remote_refs_to_compare(branch: &LocalBranch, upstreams: &[&String]) -> Vec<String> {
+/// with it would clear the only commit that holds the change. The type is what
+/// keeps it out, since [`LocalBranch::upstream`] never holds a local one.
+fn remote_refs_to_compare(branch: &LocalBranch, upstreams: &[&RemoteRef]) -> Vec<RemoteRef> {
     let short = branch.name.strip_prefix(REFS_HEADS).unwrap_or(&branch.name);
     let candidates = branch
         .upstream
         .iter()
         .cloned()
-        .chain([refs_remotes("origin", short)])
+        .chain([RemoteRef::of("origin", short)])
         .chain(upstreams.iter().map(|upstream| (*upstream).clone()))
-        .chain([refs_remotes("origin", "HEAD")]);
-    let mut refs: Vec<String> = Vec::new();
+        .chain([RemoteRef::of("origin", "HEAD")]);
+    let mut refs: Vec<RemoteRef> = Vec::new();
     for candidate in candidates {
-        if candidate.starts_with(REFS_REMOTES) && !refs.contains(&candidate) {
+        if !refs.contains(&candidate) {
             refs.push(candidate);
         }
     }

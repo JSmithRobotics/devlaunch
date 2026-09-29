@@ -1392,7 +1392,7 @@ fn a_patch_match_is_a_copy_only_when_git_replays_it_as_the_copy() {
             .patches_already_on(
                 dir.path(),
                 "refs/heads/feature",
-                "refs/remotes/origin/feature"
+                &RemoteRef::of("origin", "feature")
             )
             .said(),
         Some(vec![LOCAL.to_owned()])
@@ -1454,7 +1454,7 @@ fn a_patch_match_is_a_copy_only_when_git_replays_it_as_the_copy() {
                 .patches_already_on(
                     dir.path(),
                     "refs/heads/feature",
-                    "refs/remotes/origin/feature"
+                    &RemoteRef::of("origin", "feature")
                 )
                 .said(),
             Some(vec![]),
@@ -1573,15 +1573,30 @@ fn a_branch_with_an_empty_upstream_field_tracks_nothing() {
             },
             LocalBranch {
                 name: "refs/heads/feature".to_owned(),
-                upstream: Some("refs/remotes/origin/feature".to_owned()),
+                upstream: RemoteRef::parse("refs/remotes/origin/feature"),
             },
             LocalBranch {
                 name: "refs/heads/other".to_owned(),
-                upstream: Some("refs/heads/feature".to_owned()),
+                upstream: None,
             },
         ],
-        "a local upstream is reported as it is; the copy rule refuses to compare with it"
+        "a local upstream is no remote, and a copy on it is one more local copy"
     );
+}
+
+#[test]
+fn only_a_remote_tracking_refname_is_a_remote_ref() {
+    assert_eq!(
+        RemoteRef::parse("refs/remotes/origin/feature").map(|remote| remote.as_str().to_owned()),
+        Some("refs/remotes/origin/feature".to_owned())
+    );
+    assert_eq!(
+        RemoteRef::of("origin", "HEAD").as_str(),
+        "refs/remotes/origin/HEAD"
+    );
+    for not_one in ["refs/heads/feature", "origin/feature", "refs/remotes/", ""] {
+        assert_eq!(RemoteRef::parse(not_one), None, "{not_one:?}");
+    }
 }
 
 // ------------------------------------------------------- the pointer sniff
