@@ -10517,6 +10517,7 @@ mod tests {
             },
             &mount,
             true,
+            &HostProcView::Absent,
             &[],
         );
 
