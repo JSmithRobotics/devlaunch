@@ -1881,13 +1881,18 @@ fn cherry_marked_in(output: &str) -> Vec<String> {
 /// function context goes with them, because it is read from outside the hunk.
 /// Trailing newlines go too, because [`Git::about`] trims them off the last
 /// commit's patch alone.
+///
+/// A commit with an empty patch is left out. It holds a message and nothing
+/// else, so every other empty commit replays as it, and the message may be the
+/// one record of something.
 fn patches_in(output: &str) -> Vec<(String, String)> {
     output
         .split('\0')
         .filter_map(|entry| {
             let (hash, patch) = entry.split_once('\n').unwrap_or((entry, ""));
             let hash = hash.trim();
-            (!hash.is_empty()).then(|| (hash.to_owned(), normalized(patch)))
+            let patch = normalized(patch);
+            (!hash.is_empty() && !patch.is_empty()).then(|| (hash.to_owned(), patch))
         })
         .collect()
 }

@@ -585,6 +585,30 @@ fn the_same_edit_in_another_place_is_not_a_copy() {
 }
 
 #[test]
+fn an_empty_commit_is_never_a_copy() {
+    // Its message is all it holds, and any empty commit on the remote would
+    // otherwise replay as it.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    git_as_author(
+        &mate,
+        &["commit", "-q", "--allow-empty", "-m", "ci: retrigger"],
+    );
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git_as_author(
+        &clone,
+        &["commit", "-q", "--allow-empty", "-m", "the only record"],
+    );
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+    assert_eq!(cherry_marked(&clone, "feature...origin/feature").len(), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
 fn a_merged_parent_with_no_copy_is_still_unsaved() {
     // The merge adds nothing of its own, so it drops out, but the commit it
     // brought in is on no remote.
