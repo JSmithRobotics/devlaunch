@@ -515,11 +515,26 @@ fn a_merge_with_a_conflict_resolved_by_hand_is_still_unsaved() {
     git(&mate, &["push", "-q", "origin", "main"]);
     git(&clone, &["fetch", "-q", "origin"]);
     let conflicted = Command::new("git")
-        .args(["merge", "-q", "origin/main"])
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "merge",
+            "-q",
+            "origin/main",
+        ])
         .current_dir(&clone)
         .output()
         .expect("git is installed");
     assert!(!conflicted.status.success(), "the premise: a conflict");
+    // A merge that fails for any other reason, no identity on a CI runner say,
+    // fails the same way and leaves no merge in progress.
+    assert!(
+        clone.join(".git/MERGE_HEAD").exists(),
+        "the premise: a merge stopped on its conflict: {}",
+        String::from_utf8_lossy(&conflicted.stderr)
+    );
     write(&clone.join("README.md"), "resolved by hand\n");
     git(&clone, &["add", "README.md"]);
     git_as_author(&clone, &["commit", "-q", "--no-edit"]);
