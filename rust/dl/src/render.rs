@@ -2969,6 +2969,12 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             source.display()
         ),
 
+        // --- lxcfs
+        LaunchNotice::HostProcViewBound { entries } => format!(
+            "This host runs lxcfs, so the container reads its own memory and CPU limits from \
+             /proc rather than the machine's ({entries} entries bound read-only)."
+        ),
+
         // --- the launch lock (locks.py:89's bare `print`, and dl.py 3727/3744)
         LaunchNotice::WaitingForSiblingLaunch { workspace_id } => {
             format!("dl: waiting for another launch of {workspace_id}")
