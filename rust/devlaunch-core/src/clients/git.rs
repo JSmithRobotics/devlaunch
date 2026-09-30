@@ -1023,7 +1023,7 @@ impl<'r> Git<'r> {
         let [point_tree, base_tree, other_tree] = trees.lines().collect::<Vec<_>>()[..] else {
             return GitAnswer::Said(false);
         };
-        if point_tree == base_tree || other_tree == base_tree || other_tree.is_empty() {
+        if point_tree == base_tree || other_tree == base_tree {
             return GitAnswer::Said(false);
         }
         let base = format!("--merge-base={base}");
@@ -1064,8 +1064,11 @@ impl<'r> Git<'r> {
     /// detached HEAD, and any other ref [`Git::unpushed_commits`] counts from.
     ///
     /// What the squash rule may not clear: it vouches for branches, and only
-    /// for the ones that pass. `--glob=*` is every ref under `refs/`, without
-    /// the HEADs `--all` adds, because a HEAD on a branch is that branch. The
+    /// for the ones that pass. `--glob=*` is every ref under `refs/` that
+    /// `--all` reads, the per-worktree ones of this worktree included, without
+    /// the HEADs `--all` adds, because a HEAD on a branch is that branch.
+    /// Neither reads a linked worktree's `refs/worktree/*` or `refs/bisect/*`,
+    /// so the count and this rule leave out the same refs. The
     /// detached HEADs come back by hash from the worktree listing. The tags
     /// are [`NOT_WORK`]'s, with the local ones named again, as the count names
     /// them.
