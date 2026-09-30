@@ -147,6 +147,15 @@ impl Editor {
         }
     }
 
+    /// Nothing followed an `ESC` within the gap a terminal leaves inside one
+    /// sequence, so it was the Esc key on its own. It is dropped, and the next
+    /// byte is read as a key of its own rather than as Alt with it.
+    pub(crate) fn escape_timed_out(&mut self) {
+        if self.parse == Parse::Escape {
+            self.parse = Parse::Ground;
+        }
+    }
+
     fn ground(&mut self, byte: u8, more_follows: bool, after_return: bool) -> Step {
         match byte {
             0x1b => self.parse = Parse::Escape,
@@ -367,7 +376,11 @@ pub fn read_prompt() -> Submission {
             break Step::Submit;
         };
         let more_follows = byte == b'\r' && stdin_readable_within(PASTE_GAP);
-        match editor.feed(byte, more_follows) {
+        let step = editor.feed(byte, more_follows);
+        if byte == 0x1b && !stdin_readable_within(PASTE_GAP) {
+            editor.escape_timed_out();
+        }
+        match step {
             // Drawn once the input so far is read, so a paste of a thousand lines
             // is one drawing and not a thousand.
             Step::Continue if !stdin_readable_within(Duration::ZERO) => {
@@ -555,6 +568,29 @@ mod tests {
         let (editor, ended) = typed(b"first\x1b\rsecond\nthird\r");
         assert_eq!(ended, Step::Submit);
         assert_eq!(editor.text(), "first\nsecond\nthird");
+    }
+
+    #[test]
+    fn a_lone_esc_is_dropped_and_the_next_key_is_read_afresh() {
+        let mut editor = Editor::default();
+        assert_eq!(editor.feed(0x1b, false), Step::Continue);
+        editor.escape_timed_out();
+        assert_eq!(editor.feed(b'f', false), Step::Continue);
+        assert_eq!(editor.feed(b'\r', false), Step::Submit);
+        assert_eq!(editor.text(), "f");
+
+        let mut editor = Editor::default();
+        editor.feed(b'x', false);
+        editor.feed(0x1b, false);
+        editor.escape_timed_out();
+        assert_eq!(editor.feed(b'\r', false), Step::Submit);
+        assert_eq!(editor.text(), "x");
+
+        // The timeout only ends a bare ESC: Alt-Enter in one burst still adds a
+        // line.
+        let (editor, ended) = burst(b"a\x1b\rb");
+        assert_eq!(ended, Step::Continue);
+        assert_eq!(editor.text(), "a\nb");
     }
 
     #[test]

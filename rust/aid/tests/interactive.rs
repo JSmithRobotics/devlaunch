@@ -432,6 +432,24 @@ fn a_typed_prompt_reaches_the_agent_with_no_shell_in_the_way() {
 }
 
 #[test]
+fn a_lone_esc_at_the_editor_does_not_swallow_the_next_key() {
+    // The pickers teach that Esc cancels, so a person presses it here too. On its
+    // own, with a pause after it, it is not the Alt of the next key.
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.reach_the_editor();
+    session.press("\x1b");
+    std::thread::sleep(Duration::from_millis(100));
+    session.press("go");
+    std::thread::sleep(Duration::from_millis(100));
+    session.press("\r");
+    session.expect("aid -> dl");
+    assert_eq!(session.wait(), 0);
+    let last = world.devpod_calls().last().expect("a session").clone();
+    assert!(last.ends_with(" go'"), "{last}");
+}
+
+#[test]
 fn a_pasted_multi_line_prompt_arrives_whole_rather_than_leaking() {
     // A paste delivers its newlines with it, and the terminal holds the later
     // lines as completed input. The editor must drain them into the prompt: a
