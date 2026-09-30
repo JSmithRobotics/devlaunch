@@ -20,11 +20,15 @@
 //! argv (aid's one dependency is `dl`, and the one binary aid can find without
 //! guessing at PATH is itself). Its output goes to a log file and is replayed to
 //! stderr after the prompt is submitted, so the build's progress is seen — just
-//! not interleaved with the typing. The child is deliberately left in aid's
-//! process group: a terminal Ctrl-C mid-editing reaches both processes, and the
-//! child's own interrupt handler (the shared `dl::install_signal_handlers`
-//! disposition) kills its `devpod up` group and unlinks its staged token file,
-//! so abandoning the editor tears the whole boot down with no new machinery.
+//! not interleaved with the typing. The prompt editor and the pickers hold the
+//! terminal in raw mode, so a Ctrl-C there raises no signal: it is a byte aid
+//! reads, and aid answers it with `BootChild::cancel`, which sends the child a
+//! SIGINT of its own. The child's interrupt handler (the shared
+//! `dl::install_signal_handlers` disposition) then kills its `devpod up` group
+//! and unlinks its staged token file, so abandoning the editor tears the whole
+//! boot down. The child is still left in aid's process group, so a Ctrl-C typed
+//! outside raw mode, while the boot is waited on after the prompt is submitted,
+//! reaches both processes as an ordinary terminal SIGINT.
 //!
 //! Every failure in here is a fallback, never an ending: a boot that could not
 //! be spawned means the launch runs serially, exactly as it did before this
@@ -158,6 +162,15 @@ impl BootChild {
     }
 }
 
+/// How the interactive flow ended.
+pub(crate) enum Collected {
+    /// Launch this line, once the boot beside it, if any, has finished.
+    Launch(Box<AidArgs>, Option<BootChild>),
+    /// A picker was cancelled, or Ctrl-C was typed at the prompt editor. The
+    /// boot was stopped and nothing launches.
+    Cancelled,
+}
+
 /// The interactive default, as one decision: boot in the background and collect
 /// the prompt from the terminal, or hand the line back untouched.
 ///
@@ -171,14 +184,7 @@ impl BootChild {
 /// An empty submission — a bare Enter, or Ctrl-D — leaves the prompt empty,
 /// which is the agent's plain session: the old bare-`aid` behaviour is one
 /// keystroke away, not gone.
-/// How the interactive flow ended.
-pub(crate) enum Collected {
-    /// Launch this line, once the boot beside it, if any, has finished.
-    Launch(Box<AidArgs>, Option<BootChild>),
-    /// A picker was cancelled. The boot was stopped and nothing launches.
-    Cancelled,
-}
-
+///
 /// `argv` and `environment` are what `parsed` was parsed from: the agent picker
 /// builds its rows by parsing the line again with each row's flags in front.
 pub(crate) fn collect_prompt(
