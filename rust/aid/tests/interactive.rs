@@ -459,10 +459,11 @@ fn a_pasted_multi_line_prompt_arrives_whole_rather_than_leaking() {
     let world = World::with(&["--warm"]);
     let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
     session.reach_the_editor();
-    // One write, as a terminal delivers a paste: both lines arrive together, so
-    // the second is already queued when the first's Enter is read. `send_line`
-    // issuing exactly one write is what keeps that sentence true.
-    session.send_line("fix this\nand then that");
+    // One write, as a terminal without bracketed paste delivers one. Each line
+    // ends in `\r`, the same byte as Enter, and the second line is already queued
+    // when the first `\r` is read: that queued input is all that makes the first
+    // `\r` a line break. The last one has nothing behind it and submits.
+    session.press("fix this\rand then that\r");
     assert_eq!(session.wait(), 0);
     assert_eq!(
         world.devpod_calls().last().expect("a session"),
@@ -830,7 +831,7 @@ fn a_named_claude_login_is_a_row_of_the_agent_picker_and_reaches_dl() {
     session.expect("(account work)");
     session.send_line("go");
     session.expect(&format!("aid -> dl --claude-profile work {MAIN} --"));
-    session.wait();
+    assert_eq!(session.wait(), 0);
 }
 
 #[test]
@@ -977,11 +978,6 @@ fn esc_in_a_picker_stops_the_boot_and_launches_nothing() {
 // the prompt editor
 // ===========================================================================
 
-/// A bracketed paste of `text`, as a terminal sends one.
-fn pasted(text: &str) -> String {
-    format!("\x1b[200~{text}\x1b[201~")
-}
-
 #[test]
 fn a_pasted_prompt_keeps_its_line_breaks_and_waits_for_enter() {
     // The paste ends in a line break, as a copied block of text often does. Under
@@ -990,7 +986,11 @@ fn a_pasted_prompt_keeps_its_line_breaks_and_waits_for_enter() {
     let world = World::with(&["--warm"]);
     let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
     session.reach_the_editor();
-    session.press(&pasted("first line\r\nsecond line\r\n"));
+    // Two writes, so one read ends on a `\r` with nothing queued behind it. The
+    // open paste is then the only thing that keeps that `\r` a line break.
+    session.press("\x1b[200~first line\r");
+    std::thread::sleep(Duration::from_millis(200));
+    session.press("second line\r\n\x1b[201~");
     std::thread::sleep(Duration::from_millis(300));
     assert!(
         !session.text().contains("aid -> dl"),
