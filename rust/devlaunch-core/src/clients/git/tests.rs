@@ -1428,10 +1428,15 @@ fn a_patch_match_is_a_copy_only_when_git_replays_it_as_the_copy() {
     );
     let replay = fake
         .calls()
-        .iter()
-        .map(Call::argv)
-        .find(|argv| argv.get(8).map(String::as_str) == Some("merge-tree"))
+        .into_iter()
+        .find(|call| call.argv().get(8).map(String::as_str) == Some("merge-tree"))
         .expect("the pair is replayed");
+    assert_eq!(
+        replay.invocation().env.entries.get("GIT_ATTR_NOSYSTEM"),
+        Some(&"1".to_owned()),
+        "a system gitattributes file could name a merge driver that `-c` does not reach"
+    );
+    let replay = replay.argv();
     assert_eq!(strs(&replay)[3..8], AS_TEXT, "every path merged as text");
     assert_eq!(
         strs(&replay)[8..],
