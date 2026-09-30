@@ -258,13 +258,28 @@ pub(crate) fn render(text: &str, columns: usize, height: usize) -> Frame {
     }
     shown.reverse();
     if hidden > 0 {
-        let word = if hidden == 1 { "line" } else { "lines" };
-        shown.insert(0, format!("{MORE}({hidden} earlier {word} not shown)"));
+        shown.insert(0, count_line(hidden, columns));
         used += 1;
     }
     Frame {
         text: shown.join("\r\n"),
         rows_above: used - 1,
+    }
+}
+
+/// The line that counts `hidden` lines, in the longest wording that fits one row
+/// of `columns`: it is held to one row, because `render` reserves one row for it.
+fn count_line(hidden: usize, columns: usize) -> String {
+    let word = if hidden == 1 { "line" } else { "lines" };
+    let wordings = [
+        format!("{MORE}({hidden} earlier {word} not shown)"),
+        format!("{MORE}({hidden} not shown)"),
+        format!("{MORE}(+{hidden})"),
+        format!("(+{hidden})"),
+    ];
+    match wordings.iter().find(|line| line.width() <= columns) {
+        Some(line) => line.clone(),
+        None => wordings[3].chars().take(columns).collect(),
     }
 }
 
@@ -607,6 +622,22 @@ mod tests {
             "  (26 earlier lines not shown)\r\n  line 27\r\n  line 28\r\n  line 29\r\n  line 30"
         );
         assert_eq!(frame.rows_above, 4);
+    }
+
+    #[test]
+    fn the_count_line_is_counted_at_the_rows_it_really_takes() {
+        let text: Vec<String> = (1..=30).map(|n| format!("line {n}")).collect();
+        let text = text.join("\n");
+        for (columns, height) in [(20, 5), (5, 3)] {
+            let frame = render(&text, columns, height);
+            let rows: usize = frame
+                .text
+                .split("\r\n")
+                .map(|line| line.width().div_ceil(columns).max(1))
+                .sum();
+            assert_eq!(rows, frame.rows_above + 1, "{columns}x{height}: {frame:?}");
+            assert!(rows <= height, "{columns}x{height}: {frame:?}");
+        }
     }
 
     #[test]
