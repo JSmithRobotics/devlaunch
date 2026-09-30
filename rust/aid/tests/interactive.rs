@@ -974,6 +974,114 @@ fn esc_in_a_picker_stops_the_boot_and_launches_nothing() {
     );
 }
 
+/// The agent sessions devpod was asked for so far. The boot's own `devpod ssh`
+/// calls provision the workspace and are left out: only a session asks for
+/// `--log-output json`.
+fn sessions(world: &World) -> Vec<String> {
+    world
+        .devpod_calls()
+        .into_iter()
+        .filter(|call| call.starts_with(&format!("devpod ssh {MAIN} --log-output json ")))
+        .collect()
+}
+
+#[test]
+fn the_agent_chosen_last_is_the_first_row_of_the_next_launch() {
+    // The first run lists claude first, so an Enter on the second launch's agent
+    // picker takes codex only if the first launch's choice moved it up.
+    let world = World::with(&["--warm"]);
+    let mut first = PtyAid::spawn(&world, &[MAIN], &[]);
+    first.answer_typed(AGENT_PICKER, "codex");
+    first.answer("Model for codex", "\r");
+    first.answer("Effort for codex", "\r");
+    first.expect(BANNER);
+    first.send_line("one");
+    assert_eq!(first.wait(), 0);
+
+    let mut second = PtyAid::spawn(&world, &[MAIN], &[]);
+    second.answer(AGENT_PICKER, "\r");
+    // Waited for by the words every agent's model picker shares, so a claude row
+    // fails here at once rather than at the deadline.
+    second.answer("Model for ", "\r");
+    assert!(
+        second.text().contains("Model for codex"),
+        "the first row was not codex; the pty said:\n{}",
+        second.text()
+    );
+    second.answer("Effort for codex", "\r");
+    second.expect(BANNER);
+    second.send_line("two");
+    assert_eq!(second.wait(), 0);
+    let last = world.devpod_calls().last().expect("a session").clone();
+    assert!(
+        last.contains("codex --dangerously-bypass-approvals-and-sandbox two"),
+        "{last}"
+    );
+}
+
+#[test]
+fn a_typed_agent_that_is_no_row_is_asked_for_again() {
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.answer_typed(AGENT_PICKER, "nonesuch");
+    // `answer` counts the header, so it waits for the picker drawn a second time.
+    session.answer(AGENT_PICKER, "\x1b");
+    session.expect("cancelled");
+    let seen = Arc::clone(&session.seen);
+    assert_eq!(session.wait(), 130);
+    let whole = String::from_utf8_lossy(&seen.lock().expect("the pty buffer")).into_owned();
+    assert!(
+        !whole.contains(MODEL_PICKER),
+        "a typed name that is no agent went on to the model picker; the pty said:\n{whole}"
+    );
+    assert!(
+        sessions(&world).is_empty(),
+        "a session was opened: {:?}",
+        sessions(&world)
+    );
+}
+
+#[test]
+fn esc_at_the_agent_picker_launches_nothing() {
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.answer(AGENT_PICKER, "\x1b");
+    session.expect("cancelled");
+    let seen = Arc::clone(&session.seen);
+    assert_eq!(session.wait(), 130);
+    let whole = String::from_utf8_lossy(&seen.lock().expect("the pty buffer")).into_owned();
+    assert!(
+        !whole.contains(MODEL_PICKER) && !whole.contains(BANNER),
+        "the launch went on after the Esc; the pty said:\n{whole}"
+    );
+    assert!(
+        sessions(&world).is_empty(),
+        "a session was opened after a cancel: {:?}",
+        sessions(&world)
+    );
+}
+
+#[test]
+fn a_setting_a_flag_gave_is_the_first_row_of_the_next_launch() {
+    // Remembered as a choice although no picker asked for it.
+    let world = World::with(&["--warm"]);
+    let mut first = PtyAid::spawn(&world, &["--model", "opus", MAIN], &[]);
+    first.answer(AGENT_PICKER, "\r");
+    first.answer(EFFORT_PICKER, "\r");
+    first.expect(BANNER);
+    first.send_line("one");
+    assert_eq!(first.wait(), 0);
+
+    let mut second = PtyAid::spawn(&world, &[MAIN], &[]);
+    second.reach_the_editor();
+    second.send_line("two");
+    assert_eq!(second.wait(), 0);
+    assert_eq!(
+        world.devpod_calls().last().expect("a session"),
+        &claude_session("--model opus ", "two")
+    );
+}
+
 // ===========================================================================
 // the prompt editor
 // ===========================================================================
