@@ -700,7 +700,8 @@ fn a_squash_that_conflicts_in_a_sha256_repository_leaves_every_commit_counted() 
 #[test]
 fn a_squash_the_default_branch_later_reverted_leaves_every_commit_counted() {
     // `main` no longer holds the change, so the merge puts it back, and the tree
-    // it gives is not `main`'s.
+    // it gives is not `main`'s. `main` moves on after the revert, so its tree is
+    // not the merge base's, and the merge is made.
     let fixture = Fixture::new();
     let clone = fixture.clone();
     three_commits(&clone);
@@ -708,6 +709,7 @@ fn a_squash_the_default_branch_later_reverted_leaves_every_commit_counted() {
     squash_feature_into_main(&mate);
     git_as_author(&mate, &["revert", "--no-edit", "HEAD"]);
     git(&mate, &["push", "-q", "origin", "main"]);
+    move_main(&mate);
     git(&clone, &["fetch", "-q", "origin"]);
 
     assert_eq!(would_lose(&held(&clone)), "3 unpushed commit(s)");
