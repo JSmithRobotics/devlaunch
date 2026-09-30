@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a local tag, a detached HEAD or a branch that does not pass still reaches.
   This merge and the copy rule's replay both run with merge attributes switched off, so
   a `merge=union` or a custom merge driver cannot make a merge clean that drops the
-  branch's side, and a clone with an `info/attributes` file clears nothing.
+  branch's side, and a clone whose `info/attributes` file holds anything clears nothing.
+  The merges run in one `git merge-tree --stdin` per branch, at most 4,096 in a clone, so
+  a clone with many branches of local work pays about one git spawn per branch for them.
 
 ## [0.57.1] - 2026-09-29
 

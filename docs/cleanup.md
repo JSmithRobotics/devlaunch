@@ -1025,8 +1025,8 @@ were merges of `origin/main`. Three more rules now run after the count:
   commit and its later revert drop out with the rest, as a squash merge drops
   them. The merge runs with merge attributes switched off, so a `merge=union`
   or a custom merge driver cannot make a merge clean that drops the branch's
-  side: every file merges as plain text, and a clone with an
-  `info/attributes` file clears nothing. When the remote reverted the
+  side: every file merges as plain text, and a clone whose
+  `info/attributes` file holds anything clears nothing. When the remote reverted the
   squash, the merge puts the change back, the tree differs, and nothing drops
   out. The tip is tried first, then up to seven commits under it on the
   branch's first-parent line, so work added after the squash stays counted and
@@ -1043,7 +1043,9 @@ conflict. That is the limit of the third rule: when the remote edited the lines
 the squash wrote, the merge conflicts, and the squashed commits still count,
 although the change is in the remote's history. A branch whose squashed commits
 are more than seven commits under its tip also still counts, and so does a
-squash that holds only part of the branch. A commit that reached a passing
+squash that holds only part of the branch. The rule makes at most 4,096 merges
+in one clone, which a clone with about 20 branches of unpushed work can reach,
+and a branch whose merges do not fit still counts. A commit that reached a passing
 branch only through a merge's second parent still counts unless another rule
 clears it, even when the squash does hold its change. In each case the refusal is yours to
 judge.
