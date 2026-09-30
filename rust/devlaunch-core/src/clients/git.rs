@@ -105,6 +105,27 @@ const TAG_REFS_QUERY: [&str; 3] = [
 /// See [`Git::unpushed_commits`] for why each is here.
 const NOT_WORK: [&str; 2] = ["--exclude=refs/tags/*", "--exclude=refs/original/*"];
 
+/// The top-level options that make `merge-tree` merge every path as plain text.
+///
+/// A merge driver decides what a clean merge is: the built-in `union` keeps
+/// both sides' lines, and a configured `merge.<name>.driver` of `true` keeps
+/// one side whole. Either makes a merge clean that drops a side, and the two
+/// rules that read `merge-tree` would take a dropped change for one the remote
+/// holds. `--attr-source` names the empty tree, so no `.gitattributes` in the
+/// work tree or the index is read, `core.attributesFile` takes the global file
+/// away, and `merge.default` is the driver a path with no attribute gets. A git
+/// older than 2.40 has no `--attr-source` and refuses, which clears nothing.
+/// `GIT_ATTR_NOSYSTEM` takes the system file away, and [`Git::merged_as_text`]
+/// merges nothing when `info/attributes` holds anything, since no option
+/// switches that file off.
+const AS_TEXT: [&str; 5] = [
+    "-c",
+    "core.attributesFile=/dev/null",
+    "-c",
+    "merge.default=text",
+    "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+];
+
 /// What git answered, or that it did not.
 ///
 /// `Said` carries the output shaped the way the verb that asked for it needs —
@@ -859,11 +880,11 @@ impl<'r> Git<'r> {
     fn replays_as(&self, clone: &Path, commit: &str, copy: &str) -> GitAnswer<bool> {
         let base = format!("--merge-base={commit}^");
         let onto = format!("{copy}^");
-        let replayed =
-            match self.about(clone, &["merge-tree", "--write-tree", &base, &onto, commit]) {
-                GitAnswer::Said(replayed) => replayed,
-                GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
-            };
+        let replayed = match self.merged_as_text(clone, &["--write-tree", &base, &onto, commit]) {
+            GitAnswer::Said(Some(replayed)) => replayed,
+            GitAnswer::Said(None) => return GitAnswer::Said(false),
+            GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
+        };
         let tree = format!("{copy}^{{tree}}");
         self.about(clone, &["rev-parse", "--verify", &tree])
             .map(|copy_tree| !copy_tree.is_empty() && replayed == copy_tree)
@@ -1006,11 +1027,36 @@ impl<'r> Git<'r> {
             return GitAnswer::Said(false);
         }
         let base = format!("--merge-base={base}");
-        self.about(
-            clone,
-            &["merge-tree", "--write-tree", &base, other.as_str(), point],
-        )
-        .map(|merged| merged == other_tree)
+        self.merged_as_text(clone, &["--write-tree", &base, other.as_str(), point])
+            .map(|merged| merged.is_some_and(|merged| merged == other_tree))
+    }
+
+    /// `git merge-tree` with *args*, every path merged as plain text
+    /// ([`AS_TEXT`]), or `None` when *clone* has an `info/attributes` that
+    /// could name a merge driver.
+    ///
+    /// `None` is an answer rather than a refusal because git was not asked.
+    /// Both rules read it as they read a conflict: the change is not held.
+    fn merged_as_text(&self, clone: &Path, args: &[&str]) -> GitAnswer<Option<String>> {
+        let info = match self.about(clone, &["rev-parse", "--git-path", "info/attributes"]) {
+            GitAnswer::Said(info) => clone.join(info),
+            GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
+        };
+        let holds_none = match std::fs::metadata(&info) {
+            Ok(file) => file.len() == 0,
+            Err(missing) => missing.kind() == std::io::ErrorKind::NotFound,
+        };
+        if !holds_none {
+            return GitAnswer::Said(None);
+        }
+        let mut argv: Vec<&str> = AS_TEXT.to_vec();
+        argv.push("merge-tree");
+        argv.extend(args);
+        let invocation =
+            pinned(clone, &argv).with_env(EnvSpec::inherited().and("GIT_ATTR_NOSYSTEM", "1"));
+        let spec = SpawnSpec::new(invocation).with_timeout(ABOUT_ONE_REPO);
+        self.captured(&argv.join(" "), &spec)
+            .map(|stdout| Some(stdout.trim_end_matches('\n').to_owned()))
     }
 
     /// The commits no remote-tracking ref contains that a ref other than a

@@ -714,6 +714,75 @@ fn a_worktree_on_a_squashed_branch_does_not_hold_it_back() {
     assert_eq!(held(&clone), Unsaved::NothingToLose);
 }
 
+/// `feature` with `NOTES` under the built-in `union` driver, pushed; a local
+/// commit that deletes `old line`; and a teammate's push that rewrites it.
+/// Where the attribute lives is *attributes*' to say.
+fn a_deletion_the_remote_rewrote(fixture: &Fixture, attributes: impl Fn(&Path)) -> PathBuf {
+    let clone = fixture.clone();
+    attributes(&clone);
+    write(&clone.join("NOTES"), "keep\nold line\nkeep2\n");
+    commit(&clone, "notes");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    write(&clone.join("NOTES"), "keep\nkeep2\n");
+    commit(&clone, "drop the old line");
+    let mate = teammate(fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(&mate.join("NOTES"), "keep\nremote rewrite\nkeep2\n");
+    commit(&mate, "rewrite the old line");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    clone
+}
+
+#[test]
+fn a_union_merge_attribute_does_not_let_the_squash_rule_clear_a_commit() {
+    // `merge=union` keeps both sides' lines and never conflicts, so the merge of
+    // the deletion into `origin/feature` is clean and gives `origin/feature`'s
+    // tree: the deletion is dropped, not held. The rule merges as plain text.
+    let fixture = Fixture::new();
+    let clone = a_deletion_the_remote_rewrote(&fixture, |clone| {
+        write(&clone.join(".gitattributes"), "NOTES merge=union\n");
+    });
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_merge_attribute_in_info_attributes_leaves_the_commit_counted() {
+    // `--attr-source` does not reach `$GIT_DIR/info/attributes`, so a clone
+    // with one cannot say how git would merge, and clears nothing.
+    let fixture = Fixture::new();
+    let clone = a_deletion_the_remote_rewrote(&fixture, |clone| {
+        write(&clone.join(".git/info/attributes"), "NOTES merge=union\n");
+    });
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_configured_merge_driver_does_not_let_the_squash_rule_clear_a_commit() {
+    // A driver of `true` keeps the remote's side of every file it owns, so the
+    // merge of the line added after the squash gives `main`'s tree.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["config", "merge.ours.driver", "true"]);
+    write(&clone.join(".gitattributes"), "notes.txt merge=ours\n");
+    write(&clone.join("notes.txt"), "one\n");
+    commit(&clone, "a");
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "main"]);
+    write(&mate.join("feature.txt"), "work\n");
+    write(&mate.join(".gitattributes"), "notes.txt merge=ours\n");
+    write(&mate.join("notes.txt"), "one\n");
+    commit(&mate, "feature (#3)");
+    git(&mate, &["push", "-q", "origin", "main"]);
+    write(&clone.join("notes.txt"), "one\ntwo\n");
+    commit(&clone, "b");
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
 /// A clone at `/ws` with one branch, `feature`, and one counted commit whose
 /// change merges cleanly into its remote refs when *merge_tree* says so.
 fn scripted_squash(merge_tree: Response) -> ScriptedRunner {
@@ -739,10 +808,23 @@ fn scripted_squash(merge_tree: Response) -> ScriptedRunner {
         .with_script(at("rev-list"), Response::stdout(format!("{COUNTED}\n")))
         .with_script(at("merge-base"), Response::stdout("base\n"))
         .with_script(
+            [
+                "git",
+                "--git-dir=/ws/.git",
+                "--work-tree=/ws",
+                "rev-parse",
+                "--git-path",
+            ],
+            Response::stdout("/ws/.git/info/attributes\n"),
+        )
+        .with_script(
             at("rev-parse"),
             Response::stdout("tip-tree\nbase-tree\nremote-tree\n"),
         )
-        .with_script(at("merge-tree"), merge_tree)
+        .with_script(
+            ["git", "--git-dir=/ws/.git", "--work-tree=/ws", "-c"],
+            merge_tree,
+        )
         .with_script(at("worktree"), Response::stdout(""))
 }
 

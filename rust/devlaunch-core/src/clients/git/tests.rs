@@ -1377,7 +1377,11 @@ fn a_patch_match(root: &Path, replayed: Response, copy_tree: Response) -> Script
             pinned(&["log"]),
             Response::stdout(format!("\0{LOCAL}{patch}\0{COPY}{patch}")),
         )
-        .with_script(pinned(&["merge-tree"]), replayed)
+        .with_script(pinned(&AS_TEXT), replayed)
+        .with_script(
+            pinned(&["rev-parse", "--git-path"]),
+            Response::stdout(format!("{}\n", root.join(".git/info/attributes").display())),
+        )
         .with_script(pinned(&["rev-parse"]), copy_tree)
 }
 
@@ -1426,10 +1430,11 @@ fn a_patch_match_is_a_copy_only_when_git_replays_it_as_the_copy() {
         .calls()
         .iter()
         .map(Call::argv)
-        .find(|argv| argv.get(3).map(String::as_str) == Some("merge-tree"))
+        .find(|argv| argv.get(8).map(String::as_str) == Some("merge-tree"))
         .expect("the pair is replayed");
+    assert_eq!(strs(&replay)[3..8], AS_TEXT, "every path merged as text");
     assert_eq!(
-        strs(&replay)[3..],
+        strs(&replay)[8..],
         [
             "merge-tree",
             "--write-tree",
