@@ -916,6 +916,15 @@ fn names_a_retired_spelling(options: &[String]) -> bool {
         .any(|word| SUFFIX_RETIRED.contains(&word.as_str()))
 }
 
+/// Whether `argv` ends on a run that spells a retired flag.
+///
+/// For the caller of a [`UsageError::NoWorkspace`]: that refusal on such a line is
+/// final, because a picked spec appended after the run would stop it being the end
+/// of the line, and the retired word would no longer be peeled.
+pub(crate) fn spells_a_retired_flag(argv: &[String]) -> bool {
+    peel_suffix(argv).is_some_and(|suffix| names_a_retired_spelling(&suffix.options))
+}
+
 /// A peeled trailing run, split by whose flag each word is.
 ///
 /// The split is the point. [`Self::options`] rides on to dl, and the remote-control

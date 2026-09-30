@@ -160,7 +160,9 @@ fn run(argv: &[String]) -> i32 {
             Ok(workspace_id) => (argv, unpicked.picked(workspace_id)),
             Err(code) => return code,
         },
-        Err(UsageError::NoWorkspace) if dl::interactive_terminal() => {
+        Err(UsageError::NoWorkspace)
+            if dl::interactive_terminal() && !rewrite::spells_a_retired_flag(argv) =>
+        {
             let spec = match dl::pick_workspace() {
                 Ok(spec) => spec,
                 Err(code) => return code,

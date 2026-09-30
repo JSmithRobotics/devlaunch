@@ -1073,3 +1073,47 @@ fn a_quit_workspace_picker_launches_nothing() {
         world.devpod_calls()
     );
 }
+
+#[test]
+fn a_retired_spelling_with_no_workspace_is_refused_before_any_picker() {
+    // dl is what refuses a retired spelling, and it needs a workspace to be asked
+    // about. A picked spec would land after the retired word, which then no longer
+    // ends the line, and the line would become an agent launch.
+    for line in [&["--stop"][..], &["resume", "--autorm"]] {
+        let world = World::with(&["--warm"]);
+        let mut session = PtyAid::spawn(&world, line, &[]);
+        let seen = Arc::clone(&session.seen);
+        // Bounded: a picker that opened anyway would wait on this pty for ever.
+        let mut code = None;
+        wait_for(|| {
+            code = session.child.try_wait().expect("aid's status");
+            code.is_some()
+        });
+        let _ = session.child.kill();
+        let said = || String::from_utf8_lossy(&seen.lock().expect("the pty buffer")).into_owned();
+        assert_eq!(
+            code.map(|status| status.exit_code()),
+            Some(1),
+            "{line:?}: the pty said:\n{:?}",
+            said()
+        );
+        assert!(
+            wait_for(|| said().contains("aid needs a workspace")),
+            "{line:?}: the refusal was not given; the pty said:\n{:?}",
+            said()
+        );
+        assert!(
+            !said().contains(WORKSPACE_PICKER),
+            "{line:?}: the workspace picker opened: {:?}",
+            said()
+        );
+        assert!(
+            !world
+                .devpod_calls()
+                .iter()
+                .any(|call| call.starts_with("devpod ssh")),
+            "{line:?}: a session was opened: {:?}",
+            world.devpod_calls()
+        );
+    }
+}
