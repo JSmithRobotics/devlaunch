@@ -1380,7 +1380,10 @@ fn a_patch_match(root: &Path, replayed: Response, copy_tree: Response) -> Script
         .with_script(pinned(&AS_TEXT), replayed)
         .with_script(
             pinned(&["rev-parse", "--git-path"]),
-            Response::stdout(format!("{}\n", root.join(".git/info/attributes").display())),
+            Response::stdout(format!(
+                "{}\nsha1\n",
+                root.join(".git/info/attributes").display()
+            )),
         )
         .with_script(pinned(&["rev-parse"]), copy_tree)
 }
@@ -1437,7 +1440,12 @@ fn a_patch_match_is_a_copy_only_when_git_replays_it_as_the_copy() {
         "a system gitattributes file could name a merge driver that `-c` does not reach"
     );
     let replay = replay.argv();
-    assert_eq!(strs(&replay)[3..8], AS_TEXT, "every path merged as text");
+    assert_eq!(strs(&replay)[3..7], AS_TEXT, "every path merged as text");
+    assert_eq!(
+        strs(&replay)[7],
+        "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "the attributes of the empty tree, which is no attributes"
+    );
     assert_eq!(
         strs(&replay)[8..],
         [

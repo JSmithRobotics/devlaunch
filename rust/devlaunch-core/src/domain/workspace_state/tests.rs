@@ -75,11 +75,13 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).expect("written");
 }
 
-/// A bare repository standing in for GitHub, with one commit on `main`.
-fn remote_at(root: &Path) -> PathBuf {
+/// A bare repository standing in for GitHub, with one commit on `main`, its
+/// objects named by *object_format*.
+fn remote_at(root: &Path, object_format: &str) -> PathBuf {
     let origin = root.join("origin.git");
     let seed = root.join("seed");
-    git(root, &["init", "-q", "-b", "main", "seed"]);
+    let format = format!("--object-format={object_format}");
+    git(root, &["init", "-q", "-b", "main", &format, "seed"]);
     write(&seed.join("README.md"), "seed\n");
     commit(&seed, "seed");
     git(
@@ -123,8 +125,13 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::named_by("sha1")
+    }
+
+    /// A fixture whose repositories name their objects by *object_format*.
+    fn named_by(object_format: &str) -> Self {
         let root = tempfile::tempdir().expect("a temp dir");
-        let remote = remote_at(root.path());
+        let remote = remote_at(root.path(), object_format);
         Self { root, remote }
     }
 
@@ -391,6 +398,35 @@ fn a_branch_the_remote_rebased_holds_nothing_unsaved() {
 }
 
 #[test]
+fn a_commit_the_remote_rebased_in_a_sha256_repository_holds_nothing_unsaved() {
+    // The copy rule replays the commit onto the copy's parent, which edits the
+    // same file far from it, so the replay merges content. Told to read
+    // attributes from the SHA-1 empty tree, git refused it, and the commit
+    // stayed counted.
+    let fixture = Fixture::named_by("sha256");
+    let clone = fixture.clone();
+    write(&clone.join("list.txt"), &numbered(&[]));
+    commit(&clone, "list");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    write(&clone.join("list.txt"), &numbered(&[(18, "eighteen")]));
+    commit(&clone, "eighteen");
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(&mate.join("list.txt"), &numbered(&[(2, "two")]));
+    commit(&mate, "two");
+    write(
+        &mate.join("list.txt"),
+        &numbered(&[(2, "two"), (18, "eighteen")]),
+    );
+    commit(&mate, "eighteen");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
 fn a_branch_the_remote_rebased_holds_nothing_unsaved_in_colour_too() {
     // `color.ui=always` puts an escape code before every hash `log --oneline`
     // prints, and a line that starts with one names no commit.
@@ -526,6 +562,71 @@ fn a_branch_squashed_into_the_default_branch_holds_nothing_unsaved() {
     assert_eq!(by_sha(&clone, "feature"), 3);
 
     assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+/// Twenty numbered lines, with line *n* replaced by *text* for each edit.
+fn numbered(edits: &[(usize, &str)]) -> String {
+    (1..=20)
+        .map(|n| {
+            let edit = edits.iter().find(|(line, _)| *line == n);
+            edit.map_or_else(|| format!("{n}\n"), |(_, text)| format!("{text}\n"))
+        })
+        .collect()
+}
+
+/// A SHA-256 clone that pushed `list.txt` on `feature`, then made three
+/// unpushed commits that edit lines 5 to 7 of it; and a teammate's push to
+/// `feature` of those three edits as one commit, with line 18 as *line_18*
+/// and line 6 as *line_6*. Both sides change `list.txt`, so the merge that
+/// compares them merges its content.
+fn squashed_on_feature_in_sha256(fixture: &Fixture, line_6: &str, line_18: &str) -> PathBuf {
+    let clone = fixture.clone();
+    assert_eq!(
+        git(&clone, &["rev-parse", "--show-object-format"]),
+        "sha256"
+    );
+    write(&clone.join("list.txt"), &numbered(&[]));
+    commit(&clone, "list");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    for (line, text) in [(5, "five"), (6, "six"), (7, "seven")] {
+        let edits: Vec<(usize, &str)> = [(5, "five"), (6, "six"), (7, "seven")]
+            .into_iter()
+            .filter(|(done, _)| *done <= line)
+            .collect();
+        write(&clone.join("list.txt"), &numbered(&edits));
+        commit(&clone, text);
+    }
+    let mate = teammate(fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(
+        &mate.join("list.txt"),
+        &numbered(&[(5, "five"), (6, line_6), (7, "seven"), (18, line_18)]),
+    );
+    commit(&mate, "five to seven, squashed");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+    clone
+}
+
+#[test]
+fn a_squash_in_a_sha256_repository_holds_nothing_unsaved() {
+    // The empty tree has another name under SHA-256, and a content merge told to
+    // read attributes from the SHA-1 name is refused.
+    let fixture = Fixture::named_by("sha256");
+    let clone = squashed_on_feature_in_sha256(&fixture, "six", "eighteen");
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_squash_that_conflicts_in_a_sha256_repository_leaves_every_commit_counted() {
+    // The control for the one above: the remote's line 6 is not the branch's,
+    // so the merge conflicts, and a conflict clears nothing.
+    let fixture = Fixture::named_by("sha256");
+    let clone = squashed_on_feature_in_sha256(&fixture, "SIX", "eighteen");
+
+    assert_eq!(would_lose(&held(&clone)), "3 unpushed commit(s)");
 }
 
 #[test]
@@ -848,7 +949,7 @@ fn scripted_squash_with(
                 "rev-parse",
                 "--git-path",
             ],
-            Response::stdout("/ws/.git/info/attributes\n"),
+            Response::stdout("/ws/.git/info/attributes\nsha1\n"),
         )
         .with_script(
             at("rev-parse"),

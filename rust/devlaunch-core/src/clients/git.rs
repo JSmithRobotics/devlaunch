@@ -111,20 +111,33 @@ const NOT_WORK: [&str; 2] = ["--exclude=refs/tags/*", "--exclude=refs/original/*
 /// both sides' lines, and a configured `merge.<name>.driver` of `true` keeps
 /// one side whole. Either makes a merge clean that drops a side, and the two
 /// rules that read `merge-tree` would take a dropped change for one the remote
-/// holds. `--attr-source` names the empty tree, so no `.gitattributes` in the
-/// work tree or the index is read, `core.attributesFile` takes the global file
+/// holds. `--attr-source` names the empty tree ([`empty_tree_of`]), so no
+/// `.gitattributes` in the work tree or the index is read, `core.attributesFile` takes the global file
 /// away, and `merge.default` is the driver a path with no attribute gets. A git
 /// older than 2.40 has no `--attr-source` and refuses, which clears nothing.
 /// `GIT_ATTR_NOSYSTEM` takes the system file away, and [`Git::merged_as_text`]
 /// merges nothing when `info/attributes` holds anything, since no option
 /// switches that file off.
-const AS_TEXT: [&str; 5] = [
+const AS_TEXT: [&str; 4] = [
     "-c",
     "core.attributesFile=/dev/null",
     "-c",
     "merge.default=text",
-    "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
 ];
+
+/// The empty tree's id in a repository whose objects `rev-parse
+/// --show-object-format` names *format*, or `None` for a format this does not
+/// know.
+///
+/// git resolves `--attr-source` only when a merge first reads an attribute,
+/// which a content merge does, and an id of the other format is refused there.
+fn empty_tree_of(format: &str) -> Option<&'static str> {
+    match format {
+        "sha1" => Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904"),
+        "sha256" => Some("6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321"),
+        _ => None,
+    }
+}
 
 /// What git answered, or that it did not.
 ///
@@ -1029,15 +1042,31 @@ impl<'r> Git<'r> {
 
     /// `git merge-tree` with *args*, every path merged as plain text
     /// ([`AS_TEXT`]), or `None` when *clone* has an `info/attributes` that
-    /// could name a merge driver.
+    /// could name a merge driver or names its objects in a format
+    /// [`empty_tree_of`] does not know.
     ///
     /// `None` is an answer rather than a refusal because git was not asked.
     /// Both rules read it as they read a conflict: the change is not held.
     fn merged_as_text(&self, clone: &Path, args: &[&str]) -> GitAnswer<Option<String>> {
-        let info = match self.about(clone, &["rev-parse", "--git-path", "info/attributes"]) {
-            GitAnswer::Said(info) => clone.join(info),
+        let asked = self.about(
+            clone,
+            &[
+                "rev-parse",
+                "--git-path",
+                "info/attributes",
+                "--show-object-format",
+            ],
+        );
+        let answer = match asked {
+            GitAnswer::Said(answer) => answer,
             GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
         };
+        let mut lines = answer.lines();
+        let (Some(info), Some(empty_tree)) = (lines.next(), lines.next().and_then(empty_tree_of))
+        else {
+            return GitAnswer::Said(None);
+        };
+        let info = clone.join(info);
         let holds_none = match std::fs::metadata(&info) {
             Ok(file) => file.len() == 0,
             Err(missing) => missing.kind() == std::io::ErrorKind::NotFound,
@@ -1045,7 +1074,9 @@ impl<'r> Git<'r> {
         if !holds_none {
             return GitAnswer::Said(None);
         }
+        let attr_source = format!("--attr-source={empty_tree}");
         let mut argv: Vec<&str> = AS_TEXT.to_vec();
+        argv.push(&attr_source);
         argv.push("merge-tree");
         argv.extend(args);
         let invocation =
