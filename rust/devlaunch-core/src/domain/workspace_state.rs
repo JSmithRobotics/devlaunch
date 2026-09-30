@@ -706,8 +706,11 @@ fn already_on_a_remote(git: &Git<'_>, clone: &Path, local_tags: &[String]) -> Ve
 /// ([`Git::holds_the_change_of`])? The tip is asked first, then the commits
 /// under it on its first-parent line, because a branch that carried on after
 /// its squash holds new work at the tip and the squashed work under it. The
-/// first commit that passes clears every commit it reaches that no remote
-/// ref has, and the commits above it stay counted. The remote refs are the
+/// first commit that passes clears the commits on its first-parent line that no
+/// remote ref has, and the commits above it stay counted. A commit a merge
+/// brought in through its second parent is not cleared: the merge can drop
+/// that commit's change (`merge -s ours`), and then the squash holds none of
+/// it. The remote refs are the
 /// ones the copy rule compares with ([`remote_refs_to_compare`]).
 ///
 /// **A commit is cleared only when every ref that reaches it is a branch that
@@ -778,7 +781,7 @@ fn squashed_onto_a_remote(
 const LOOK_BACK: usize = 8;
 
 /// The commits *branch* passes at, as [`squashed_onto_a_remote`] asks it: every
-/// unpushed commit the highest passing point reaches, or none.
+/// unpushed commit on the highest passing point's first-parent line, or none.
 fn passed_at(
     git: &Git<'_>,
     clone: &Path,
@@ -786,7 +789,7 @@ fn passed_at(
     upstreams: &[&RemoteRef],
 ) -> HashSet<String> {
     let Some(points) = git
-        .unpushed_first_parents(clone, &branch.name, LOOK_BACK)
+        .unpushed_first_parents(clone, &branch.name, Some(LOOK_BACK))
         .said()
     else {
         return HashSet::new();
@@ -801,7 +804,7 @@ fn passed_at(
         })
     });
     passing
-        .and_then(|point| git.unpushed_hashes_from(clone, point).said())
+        .and_then(|point| git.unpushed_first_parents(clone, point, None).said())
         .map(|reached| reached.into_iter().collect())
         .unwrap_or_default()
 }

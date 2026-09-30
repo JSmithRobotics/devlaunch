@@ -946,31 +946,27 @@ impl<'r> Git<'r> {
             .map(|stdout| stdout.lines().map(str::to_owned).collect())
     }
 
-    /// The first *limit* commits on *tip*'s first-parent line that no
-    /// remote-tracking ref contains, the tip first.
+    /// The commits on *tip*'s first-parent line that no remote-tracking ref
+    /// contains, the tip first, and no more than *limit* of them when it says.
     ///
     /// The points the squash rule tries, in the order it tries them: the tip
     /// is where a branch squashed whole is found in one merge, and the commits
     /// under it are where a branch that carried on after its squash is found.
+    /// With no limit, the commits a passing point clears: the squash holds the
+    /// change of that line, and says nothing of what a merge's second parent
+    /// brought in.
     pub(crate) fn unpushed_first_parents(
         &self,
         clone: &Path,
         tip: &str,
-        limit: usize,
+        limit: Option<usize>,
     ) -> GitAnswer<Vec<String>> {
-        let most = format!("--max-count={limit}");
-        self.about(
-            clone,
-            &[
-                "rev-list",
-                "--first-parent",
-                &most,
-                tip,
-                "--not",
-                "--remotes",
-            ],
-        )
-        .map(|stdout| stdout.lines().map(str::to_owned).collect())
+        let most = limit.map(|limit| format!("--max-count={limit}"));
+        let mut args = vec!["rev-list", "--first-parent"];
+        args.extend(most.as_deref());
+        args.extend([tip, "--not", "--remotes"]);
+        self.about(clone, &args)
+            .map(|stdout| stdout.lines().map(str::to_owned).collect())
     }
 
     /// Whether the remote ref *other* already holds the whole change *point*

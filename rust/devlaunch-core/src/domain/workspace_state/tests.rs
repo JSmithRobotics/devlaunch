@@ -627,6 +627,29 @@ fn a_squashed_commit_another_branch_still_needs_stays_counted() {
 }
 
 #[test]
+fn a_merge_that_dropped_a_deleted_side_branch_leaves_that_branch_counted() {
+    // `merge -s ours` puts `side` in `feature`'s history and none of its change
+    // in `feature`'s tree, so the squash of `feature` holds none of `secret.txt`.
+    // `side` is gone, and its commit is reachable only through the merge's second
+    // parent. The squash proves the first-parent line, and the one commit it
+    // does not prove stays counted.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["checkout", "-q", "-b", "side"]);
+    write(&clone.join("secret.txt"), "an hour of work\n");
+    commit(&clone, "secret");
+    git(&clone, &["checkout", "-q", "feature"]);
+    three_commits(&clone);
+    git_as_author(&clone, &["merge", "-q", "--no-edit", "-s", "ours", "side"]);
+    git(&clone, &["branch", "-q", "-D", "side"]);
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 5);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
 fn a_commit_and_its_revert_are_not_cleared_by_a_remote_that_moved() {
     // The branch changes nothing since it left `origin/feature`, so any merge of
     // it into `origin/feature` gives `origin/feature`'s tree. An empty change
