@@ -18,13 +18,33 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::rewrite::Setting;
+use crate::rewrite::Knob;
 
 /// The file's name inside the devlaunch cache.
 const FILE_NAME: &str = "aid-recent.tsv";
 
 /// How many choices are kept per agent and setting.
 const KEPT: usize = 8;
+
+/// What a remembered choice is kept under.
+#[derive(Clone, Copy)]
+enum Key<'a> {
+    /// The launcher picker's row: which agent, and for claude which login. It is
+    /// no one agent's setting, because it is what chooses the agent.
+    Launcher,
+    Knob(&'a str, Knob),
+}
+
+impl<'a> Key<'a> {
+    /// The agent and setting columns of the file.
+    fn columns(self) -> (&'a str, &'static str) {
+        match self {
+            Key::Launcher => ("*", "agent"),
+            Key::Knob(agent, Knob::Model) => (agent, "model"),
+            Key::Knob(agent, Knob::Effort) => (agent, "effort"),
+        }
+    }
+}
 
 /// Where the file lives, or `None` with no cache directory to put it in.
 pub(crate) fn path() -> Option<PathBuf> {
@@ -67,34 +87,55 @@ impl Recent {
         Recent { entries }
     }
 
-    /// The choices remembered for this agent and setting, newest first.
-    pub(crate) fn values(&self, agent: &str, setting: Setting) -> Vec<Option<String>> {
+    /// The launcher rows remembered, by [`Launcher::key`](crate::rewrite::Launcher::key),
+    /// newest first.
+    pub(crate) fn launchers(&self) -> Vec<String> {
+        self.lookup(Key::Launcher).into_iter().flatten().collect()
+    }
+
+    /// Remember a launcher row as the newest.
+    pub(crate) fn record_launcher(&mut self, key: &str) {
+        self.remember(Key::Launcher, Some(key));
+    }
+
+    /// The choices remembered for this agent's knob, newest first.
+    pub(crate) fn values(&self, agent: &str, knob: Knob) -> Vec<Option<String>> {
+        self.lookup(Key::Knob(agent, knob))
+    }
+
+    /// Remember a choice for this agent's knob as the newest.
+    pub(crate) fn record(&mut self, agent: &str, knob: Knob, value: Option<&str>) {
+        self.remember(Key::Knob(agent, knob), value);
+    }
+
+    fn lookup(&self, key: Key<'_>) -> Vec<Option<String>> {
+        let (agent, setting) = key.columns();
         self.entries
             .iter()
-            .filter(|entry| entry.agent == agent && entry.setting == setting.key())
+            .filter(|entry| entry.agent == agent && entry.setting == setting)
             .map(|entry| entry.value.clone())
             .collect()
     }
 
-    /// Remember a choice as the newest, keeping at most [`KEPT`] for its agent and
-    /// setting.
+    /// Remember a choice as the newest, keeping at most [`KEPT`] under its key.
     ///
     /// A value holding a tab or a line break is not remembered, because the file
     /// could not read it back as one value.
-    pub(crate) fn record(&mut self, agent: &str, setting: Setting, value: Option<&str>) {
+    fn remember(&mut self, key: Key<'_>, value: Option<&str>) {
         if value.is_some_and(|value| value.contains(['\t', '\n', '\r'])) {
             return;
         }
+        let (agent, setting) = key.columns();
         let entry = Entry {
             agent: agent.to_owned(),
-            setting: setting.key().to_owned(),
+            setting: setting.to_owned(),
             value: value.map(str::to_owned),
         };
         self.entries.retain(|kept| *kept != entry);
         self.entries.insert(0, entry);
         let mut seen = 0;
         self.entries.retain(|kept| {
-            if kept.agent != agent || kept.setting != setting.key() {
+            if kept.agent != agent || kept.setting != setting {
                 return true;
             }
             seen += 1;
@@ -182,11 +223,11 @@ mod tests {
     #[test]
     fn a_choice_is_moved_to_the_front_and_not_listed_twice() {
         let mut recent = Recent::default();
-        recent.record("claude", Setting::Model, Some("opus"));
-        recent.record("claude", Setting::Model, Some("sonnet"));
-        recent.record("claude", Setting::Model, Some("opus"));
+        recent.record("claude", Knob::Model, Some("opus"));
+        recent.record("claude", Knob::Model, Some("sonnet"));
+        recent.record("claude", Knob::Model, Some("opus"));
         assert_eq!(
-            recent.values("claude", Setting::Model),
+            recent.values("claude", Knob::Model),
             [some("opus"), some("sonnet")]
         );
     }
@@ -194,26 +235,26 @@ mod tests {
     #[test]
     fn choices_are_kept_apart_per_agent_and_setting() {
         let mut recent = Recent::default();
-        recent.record("claude", Setting::Model, Some("opus"));
-        recent.record("codex", Setting::Model, Some("gpt-5.5"));
-        recent.record("claude", Setting::Effort, Some("max"));
-        assert_eq!(recent.values("claude", Setting::Model), [some("opus")]);
-        assert_eq!(recent.values("codex", Setting::Model), [some("gpt-5.5")]);
-        assert_eq!(recent.values("claude", Setting::Effort), [some("max")]);
+        recent.record("claude", Knob::Model, Some("opus"));
+        recent.record("codex", Knob::Model, Some("gpt-5.5"));
+        recent.record("claude", Knob::Effort, Some("max"));
+        assert_eq!(recent.values("claude", Knob::Model), [some("opus")]);
+        assert_eq!(recent.values("codex", Knob::Model), [some("gpt-5.5")]);
+        assert_eq!(recent.values("claude", Knob::Effort), [some("max")]);
     }
 
     #[test]
     fn only_the_newest_few_are_kept() {
         let mut recent = Recent::default();
-        recent.record("codex", Setting::Effort, Some("low"));
+        recent.record("codex", Knob::Effort, Some("low"));
         for index in 0..KEPT + 3 {
-            recent.record("claude", Setting::Model, Some(&format!("model-{index}")));
+            recent.record("claude", Knob::Model, Some(&format!("model-{index}")));
         }
-        let kept = recent.values("claude", Setting::Model);
+        let kept = recent.values("claude", Knob::Model);
         assert_eq!(kept.len(), KEPT);
         assert_eq!(kept[0], Some(format!("model-{}", KEPT + 2)));
         // Another agent's history is not what pays for this one's.
-        assert_eq!(recent.values("codex", Setting::Effort), [some("low")]);
+        assert_eq!(recent.values("codex", Knob::Effort), [some("low")]);
     }
 
     #[test]
@@ -221,8 +262,8 @@ mod tests {
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let file = scratch.path().join("deeper").join(FILE_NAME);
         let mut recent = Recent::default();
-        recent.record("claude", Setting::Model, None);
-        recent.record("*", Setting::Agent, Some("claude/work"));
+        recent.record("claude", Knob::Model, None);
+        recent.record_launcher("claude/work");
         recent.write(&file);
         assert_eq!(Recent::read(&file), recent);
     }
@@ -230,7 +271,7 @@ mod tests {
     #[test]
     fn a_value_the_file_could_not_hold_is_not_remembered() {
         let mut recent = Recent::default();
-        recent.record("claude", Setting::Model, Some("a\tb"));
+        recent.record("claude", Knob::Model, Some("a\tb"));
         assert_eq!(recent, Recent::default());
     }
 
@@ -245,7 +286,7 @@ mod tests {
         )
         .expect("a file");
         assert_eq!(
-            Recent::read(&file).values("claude", Setting::Model),
+            Recent::read(&file).values("claude", Knob::Model),
             [some("sonnet")]
         );
     }

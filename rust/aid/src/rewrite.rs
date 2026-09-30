@@ -368,46 +368,36 @@ pub(crate) fn effort_agent_names() -> Vec<&'static str> {
     names
 }
 
-/// One thing the interactive flow asks for before the prompt.
+/// One value the interactive flow asks for once the agent is settled. The agent
+/// is not one of these: the launcher picker chooses it, as a [`Launcher`] row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Setting {
-    /// Which agent runs, and for claude which host login `dl` forwards. One
-    /// setting, because the picker offers them as one list of rows.
-    Agent,
+pub(crate) enum Knob {
     Model,
     Effort,
 }
 
-impl Setting {
-    /// The word the recent-choices file keys this setting by.
-    pub(crate) fn key(self) -> &'static str {
-        match self {
-            Self::Agent => "agent",
-            Self::Model => "model",
-            Self::Effort => "effort",
-        }
-    }
+impl Knob {
+    /// Every knob, in the order the pickers ask them.
+    pub(crate) const ALL: [Knob; 2] = [Knob::Model, Knob::Effort];
 }
 
-/// Whether `agent` has this setting at all.
-pub(crate) fn takes(agent: &str, setting: Setting) -> bool {
-    agent_row(agent).is_some_and(|row| match setting {
-        Setting::Agent => true,
-        Setting::Model => true,
-        Setting::Effort => row.effort.is_some(),
+/// Whether `agent` has this knob at all.
+pub(crate) fn takes(agent: &str, knob: Knob) -> bool {
+    agent_row(agent).is_some_and(|row| match knob {
+        Knob::Model => true,
+        Knob::Effort => row.effort.is_some(),
     })
 }
 
-/// The values the table suggests for this setting. Accounts are never suggested
+/// The values the table suggests for this knob. Accounts are never suggested
 /// here: they are read off the disk by `dl`.
-pub(crate) fn suggestions(agent: &str, setting: Setting) -> &'static [&'static str] {
+pub(crate) fn suggestions(agent: &str, knob: Knob) -> &'static [&'static str] {
     let Some(row) = agent_row(agent) else {
         return &[];
     };
-    match setting {
-        Setting::Agent => &[],
-        Setting::Model => row.model.offered,
-        Setting::Effort => row.effort.as_ref().map_or(&[], |spelling| spelling.offered),
+    match knob {
+        Knob::Model => row.model.offered,
+        Knob::Effort => row.effort.as_ref().map_or(&[], |spelling| spelling.offered),
     }
 }
 
@@ -2942,11 +2932,11 @@ mod tests {
 
     #[test]
     fn the_settings_each_agent_takes_are_read_off_the_table() {
-        assert!(takes("gemini", Setting::Model));
-        assert!(!takes("gemini", Setting::Effort));
-        assert!(takes("codex", Setting::Effort));
-        assert!(suggestions("claude", Setting::Effort).contains(&"max"));
-        assert!(suggestions("gemini", Setting::Effort).is_empty());
+        assert!(takes("gemini", Knob::Model));
+        assert!(!takes("gemini", Knob::Effort));
+        assert!(takes("codex", Knob::Effort));
+        assert!(suggestions("claude", Knob::Effort).contains(&"max"));
+        assert!(suggestions("gemini", Knob::Effort).is_empty());
     }
 
     #[test]

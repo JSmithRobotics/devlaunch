@@ -41,7 +41,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use crate::recent::{self, Recent};
-use crate::rewrite::{self, AidArgs, Environment, Launcher, Setting, Tuning};
+use crate::rewrite::{self, AidArgs, Environment, Knob, Launcher, Tuning};
 
 /// The internal argv word the boot child is started with. Undocumented on
 /// purpose: it is aid talking to itself, not a flag anyone types.
@@ -264,22 +264,22 @@ fn settle(parsed: AidArgs, argv: &[String], environment: Environment<'_>) -> Opt
     };
     let agent = agent.to_owned();
     let mut tuning = tuning.clone();
-    for setting in [Setting::Model, Setting::Effort] {
-        if !rewrite::takes(&agent, setting) {
+    for knob in Knob::ALL {
+        if !rewrite::takes(&agent, knob) {
             continue;
         }
-        let slot = match setting {
-            Setting::Effort => &mut tuning.effort,
-            _ => &mut tuning.model,
+        let slot = match knob {
+            Knob::Model => &mut tuning.model,
+            Knob::Effort => &mut tuning.effort,
         };
         if slot.is_none() {
-            match ask_value(&agent, setting, &recent) {
+            match ask_value(&agent, knob, &recent) {
                 Asked::Cancelled => return None,
                 Asked::Skipped => continue,
                 Asked::Chose(value) => *slot = value,
             }
         }
-        recent.record(&agent, setting, slot.as_deref());
+        recent.record(&agent, knob, slot.as_deref());
     }
     if let Some(file) = &file {
         recent.write(file);
@@ -295,10 +295,6 @@ enum Picked {
     Line(Box<AidArgs>),
     Cancelled,
 }
-
-/// The column the recent-choices file keeps agent rows under. The row is not one
-/// agent's setting: it is what chooses the agent.
-const ANY_AGENT: &str = "*";
 
 /// The agent picker: one row per Claude login, then one for each other agent.
 ///
@@ -323,11 +319,7 @@ fn ask_agent(
         return Picked::Kept;
     }
     // A stable sort, so rows with the same rank keep the table's order.
-    let remembered: Vec<String> = recent
-        .values(ANY_AGENT, Setting::Agent)
-        .into_iter()
-        .flatten()
-        .collect();
+    let remembered = recent.launchers();
     let rank = |row: &Launcher| {
         remembered
             .iter()
@@ -365,7 +357,7 @@ fn ask_agent(
                 let Ok(line) = rewrite::relaunched(argv, environment, row) else {
                     return Picked::Kept;
                 };
-                recent.record(ANY_AGENT, Setting::Agent, Some(&row.key()));
+                recent.record_launcher(&row.key());
                 return Picked::Line(Box::new(line));
             }
             dl::Choice::Typed(_) => {}
@@ -396,17 +388,17 @@ fn ask(header: &str, rows: &[Option<String>], label: impl Fn(&Option<String>) ->
 const DEFAULT_ROW: &str = "default (the agent's own)";
 
 /// The model or effort picker.
-fn ask_value(agent: &str, setting: Setting, recent: &Recent) -> Asked {
+fn ask_value(agent: &str, knob: Knob, recent: &Recent) -> Asked {
     let rows = recent::ordered(
-        recent.values(agent, setting),
-        rewrite::suggestions(agent, setting),
+        recent.values(agent, knob),
+        rewrite::suggestions(agent, knob),
     );
     let header = format!(
         "{} for {agent}. Type to filter, or type a name that is not listed.\n\
          Alt-Enter uses the text as typed. Esc cancels the launch.",
-        match setting {
-            Setting::Effort => "Effort",
-            _ => "Model",
+        match knob {
+            Knob::Model => "Model",
+            Knob::Effort => "Effort",
         }
     );
     ask(&header, &rows, |row| {
