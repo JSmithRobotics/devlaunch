@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.57.2] - 2026-09-30
+
 ### Fixed
 
-- **`rm` no longer refuses over a branch squashed into `main` as one commit.** A squash of
+- **`rm` no longer refuses over a branch squashed into `main` as one commit** (#659). A squash of
   several commits matches none of them, so after #653 `rm` and `dl --ls --json` still
   counted each one as unpushed. Now a branch whose whole change a remote ref already
   holds is not counted: `git merge-tree` merges the branch into the remote refs the
