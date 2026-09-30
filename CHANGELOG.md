@@ -12,11 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`rm` no longer refuses over a branch squashed into `main` as one commit.** A squash of
   several commits matches none of them, so after #653 `rm` and `dl --ls --json` still
   counted each one as unpushed. Now a branch whose whole change a remote ref already
-  holds is not counted: `git merge-tree` merges the branch into its upstream, the
-  same-named remote branch or `origin/HEAD`, and the merge must be clean and give that
+  holds is not counted: `git merge-tree` merges the branch into the remote refs the
+  copy rule compares with (its upstream, every other local branch's upstream, the
+  same-named remote branch and `origin/HEAD`), and the merge must be clean and give that
   ref's tree exactly. Work added after the squash still counts, and so does a squash the
-  remote reverted, a squash the remote then edited on the same lines, and a commit that
-  the stash, a local tag, a detached HEAD or a branch that does not pass still reaches.
+  remote reverted, a squash the remote then edited on the same lines, a commit that
+  reached the branch only through a merge's second parent, and a commit that the stash,
+  a local tag, a detached HEAD or a branch that does not pass still reaches.
   This merge and the copy rule's replay both run with merge attributes switched off, so
   a `merge=union` or a custom merge driver cannot make a merge clean that drops the
   branch's side, and a clone with an `info/attributes` file clears nothing.

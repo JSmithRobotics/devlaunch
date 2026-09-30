@@ -1018,7 +1018,10 @@ were merges of `origin/main`. Three more rules now run after the count:
   `git merge-tree` merges the branch into each remote ref the first rule
   compares with. When the merge is clean and gives the remote ref's own tree,
   the remote ref already holds what the branch changes since it left it, and
-  every unpushed commit on the branch drops out. Inside a branch that passes, a
+  every unpushed commit on the branch's first-parent line drops out. A commit
+  that a merge on the branch brought in through its second parent is not one of
+  them: the merge can drop that commit's change, as `git merge -s ours` does,
+  and then the squash holds none of it. Inside a branch that passes, a
   commit and its later revert drop out with the rest, as a squash merge drops
   them. The merge runs with merge attributes switched off, so a `merge=union`
   or a custom merge driver cannot make a merge clean that drops the branch's
@@ -1040,7 +1043,9 @@ conflict. That is the limit of the third rule: when the remote edited the lines
 the squash wrote, the merge conflicts, and the squashed commits still count,
 although the change is in the remote's history. A branch whose squashed commits
 are more than seven commits under its tip also still counts, and so does a
-squash that holds only part of the branch. In each case the refusal is yours to
+squash that holds only part of the branch. A commit that reached a passing
+branch only through a merge's second parent still counts unless another rule
+clears it, even when the squash does hold its change. In each case the refusal is yours to
 judge.
 
 Tags are the one ref kind the answer has to think about, and both directions of

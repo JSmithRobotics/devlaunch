@@ -114,7 +114,7 @@ const NOT_WORK: [&str; 2] = ["--exclude=refs/tags/*", "--exclude=refs/original/*
 /// holds. `--attr-source` names the empty tree ([`empty_tree_of`]), so no
 /// `.gitattributes` in the work tree or the index is read, `core.attributesFile` takes the global file
 /// away, and `merge.default` is the driver a path with no attribute gets. A git
-/// older than 2.40 has no `--attr-source` and refuses, which clears nothing.
+/// older than 2.41 has no `--attr-source` and refuses, which clears nothing.
 /// `GIT_ATTR_NOSYSTEM` takes the system file away, and [`Git::merged_as_text`]
 /// merges nothing when `info/attributes` holds anything, since no option
 /// switches that file off.

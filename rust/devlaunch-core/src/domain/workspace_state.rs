@@ -719,9 +719,11 @@ fn already_on_a_remote(git: &Git<'_>, clone: &Path, local_tags: &[String]) -> Ve
 /// overwritten, so the commit stays counted with it. The stash, a local tag and
 /// a detached HEAD never pass, so what they reach stays counted too.
 ///
-/// Only a branch that still reaches a counted commit is asked, so a clone the
-/// copy rule accounted for pays one `for-each-ref`. A branch with real
-/// unpushed work pays up to [`LOOK_BACK`] points times its remote refs.
+/// It runs only when the copy rule left a commit counted, so a clone the copy
+/// rule accounted for pays nothing here. When it runs it pays one
+/// `for-each-ref` and one `rev-list` per local branch, and only a branch that
+/// still reaches a counted commit is merged: up to [`LOOK_BACK`] points times
+/// its remote refs.
 ///
 /// **Every failure clears less, never more.** A refusal on any branch's commits
 /// or on the refs that are not branches clears nothing at all, because what
