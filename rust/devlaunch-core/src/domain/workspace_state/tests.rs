@@ -786,6 +786,16 @@ fn a_configured_merge_driver_does_not_let_the_squash_rule_clear_a_commit() {
 /// A clone at `/ws` with one branch, `feature`, and one counted commit whose
 /// change merges cleanly into its remote refs when *merge_tree* says so.
 fn scripted_squash(merge_tree: Response) -> ScriptedRunner {
+    scripted_squash_with(Response::stdout("base\n"), Response::stdout(""), merge_tree)
+}
+
+/// [`scripted_squash`], with the answers to `merge-base` and to the
+/// `rev-list` of the refs that are not branches as well.
+fn scripted_squash_with(
+    merge_base: Response,
+    off_every_branch: Response,
+    merge_tree: Response,
+) -> ScriptedRunner {
     const COUNTED: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     fn at(verb: &'static str) -> [&'static str; 4] {
         ["git", "--git-dir=/ws/.git", "--work-tree=/ws", verb]
@@ -803,10 +813,10 @@ fn scripted_squash(merge_tree: Response) -> ScriptedRunner {
                 "rev-list",
                 "--exclude=refs/heads/*",
             ],
-            Response::stdout(""),
+            off_every_branch,
         )
         .with_script(at("rev-list"), Response::stdout(format!("{COUNTED}\n")))
-        .with_script(at("merge-base"), Response::stdout("base\n"))
+        .with_script(at("merge-base"), merge_base)
         .with_script(
             [
                 "git",
@@ -847,6 +857,92 @@ fn a_merge_git_refuses_clears_nothing() {
         squashed_onto_a_remote(&Git::new(&clean), Path::new("/ws"), &counted, &[]),
         vec!["a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".to_owned()]
     );
+}
+
+#[test]
+fn a_change_measured_from_two_merge_bases_clears_nothing() {
+    // With two bases git would merge the bases first, and a clean merge from a
+    // base git made up is no evidence. The same clean merge-tree as the control
+    // in `a_merge_git_refuses_clears_nothing` clears the commit there.
+    let counted = ["a1b2c3d squashed".to_owned()];
+    let two_bases = scripted_squash_with(
+        Response::stdout("base\nother-base\n"),
+        Response::stdout(""),
+        Response::stdout("remote-tree\n"),
+    );
+
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&two_bases), Path::new("/ws"), &counted, &[]),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn refs_that_are_not_branches_git_will_not_list_clear_nothing() {
+    // What was not read may reach the commit, so a passing branch clears
+    // nothing when git refuses to say what the stash, the tags and the detached
+    // HEADs reach.
+    let counted = ["a1b2c3d squashed".to_owned()];
+    let refused = scripted_squash_with(
+        Response::stdout("base\n"),
+        Response::failed(128, "fatal: nope"),
+        Response::stdout("remote-tree\n"),
+    );
+
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&refused), Path::new("/ws"), &counted, &[]),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_local_tag_on_a_squashed_commit_holds_it_back() {
+    // The tag is not a branch, so it cannot pass, and what it reaches stays
+    // counted: `a` and `b`, with `c` above it cleared.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    git(&clone, &["tag", "keep", "feature~1"]);
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+/// *count* commits on `feature` after the squashed three, each a file of its
+/// own.
+fn more_commits(clone: &Path, count: usize) {
+    for n in 0..count {
+        write(&clone.join(format!("later-{n}.txt")), "more work\n");
+        commit(clone, &format!("later {n}"));
+    }
+}
+
+#[test]
+fn a_squash_seven_commits_under_the_tip_is_found() {
+    // The eighth point down is the squashed tip, `c`, the last one looked at.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    squash_feature_into_main(&teammate(&fixture));
+    more_commits(&clone, 7);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "7 unpushed commit(s)");
+}
+
+#[test]
+fn a_squash_eight_commits_under_the_tip_is_not_looked_for() {
+    // The limit, pinned: every point looked at holds later work, so nothing
+    // passes, and the squashed three stay counted with the eight above them.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    squash_feature_into_main(&teammate(&fixture));
+    more_commits(&clone, 8);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "11 unpushed commit(s)");
 }
 
 #[test]
