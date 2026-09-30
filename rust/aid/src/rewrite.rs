@@ -60,6 +60,20 @@ struct Agent {
     /// rows are those CLIs' documented spellings and were not run where this was
     /// written, because neither was installed there.
     resume: &'static [&'static str],
+    /// The flag that names a new session's id, when the agent takes one of aid's
+    /// choosing: claude's `--session-id <uuid>`.
+    ///
+    /// What lets herdr bring the session back after a restart. aid mints the id,
+    /// so the line that reopens the session (`resume` then the id) is known before
+    /// the session exists. `None` for codex and gemini, which name their own.
+    session_id: Option<&'static str>,
+    /// The words that reopen the most recent session *without* a picker, for a
+    /// restore that has no id: claude's `--continue`, codex's `resume --last`,
+    /// gemini's `--resume` (which already skips the picker, see [`Agent::resume`]).
+    ///
+    /// Read off `claude --help` (2.1.284) and `codex resume --help` (0.159.0).
+    /// gemini's is its documented spelling and was not run where this was written.
+    latest: &'static [&'static str],
 }
 
 /// How one agent is told one setting: a flag word, then the value behind a prefix.
@@ -205,6 +219,8 @@ const AGENTS: &[(&str, Agent)] = &[
             }),
             claude_login: true,
             resume: &["--resume"],
+            session_id: Some("--session-id"),
+            latest: &["--continue"],
         },
     ),
     (
@@ -227,6 +243,8 @@ const AGENTS: &[(&str, Agent)] = &[
             }),
             claude_login: false,
             resume: &["resume"],
+            session_id: None,
+            latest: &["resume", "--last"],
         },
     ),
     (
@@ -244,6 +262,8 @@ const AGENTS: &[(&str, Agent)] = &[
             effort: None,
             claude_login: false,
             resume: &["--resume"],
+            session_id: None,
+            latest: &["--resume"],
         },
     ),
 ];
@@ -604,7 +624,7 @@ pub(crate) enum RemoteControlRequest {
 /// than by anything downstream re-checking.
 ///
 /// No session name is carried, because the name is not a second thing to decide: it
-/// is always the id of the workspace the spec names, which [`build_dl_args`] asks
+/// is always the id of the workspace the spec names, which [`build_launch`] asks
 /// for when it builds the line, and a field holding it beside the spec would be two
 /// fields that must agree and so two fields that can disagree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1236,13 +1256,14 @@ fn agent_flag(word: &str) -> Option<&'static str> {
 /// `=`-joined into one argv word, is what makes that impossible. An agent whose table
 /// row has no Remote Control flag ignores the name rather than inventing one — a
 /// state [`parse_aid_args`] settles before it can be built.
+#[cfg(test)]
 pub(crate) fn build_agent_command(
     agent: &str,
     prompt: &str,
     remote_control: Option<&str>,
     tuning: &Tuning,
 ) -> Option<NonEmpty<String>> {
-    agent_line(agent, Opening::Prompt(prompt), remote_control, tuning)
+    agent_line(agent, Opening::Prompt(prompt), remote_control, tuning, None)
 }
 
 /// The argv that reopens one of the agent's earlier sessions inside the workspace.
@@ -1256,7 +1277,7 @@ pub(crate) fn build_resume_command(
     remote_control: Option<&str>,
     tuning: &Tuning,
 ) -> Option<NonEmpty<String>> {
-    agent_line(agent, Opening::Resume, remote_control, tuning)
+    agent_line(agent, Opening::Resume, remote_control, tuning, None)
 }
 
 /// How a session begins: with a prompt (empty for none), or by reopening one.
@@ -1264,14 +1285,19 @@ pub(crate) fn build_resume_command(
 enum Opening<'a> {
     Prompt(&'a str),
     Resume,
+    /// Reopening one after herdr restarts: `session` is the id aid named it with,
+    /// or `None` for the most recent one.
+    Restore(Option<&'a str>),
 }
 
-/// The one builder behind [`build_agent_command`] and [`build_resume_command`].
+/// The one builder behind [`build_agent_command`], [`build_resume_command`] and
+/// [`build_launch`].
 fn agent_line(
     agent: &str,
     opening: Opening<'_>,
     remote_control: Option<&str>,
     tuning: &Tuning,
+    session: Option<&str>,
 ) -> Option<NonEmpty<String>> {
     let started = agent_row(agent)?;
     // No prompt to be interactive about: start the agent's plain session, without
@@ -1303,6 +1329,13 @@ fn agent_line(
     if let Some(named_session) = &named_session {
         words.push(named_session.as_str());
     }
+    // Ahead of the prompt, which is always last. Only a fresh session is named:
+    // claude refuses `--session-id` beside `--resume` unless forking, and `session`
+    // is `None` on every other line.
+    if let (Some(flag), Some(id), Opening::Prompt(_)) = (started.session_id, session, opening) {
+        words.push(flag);
+        words.push(id);
+    }
     match opening {
         Opening::Prompt("") => {}
         Opening::Prompt(prompt) => {
@@ -1310,6 +1343,11 @@ fn agent_line(
             words.push(prompt);
         }
         Opening::Resume => words.extend(started.resume.iter().copied()),
+        Opening::Restore(Some(id)) if started.session_id.is_some() => {
+            words.extend(started.resume.iter().copied());
+            words.push(id);
+        }
+        Opening::Restore(_) => words.extend(started.latest.iter().copied()),
     }
     // Assignments prefixing a command set the variables for that command only, so
     // the agent is the one process that sees them and nothing in the login shell dl
@@ -1332,7 +1370,26 @@ fn agent_line(
     NonEmpty::of(line)
 }
 
-/// The dl command line that does the work.
+/// [`build_launch`]'s command line alone, for a session aid names no id for.
+#[cfg(test)]
+pub(crate) fn build_dl_args(
+    parsed: &AidArgs,
+    workspace_id_of: &dyn Fn(&str) -> Option<String>,
+) -> Option<Vec<String>> {
+    build_launch(parsed, workspace_id_of, None).map(|launch| launch.dl_args)
+}
+
+/// What aid hands dl: the command line, and how the agent it starts is started
+/// again after herdr restarts.
+#[derive(Debug)]
+pub(crate) struct Launch {
+    pub(crate) dl_args: Vec<String>,
+    /// `None` for a line that starts no agent, and for one whose workspace goes
+    /// when the session does (`--rm`): there is nothing to come back to.
+    pub(crate) resume: Option<dl::AgentResume>,
+}
+
+/// The dl command line that does the work, as [`Launch::dl_args`].
 ///
 /// `[<dl options>…, <spec>, "--", <agent argv>…]` — the agent's command and each of
 /// its arguments as their own word, which is the shape `dl` reads: it quotes the tail
@@ -1353,10 +1410,21 @@ fn agent_line(
 /// function rather than the answer, because the answer costs a `devpod status` for
 /// a triple and a line with Remote Control off has no use for it; `main` hands in
 /// [`dl::workspace_id_of`], and a test hands in a table.
-pub(crate) fn build_dl_args(
+///
+/// The fresh session is named `session` when the agent takes a name of aid's
+/// choosing, and beside the line goes the one that reopens it.
+///
+/// The reopening line is the agent's own line with no prompt, so a restore does
+/// not send the prompt again, and with the session's id or the agent's "most
+/// recent" words where the prompt was. Beside it goes the same line with only the
+/// id left off, which the container hook completes when the agent starts a new
+/// session under it (`/clear`); only an agent with [`Agent::session_id`] has one,
+/// since only claude has the hook.
+pub(crate) fn build_launch(
     parsed: &AidArgs,
     workspace_id_of: &dyn Fn(&str) -> Option<String>,
-) -> Option<Vec<String>> {
+    session: Option<&str>,
+) -> Option<Launch> {
     let mut args = parsed.dl_options.clone();
     args.push(parsed.spec.clone());
     // Behind the spec and ahead of the verb flags, which is where dl reads them as
@@ -1372,29 +1440,77 @@ pub(crate) fn build_dl_args(
     // The spec is the fallback only for a spec no id can be found for, which the
     // launch below then refuses itself. A resumed session takes the same name, so
     // it is listed on claude.ai where the session it resumes was.
-    let session = |remote_control: &RemoteControl| match remote_control {
+    let named = |remote_control: &RemoteControl| match remote_control {
         RemoteControl::On => {
             Some(workspace_id_of(&parsed.spec).unwrap_or_else(|| parsed.spec.clone()))
         }
         RemoteControl::Off => None,
     };
-    let command = match &parsed.task {
+    let (command, agent, restored, remote, tuning) = match &parsed.task {
         Task::Agent {
             agent,
             prompt,
             remote_control,
             tuning,
-        } => build_agent_command(agent, prompt, session(remote_control).as_deref(), tuning)?,
+        } => {
+            let remote = named(remote_control);
+            let command = agent_line(
+                agent,
+                Opening::Prompt(prompt),
+                remote.as_deref(),
+                tuning,
+                session,
+            )?;
+            (command, agent, session, remote, tuning)
+        }
         Task::Resume {
             agent,
             remote_control,
             tuning,
-        } => build_resume_command(agent, session(remote_control).as_deref(), tuning)?,
-        Task::Retired => return Some(args),
+        } => {
+            let remote = named(remote_control);
+            (
+                build_resume_command(agent, remote.as_deref(), tuning)?,
+                agent,
+                None,
+                remote,
+                tuning,
+            )
+        }
+        Task::Retired => {
+            return Some(Launch {
+                dl_args: args,
+                resume: None,
+            });
+        }
     };
+    let removed = args.iter().any(|word| word == "--rm");
+    let resume = (!removed).then(|| {
+        // The same model and effort as the line it reopens, as `aid resume` has.
+        let line = agent_line(
+            agent,
+            Opening::Restore(restored),
+            remote.as_deref(),
+            tuning,
+            None,
+        )?;
+        let by_id =
+            agent_line(agent, Opening::Resume, remote.as_deref(), tuning, None).filter(|_| {
+                AGENTS
+                    .iter()
+                    .any(|(name, it)| name == agent && it.session_id.is_some())
+            });
+        dl::AgentResume::new(
+            line.iter().cloned().collect(),
+            by_id.map(|by_id| by_id.iter().cloned().collect()),
+        )
+    });
     args.push("--".to_owned());
     args.extend(command.iter().cloned());
-    Some(args)
+    Some(Launch {
+        dl_args: args,
+        resume: resume.flatten(),
+    })
 }
 
 #[cfg(test)]
@@ -3280,6 +3396,188 @@ mod tests {
             UsageError::EffortUnsupported {
                 agent: "gemini".to_owned()
             }
+        );
+    }
+
+    // ------------------------------------------ starting again after a restart
+
+    const SESSION: &str = "0f3c9a4e-8d1b-4c2a-9e7f-5b6a1d2c3e4f";
+
+    fn line(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    const CLAUDE: &[&str] = &[
+        "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+        "IS_SANDBOX=1",
+        "claude",
+        "--dangerously-skip-permissions",
+        "--remote-control=ws-id",
+    ];
+
+    fn with<'a>(base: &[&'a str], more: &[&'a str]) -> Vec<&'a str> {
+        base.iter().chain(more).copied().collect()
+    }
+
+    /// The id is minted by aid, so the line that reopens it is known before the
+    /// session exists -- and the prompt is not in it, or a restore would send it again.
+    #[test]
+    fn a_fresh_claude_session_is_named_and_reopened_by_that_name() {
+        let launch = build_launch(&parsed(&["owner/repo", "fix", "it"]), &id_of, Some(SESSION))
+            .expect("an agent line");
+        let separator = launch
+            .dl_args
+            .iter()
+            .position(|word| word == "--")
+            .expect("a --");
+        assert_eq!(
+            launch.dl_args[separator + 1..],
+            with(CLAUDE, &["--session-id", SESSION, "fix it"])
+        );
+        assert_eq!(
+            launch.resume,
+            dl::AgentResume::new(
+                line(&with(CLAUDE, &["--resume", SESSION])),
+                Some(line(&with(CLAUDE, &["--resume"]))),
+            )
+        );
+    }
+
+    /// `aid resume` opens claude's picker, so the id is not aid's to know: a restore
+    /// reopens the latest session, and the container hook names the real one when
+    /// it can.
+    #[test]
+    fn a_picked_session_is_reopened_as_the_latest_one() {
+        let launch = build_launch(&parsed(&["resume", "owner/repo"]), &id_of, Some(SESSION))
+            .expect("an agent line");
+        assert!(
+            !launch.dl_args.iter().any(|word| word == "--session-id"),
+            "claude refuses --session-id beside --resume: {:?}",
+            launch.dl_args
+        );
+        assert_eq!(
+            launch.resume,
+            dl::AgentResume::new(
+                line(&with(CLAUDE, &["--continue"])),
+                Some(line(&with(CLAUDE, &["--resume"]))),
+            )
+        );
+    }
+
+    /// `aid resume --codex` and `--gemini` open the agent's own picker too, and
+    /// neither has a hook: a restore reopens the latest session in its own spelling.
+    #[test]
+    fn a_picked_codex_or_gemini_session_is_reopened_as_the_latest_one() {
+        for (flag, expected) in [
+            (
+                "--codex",
+                &[
+                    "codex",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "resume",
+                    "--last",
+                ][..],
+            ),
+            ("--gemini", &["gemini", "--yolo", "--resume"][..]),
+        ] {
+            let launch = build_launch(
+                &parsed(&[flag, "resume", "owner/repo"]),
+                &id_of,
+                Some(SESSION),
+            )
+            .expect("an agent line");
+            assert_eq!(
+                launch.resume,
+                dl::AgentResume::new(line(expected), None),
+                "{flag}"
+            );
+        }
+    }
+
+    /// No id to hand (the kernel's random source was unreadable): the latest session.
+    #[test]
+    fn without_an_id_a_fresh_session_is_reopened_as_the_latest_one() {
+        let launch =
+            build_launch(&parsed(&["owner/repo", "hi"]), &id_of, None).expect("an agent line");
+        assert!(!launch.dl_args.iter().any(|word| word == "--session-id"));
+        assert_eq!(
+            launch.resume,
+            dl::AgentResume::new(
+                line(&with(CLAUDE, &["--continue"])),
+                Some(line(&with(CLAUDE, &["--resume"]))),
+            )
+        );
+    }
+
+    /// codex and gemini take no id of aid's choosing and have no hook: each
+    /// reopens its latest session in its own spelling.
+    #[test]
+    fn the_other_agents_reopen_their_latest_session() {
+        for (flag, expected) in [
+            (
+                "--codex",
+                &[
+                    "codex",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "resume",
+                    "--last",
+                ][..],
+            ),
+            ("--gemini", &["gemini", "--yolo", "--resume"][..]),
+        ] {
+            let launch = build_launch(&parsed(&[flag, "owner/repo", "hi"]), &id_of, Some(SESSION))
+                .expect("an agent line");
+            assert!(!launch.dl_args.iter().any(|word| word == SESSION), "{flag}");
+            assert_eq!(
+                launch.resume,
+                dl::AgentResume::new(line(expected), None),
+                "{flag}"
+            );
+        }
+    }
+
+    /// A workspace removed when the session ends has nothing to come back to.
+    #[test]
+    fn a_line_that_removes_its_workspace_is_not_reopened() {
+        let launch = build_launch(
+            &parsed(&["owner/repo", "hi", "--rm"]),
+            &id_of,
+            Some(SESSION),
+        )
+        .expect("an agent line");
+        assert_eq!(launch.resume, None);
+        let launch = build_launch(&parsed(&["owner/repo", "--autorm"]), &id_of, Some(SESSION))
+            .expect("a retired line");
+        assert_eq!(launch.resume, None);
+    }
+
+    /// A restore after herdr restarts is the same session, so it keeps the model
+    /// and effort the launch asked for, as `aid resume` does.
+    #[test]
+    fn a_restored_session_keeps_the_model_and_effort() {
+        let launch = build_launch(
+            &parsed(&["--model", "opus", "--effort", "max", "owner/repo", "hi"]),
+            &id_of,
+            Some(SESSION),
+        )
+        .expect("an agent line");
+        let tuned = &[
+            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1",
+            "IS_SANDBOX=1",
+            "claude",
+            "--dangerously-skip-permissions",
+            "--model",
+            "opus",
+            "--effort",
+            "max",
+            "--remote-control=ws-id",
+        ][..];
+        assert_eq!(
+            launch.resume,
+            dl::AgentResume::new(
+                line(&with(tuned, &["--resume", SESSION])),
+                Some(line(&with(tuned, &["--resume"]))),
+            )
         );
     }
 }

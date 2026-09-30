@@ -422,7 +422,7 @@ fn a_typed_prompt_reaches_the_agent_with_no_shell_in_the_way() {
     session.expect("aid -> dl");
     assert_eq!(session.wait(), 0);
     assert_eq!(
-        world.devpod_calls().last().expect("a session"),
+        &without_session_id(world.devpod_calls().last().expect("a session")),
         &format!(
             "devpod ssh {MAIN} --log-output json --command bash -lc 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
              --dangerously-skip-permissions --remote-control={MAIN} \
@@ -466,7 +466,7 @@ fn a_pasted_multi_line_prompt_arrives_whole_rather_than_leaking() {
     session.press("fix this\rand then that\r");
     assert_eq!(session.wait(), 0);
     assert_eq!(
-        world.devpod_calls().last().expect("a session"),
+        &without_session_id(world.devpod_calls().last().expect("a session")),
         &format!(
             "devpod ssh {MAIN} --log-output json --command bash -lc 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
              --dangerously-skip-permissions --remote-control={MAIN} \
@@ -483,7 +483,7 @@ fn an_empty_enter_is_the_plain_session_it_always_was() {
     session.send_line("");
     assert_eq!(session.wait(), 0);
     assert_eq!(
-        world.devpod_calls().last().expect("a session"),
+        &without_session_id(world.devpod_calls().last().expect("a session")),
         &format!(
             "devpod ssh {MAIN} --log-output json --command bash -lc 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
              --dangerously-skip-permissions --remote-control={MAIN}'"
@@ -625,7 +625,7 @@ fn the_boot_runs_while_the_prompt_is_still_being_typed() {
     session.send_line("go");
     assert_eq!(session.wait(), 0);
     assert_eq!(
-        world.devpod_calls().last().expect("a session"),
+        &without_session_id(world.devpod_calls().last().expect("a session")),
         &format!(
             "devpod ssh {MAIN} --log-output json --command bash -lc 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
              --dangerously-skip-permissions --remote-control={MAIN} go'"
@@ -736,7 +736,7 @@ fn a_model_that_is_not_listed_is_typed_and_reaches_the_agent() {
     session.send_line("go");
     assert_eq!(session.wait(), 0);
     assert_eq!(
-        world.devpod_calls().last().expect("a session"),
+        &without_session_id(world.devpod_calls().last().expect("a session")),
         &claude_session("--model claude-opus-5-5 --effort max ", "go")
     );
 }
@@ -759,7 +759,7 @@ fn the_last_choice_is_the_first_row_of_the_next_launch() {
     second.send_line("two");
     assert_eq!(second.wait(), 0);
     assert_eq!(
-        world.devpod_calls().last().expect("a session"),
+        &without_session_id(world.devpod_calls().last().expect("a session")),
         &claude_session("--model sonnet --effort low ", "two")
     );
 }
@@ -778,7 +778,7 @@ fn a_setting_a_flag_gave_is_not_asked_for() {
     session.send_line("go");
     assert_eq!(session.wait(), 0);
     assert_eq!(
-        world.devpod_calls().last().expect("a session"),
+        &without_session_id(world.devpod_calls().last().expect("a session")),
         &claude_session("--model opus ", "go")
     );
 }
@@ -802,7 +802,7 @@ fn with_no_terminal_type_the_pickers_are_drawn_as_the_fallback_terminal() {
     session.send_line("go");
     assert_eq!(session.wait(), 0);
     assert_eq!(
-        world.devpod_calls().last().expect("a session"),
+        &without_session_id(world.devpod_calls().last().expect("a session")),
         &claude_session("", "go")
     );
 }
@@ -1077,7 +1077,7 @@ fn a_setting_a_flag_gave_is_the_first_row_of_the_next_launch() {
     second.send_line("two");
     assert_eq!(second.wait(), 0);
     assert_eq!(
-        world.devpod_calls().last().expect("a session"),
+        &without_session_id(world.devpod_calls().last().expect("a session")),
         &claude_session("--model opus ", "two")
     );
 }
@@ -1190,7 +1190,7 @@ fn a_bare_aid_picks_a_workspace_as_a_bare_dl_does() {
     session.send_line("go");
     assert_eq!(session.wait(), 0);
     assert_eq!(
-        world.devpod_calls().last().expect("a session"),
+        &without_session_id(world.devpod_calls().last().expect("a session")),
         &claude_session("", "go")
     );
 }
@@ -1270,4 +1270,23 @@ fn a_retired_spelling_with_no_workspace_is_refused_before_any_picker() {
             world.devpod_calls()
         );
     }
+}
+
+/// A session call with aid's `--session-id <uuid>` taken out, after checking it is
+/// there: the id is random per launch, and every other byte of the line is the
+/// assertion.
+fn without_session_id(call: &str) -> String {
+    let flag = " --session-id ";
+    let at = call
+        .find(flag)
+        .unwrap_or_else(|| panic!("aid named no session: {call}"));
+    let id_starts = at + flag.len();
+    let id = &call[id_starts..id_starts + 36];
+    assert!(
+        id.len() == 36
+            && id.chars().filter(|c| *c == '-').count() == 4
+            && id.as_bytes()[14] == b'4',
+        "not a v4 uuid: {id:?}"
+    );
+    format!("{}{}", &call[..at], &call[id_starts + 36..])
 }
