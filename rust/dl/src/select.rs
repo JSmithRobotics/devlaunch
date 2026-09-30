@@ -98,6 +98,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -106,6 +107,7 @@ use devlaunch_core::domain::workspace_id::WorkspaceId;
 use devlaunch_core::domain::workspace_state::NonEmpty;
 use devlaunch_core::flows::listing::{head_branch_of, owner_of, repo_of};
 use skim::prelude::*;
+use term::terminfo::TermInfo;
 
 /// One row the picker offers, and the workspace it stands for.
 ///
@@ -631,11 +633,12 @@ pub(crate) struct Chosen {
 
 /// What the picker settled.
 ///
-/// Four arms where Python has `Optional[str]`, because its `None` covers four
-/// different situations and two of them have something to say: an empty list is
-/// reported (`No workspaces found …`), and a run with no terminal cannot draw a
-/// picker at all. All three of the non-answers end the same way — Python prints the
-/// help and exits 1 — but which one happened is the caller's to say.
+/// Five arms where Python has `Optional[str]`, because its `None` covers several
+/// different situations and some of them have something to say: an empty list is
+/// reported (`No workspaces found …`), and a run with no terminal, or with no
+/// terminfo entry to draw on it with, cannot draw a picker at all. All four of the
+/// non-answers end the same way — Python prints the help and exits 1 — but which
+/// one happened is the caller's to say.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Pick {
     /// These workspaces, in the order skim handed the rows back. One entry always
@@ -651,6 +654,10 @@ pub(crate) enum Pick {
     /// pipe. Python's fzf said `inappropriate ioctl for device` and answered
     /// nothing; this answers the same nothing without the subprocess.
     NoTerminal,
+    /// There is a terminal, but no terminfo entry here that skim can draw on it
+    /// with, under `TERM` or under [`FALLBACK_TERM`]. The clause says why, for the
+    /// caller to finish with how to name the workspace instead.
+    Undrawable(String),
 }
 
 /// Offer these workspaces and wait for one — or, under [`Arity::Several`], any
@@ -666,7 +673,17 @@ pub(crate) fn pick(workspaces: &[Workspace], arity: Arity, cache_dir: &Path) -> 
     if !a_terminal_exists() {
         return Pick::NoTerminal;
     }
+    let swapped = match plan(
+        TermInfo::from_env(),
+        TermInfo::from_name(FALLBACK_TERM),
+        Was::read(),
+    ) {
+        Plan::Keep => None,
+        Plan::Swap { was, reason } => Some(DrawableTerm::swap(was, reason)),
+        Plan::Refuse { reason } => return Pick::Undrawable(reason),
+    };
     let rows = run_skim(&offering, arity);
+    drop(swapped);
     chosen(&offering.offers, rows)
 }
 
@@ -780,6 +797,134 @@ fn run_skim(offering: &Offering, arity: Arity) -> Vec<String> {
         .collect()
 }
 
+/// The `TERM` the picker is drawn under when the process's own names no terminfo
+/// entry skim can draw with.
+///
+/// It is what nearly every terminal emulator answers to, and nearly every terminfo
+/// database carries it. Not every one: with no database at all the `term` crate
+/// still answers for this name, with a built-in entry that cannot move the cursor,
+/// so it is held to [`drawable`] like any other name ([`plan`]).
+const FALLBACK_TERM: &str = "xterm-256color";
+
+/// Whether skim can draw the picker with this terminfo entry.
+///
+/// skim-tuikit writes every control sequence through the entry, and writes nothing
+/// for a capability the entry lacks (`Output::write_cap`), so a missing one is not
+/// an error but a screen that comes out wrong. `cup` is the one it cannot do
+/// without, since every row is placed with it. The `term` crate's built-in ANSI
+/// entry, which `TermInfo::from_name` returns for any `xterm*`, `screen*` or
+/// `tmux*` name that has no database entry behind it, holds colours and bold and no
+/// `cup`. The alternate screen (`smcup`) is not needed to draw: without it skim
+/// draws over the visible screen, which is still a picker. It is missed afterwards,
+/// though. An entry without `smcup` has no `rmcup` either, so nothing puts the old
+/// screen back when skim closes, and the picker's rows stay where they were drawn.
+fn drawable(entry: &TermInfo) -> bool {
+    entry.strings.contains_key("cup")
+}
+
+/// What `TERM` held when the picker was asked for.
+///
+/// Read once, with `var_os`, and used both for what the note says and for what is
+/// put back. `TermInfo::from_env` reads the variable with `env::var` instead, which
+/// answers nothing for bytes that are not UTF-8, so its `TermUnset` cannot be
+/// trusted to mean the variable is unset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Was {
+    Unset,
+    Set(OsString),
+}
+
+impl Was {
+    fn read() -> Self {
+        std::env::var_os("TERM").map_or(Self::Unset, Self::Set)
+    }
+}
+
+/// What to do about `TERM` before skim runs.
+#[derive(Debug, PartialEq, Eq)]
+enum Plan {
+    /// The entry `TERM` names can draw the picker.
+    Keep,
+    /// Draw under [`FALLBACK_TERM`], give `reason` once the picker has closed, and
+    /// put back what `TERM` `was`.
+    Swap { was: Was, reason: String },
+    /// Neither the entry `TERM` names nor [`FALLBACK_TERM`]'s can draw the picker,
+    /// and `reason` says so, for the caller to finish with what to do instead.
+    Refuse { reason: String },
+}
+
+/// The [`Plan`] for two terminfo lookups: `current` for the `TERM` there is, which
+/// held what it `was`, and `fallback` for [`FALLBACK_TERM`].
+fn plan(current: term::Result<TermInfo>, fallback: term::Result<TermInfo>, was: Was) -> Plan {
+    if current.as_ref().is_ok_and(drawable) {
+        return Plan::Keep;
+    }
+    let missing = match &was {
+        Was::Unset => None,
+        Was::Set(name) => Some(format!(
+            "TERM={} names no terminfo entry here that can move the cursor",
+            name.to_string_lossy()
+        )),
+    };
+    if fallback.as_ref().is_ok_and(drawable) {
+        let reason = missing.unwrap_or_else(|| "TERM is unset".to_owned());
+        return Plan::Swap { was, reason };
+    }
+    let reason = match missing {
+        None => format!(
+            "TERM is unset, and {FALLBACK_TERM} names no terminfo entry here that can move \
+             the cursor"
+        ),
+        Some(missing) => format!("{missing}, and neither does {FALLBACK_TERM}"),
+    };
+    Plan::Refuse { reason }
+}
+
+/// A `TERM` swapped for [`FALLBACK_TERM`] while skim runs, put back on drop.
+///
+/// skim's terminal setup looks up the terminfo entry `TERM` names and unwraps the
+/// answer (`Skim::run_with`), so a real terminal with `TERM` unset, or naming an
+/// entry this machine lacks (a terminal's own name inside a container without it),
+/// panicked before drawing a row. skim takes no terminfo of its own, so the
+/// variable is the only thing that can be changed. It is put back so that the
+/// session a pick goes on to open inherits the user's `TERM`, not this one.
+struct DrawableTerm {
+    was: Was,
+    /// Why the swap was made, said once the picker has given the screen back.
+    reason: String,
+}
+
+impl DrawableTerm {
+    /// Put [`FALLBACK_TERM`] in `TERM` until this is dropped, and then what it
+    /// `was`.
+    fn swap(was: Was, reason: String) -> Self {
+        // Safety: `set_var` races only a concurrent `getenv` or `setenv`. Nothing
+        // else runs in this process now but the runner's pipe readers, which only
+        // `read`, and skim has not started its threads yet.
+        unsafe { std::env::set_var("TERM", FALLBACK_TERM) };
+        Self { was, reason }
+    }
+}
+
+impl Drop for DrawableTerm {
+    fn drop(&mut self) {
+        // After skim, not before: a line written first is on the screen the picker
+        // covers, and it would read as the reason nothing was drawn.
+        eprintln!(
+            "{}, so the picker was drawn as {FALLBACK_TERM}.",
+            self.reason
+        );
+        // Safety: as in `swap`. `Skim::run_with` has returned, and joined its
+        // input thread, by the time this runs.
+        unsafe {
+            match &self.was {
+                Was::Set(before) => std::env::set_var("TERM", before),
+                Was::Unset => std::env::remove_var("TERM"),
+            }
+        }
+    }
+}
+
 /// The offers as skim items, each carrying its own position as the item index.
 fn rows_of(offers: &[Offer]) -> Vec<Arc<dyn SkimItem>> {
     offers
@@ -868,12 +1013,22 @@ pub enum Choice {
 /// almost any query, so Enter would take that row instead of what was typed. And
 /// a query that matches no row is an answer, [`Choice::Typed`].
 pub fn choose(header: &str, rows: &[String]) -> Choice {
-    if !a_terminal_exists()
-        || !a_terminal_type(std::env::var_os("TERM").as_deref())
-        || !a_drawable_size(terminal_size())
-    {
+    if !a_terminal_exists() || !a_drawable_size(terminal_size()) {
         return Choice::NoTerminal;
     }
+    // The workspace picker's `TERM` check, for the same panic: a `TERM` skim cannot
+    // draw with is swapped for [`FALLBACK_TERM`] while the chooser is up, and with
+    // no usable entry at all the chooser is skipped. The caller then goes on
+    // without it, as it does with no terminal.
+    let swapped = match plan(
+        TermInfo::from_env(),
+        TermInfo::from_name(FALLBACK_TERM),
+        Was::read(),
+    ) {
+        Plan::Keep => None,
+        Plan::Swap { was, reason } => Some(DrawableTerm::swap(was, reason)),
+        Plan::Refuse { .. } => return Choice::NoTerminal,
+    };
     let (tx, rx): (SkimItemSender, SkimItemReceiver) = unbounded();
     for (index, label) in rows.iter().enumerate() {
         let row: Arc<dyn SkimItem> = Arc::new(Row {
@@ -885,21 +1040,13 @@ pub fn choose(header: &str, rows: &[String]) -> Choice {
         }
     }
     drop(tx);
-    let Some(output) = Skim::run_with(&choose_options(header), Some(rx)) else {
+    let output = Skim::run_with(&choose_options(header), Some(rx));
+    drop(swapped);
+    let Some(output) = output else {
         return Choice::Cancelled;
     };
     let picked = output.selected_items.first().map(|item| item.get_index());
     choice_of(output.is_abort, &output.query, picked, rows.len())
-}
-
-/// Whether `TERM` names a terminal skim can draw on.
-///
-/// skim reads the terminfo entry `TERM` names and unwraps the result, so with no
-/// `TERM` it panics rather than answering (`TermUnset`, skim 0.20.5). A person at a
-/// terminal always has one; a pty a program opened may not. `dumb` is the name for
-/// a terminal that cannot move its cursor, so it gets no picker either.
-fn a_terminal_type(term: Option<&std::ffi::OsStr>) -> bool {
-    term.is_some_and(|term| !term.is_empty() && term != "dumb")
 }
 
 /// The terminal's size as rows and columns, or `None` if it cannot be read.
@@ -2148,19 +2295,108 @@ mod tests {
     }
 
     #[test]
-    fn no_terminal_type_is_no_terminal_to_draw_a_chooser_on() {
-        use std::ffi::OsStr;
-        assert!(a_terminal_type(Some(OsStr::new("xterm-256color"))));
-        assert!(!a_terminal_type(None));
-        assert!(!a_terminal_type(Some(OsStr::new(""))));
-        assert!(!a_terminal_type(Some(OsStr::new("dumb"))));
-    }
-
-    #[test]
     fn a_terminal_with_no_size_is_no_terminal_to_draw_a_chooser_on() {
         assert!(a_drawable_size(Some((24, 80))));
         assert!(a_drawable_size(None));
         assert!(!a_drawable_size(Some((0, 0))));
         assert!(!a_drawable_size(Some((24, 0))));
+    }
+
+    /// A terminfo entry holding exactly these string capabilities.
+    fn entry(capabilities: &[&'static str]) -> TermInfo {
+        TermInfo {
+            names: vec!["test".to_owned()],
+            bools: HashMap::new(),
+            numbers: HashMap::new(),
+            strings: capabilities
+                .iter()
+                .map(|capability| (*capability, b"\x1b[".to_vec()))
+                .collect(),
+        }
+    }
+
+    /// A database entry, as far as [`drawable`] reads one.
+    fn full() -> TermInfo {
+        entry(&[
+            "cup", "smcup", "rmcup", "clear", "el", "ed", "sgr0", "setaf",
+        ])
+    }
+
+    /// What `term` 0.7 answers for an `is_ansi` name with no database entry behind it
+    /// (`TermInfo::from_name`).
+    fn ansi_only() -> TermInfo {
+        entry(&["sgr0", "bold", "setaf", "setab"])
+    }
+
+    /// `TERM` set to `name`.
+    fn set(name: &str) -> Was {
+        Was::Set(name.into())
+    }
+
+    #[test]
+    fn an_entry_that_can_move_the_cursor_is_kept() {
+        assert_eq!(plan(Ok(full()), Ok(full()), set("xterm-kitty")), Plan::Keep);
+    }
+
+    #[test]
+    fn an_entry_that_cannot_move_the_cursor_is_swapped_for_one_that_can() {
+        assert_eq!(
+            plan(Ok(ansi_only()), Ok(full()), set("xterm-kitty")),
+            Plan::Swap {
+                was: set("xterm-kitty"),
+                reason: "TERM=xterm-kitty names no terminfo entry here that can move the cursor"
+                    .to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn an_unset_term_is_swapped_for_one_that_can_move_the_cursor() {
+        assert_eq!(
+            plan(Err(term::Error::TermUnset), Ok(full()), Was::Unset),
+            Plan::Swap {
+                was: Was::Unset,
+                reason: "TERM is unset".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_fallback_that_cannot_move_the_cursor_is_refused_rather_than_named() {
+        assert_eq!(
+            plan(Ok(ansi_only()), Ok(ansi_only()), set("xterm-kitty")),
+            Plan::Refuse {
+                reason: "TERM=xterm-kitty names no terminfo entry here that can move the cursor, \
+                         and neither does xterm-256color"
+                    .to_owned()
+            }
+        );
+        assert_eq!(
+            plan(Err(term::Error::TermUnset), Ok(ansi_only()), Was::Unset),
+            Plan::Refuse {
+                reason: "TERM is unset, and xterm-256color names no terminfo entry here that can \
+                         move the cursor"
+                    .to_owned()
+            }
+        );
+    }
+
+    /// `TermInfo::from_env` reads `TERM` with `env::var`, which answers nothing for
+    /// bytes that are not UTF-8, so the lookup says `TermUnset` for a `TERM` that is
+    /// set. The note is about the variable, and the variable is set; so is what is
+    /// put back.
+    #[test]
+    fn a_term_that_is_not_utf8_is_named_rather_than_called_unset() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let was = Was::Set(OsString::from_vec(b"xterm-\xff".to_vec()));
+        assert_eq!(
+            plan(Err(term::Error::TermUnset), Ok(full()), was.clone()),
+            Plan::Swap {
+                was,
+                reason: "TERM=xterm-\u{fffd} names no terminfo entry here that can move the cursor"
+                    .to_owned()
+            }
+        );
     }
 }

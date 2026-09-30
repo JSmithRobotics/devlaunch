@@ -75,11 +75,13 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).expect("written");
 }
 
-/// A bare repository standing in for GitHub, with one commit on `main`.
-fn remote_at(root: &Path) -> PathBuf {
+/// A bare repository standing in for GitHub, with one commit on `main`, its
+/// objects named by *object_format*.
+fn remote_at(root: &Path, object_format: &str) -> PathBuf {
     let origin = root.join("origin.git");
     let seed = root.join("seed");
-    git(root, &["init", "-q", "-b", "main", "seed"]);
+    let format = format!("--object-format={object_format}");
+    git(root, &["init", "-q", "-b", "main", &format, "seed"]);
     write(&seed.join("README.md"), "seed\n");
     commit(&seed, "seed");
     git(
@@ -123,8 +125,13 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::named_by("sha1")
+    }
+
+    /// A fixture whose repositories name their objects by *object_format*.
+    fn named_by(object_format: &str) -> Self {
         let root = tempfile::tempdir().expect("a temp dir");
-        let remote = remote_at(root.path());
+        let remote = remote_at(root.path(), object_format);
         Self { root, remote }
     }
 
@@ -318,6 +325,1357 @@ fn a_branch_whose_commits_are_on_the_remote_under_another_name_is_saved() {
     git(&clone, &["branch", "-m", "feature", "renamed"]);
 
     assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+// ------------------------------------ work on the remote as new commits
+
+/// Run a git command that writes a commit, with an identity this test owns.
+fn git_as_author(cwd: &Path, args: &[&str]) -> String {
+    let mut argv = vec!["-c", "user.email=t@t", "-c", "user.name=t"];
+    argv.extend(args);
+    git(cwd, &argv)
+}
+
+/// A second clone of *remote*, for the teammate who rewrites it.
+fn teammate(fixture: &Fixture) -> PathBuf {
+    let mate = fixture.path("mate");
+    git(
+        fixture.root.path(),
+        &[
+            "clone",
+            "-q",
+            fixture.remote.to_str().expect("utf-8"),
+            mate.to_str().expect("utf-8"),
+        ],
+    );
+    mate
+}
+
+/// Move `main` on the remote by one commit that touches nothing *clone* has.
+fn move_main(mate: &Path) {
+    git(mate, &["checkout", "-q", "main"]);
+    write(&mate.join("main.txt"), "main moved\n");
+    commit(mate, "main moved");
+    git(mate, &["push", "-q", "origin", "main"]);
+}
+
+/// Rebase the remote's `feature` onto its moved `main` and force-push it, so
+/// every commit on it gets a new hash.
+fn rebase_feature_on_the_remote(mate: &Path) {
+    move_main(mate);
+    git(mate, &["checkout", "-q", "feature"]);
+    git_as_author(mate, &["rebase", "-q", "main"]);
+    git(mate, &["push", "-q", "--force", "origin", "feature"]);
+}
+
+/// The commits on *branch* that no remote-tracking ref has, by hash.
+fn by_sha(clone: &Path, branch: &str) -> usize {
+    git(clone, &["log", "--oneline", branch, "--not", "--remotes"])
+        .lines()
+        .count()
+}
+
+#[test]
+fn a_branch_the_remote_rebased_holds_nothing_unsaved() {
+    // The kinisi_ros case that refused `rm` over 23 commits: the remote branch was
+    // rebased, so the clone's old commits are on no remote-tracking ref, and every
+    // one of them is on the remote in its new form.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    for name in ["a", "b"] {
+        write(&clone.join(format!("{name}.txt")), "work\n");
+        commit(&clone, name);
+    }
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    // The premise, asserted rather than assumed: by hash, all three commits are
+    // unpushed now.
+    assert_eq!(by_sha(&clone, "feature"), 3);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_commit_the_remote_rebased_in_a_sha256_repository_holds_nothing_unsaved() {
+    // The copy rule replays the commit onto the copy's parent, which edits the
+    // same file far from it, so the replay merges content. Told to read
+    // attributes from the SHA-1 empty tree, git refused it, and the commit
+    // stayed counted.
+    let fixture = Fixture::named_by("sha256");
+    let clone = fixture.clone();
+    write(&clone.join("list.txt"), &numbered(&[]));
+    commit(&clone, "list");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    write(&clone.join("list.txt"), &numbered(&[(18, "eighteen")]));
+    commit(&clone, "eighteen");
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(&mate.join("list.txt"), &numbered(&[(2, "two")]));
+    commit(&mate, "two");
+    write(
+        &mate.join("list.txt"),
+        &numbered(&[(2, "two"), (18, "eighteen")]),
+    );
+    commit(&mate, "eighteen");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_rebased_copy_in_a_clone_with_info_attributes_stays_counted() {
+    // No option switches `info/attributes` off, so the replay that confirms a
+    // copy is not made, and the copies stay counted.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    for name in ["a", "b"] {
+        write(&clone.join(format!("{name}.txt")), "work\n");
+        commit(&clone, name);
+    }
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    write(&clone.join(".git/info/attributes"), "*.bin -diff\n");
+
+    assert_eq!(would_lose(&held(&clone)), "3 unpushed commit(s)");
+}
+
+#[test]
+fn a_copy_that_replays_cleanly_only_under_a_union_attribute_stays_counted() {
+    // The local commit adds `L` after `b3`. The remote's parent of the copy
+    // adds `new b1 b2 b3` at the same place, and the copy adds `L` after the
+    // second `b3`, so the two patches are the same text. As text the replay
+    // conflicts: both sides add at one place. `merge=union` keeps both sides
+    // and gives the copy's tree, and the rule merges as text.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    let lines = |lines: &[&str]| {
+        lines
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>()
+    };
+    let head = ["x1", "x2", "x3", "x4", "b1", "b2", "b3"];
+    let tail = ["a1", "a2", "a3", "y1", "y2", "y3"];
+    let again = ["new", "b1", "b2", "b3"];
+    write(&clone.join(".gitattributes"), "N merge=union\n");
+    write(&clone.join("N"), &lines(&[&head[..], &tail[..]].concat()));
+    commit(&clone, "base");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    write(
+        &clone.join("N"),
+        &lines(&[&head[..], &["L"], &tail[..]].concat()),
+    );
+    commit(&clone, "add L");
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(
+        &mate.join("N"),
+        &lines(&[&head[..], &again[..], &tail[..]].concat()),
+    );
+    commit(&mate, "add new");
+    write(
+        &mate.join("N"),
+        &lines(&[&head[..], &again[..], &["L"], &tail[..]].concat()),
+    );
+    commit(&mate, "add L");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(
+        cherry_marked(&clone, "feature...origin/feature").len(),
+        1,
+        "the copy has the local commit's patch"
+    );
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_branch_the_remote_rebased_holds_nothing_unsaved_in_colour_too() {
+    // `color.ui=always` puts an escape code before every hash `log --oneline`
+    // prints, and a line that starts with one names no commit.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["config", "color.ui", "always"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_backup_made_before_the_remote_rebase_holds_nothing_unsaved() {
+    // The shape that kept most of the old commits on a real host: a backup branch
+    // with no upstream, whose copies are on *another* local branch's upstream.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["branch", "backup/before-rebase"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    git_as_author(&clone, &["reset", "-q", "--hard", "origin/feature"]);
+    assert_eq!(by_sha(&clone, "backup/before-rebase"), 1);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn only_the_commits_the_rebased_remote_has_a_copy_of_drop_out() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    write(&clone.join("unpushed.txt"), "an hour of work\n");
+    commit(&clone, "unpushed");
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 2);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_commit_squash_merged_into_the_default_branch_is_saved() {
+    // A one-commit PR squashed into `main` lands as a new commit with the same
+    // patch. The branch's own remote ref never got the commit, and with no local
+    // `main` tracking `origin/main`, only `origin/HEAD` can say the remote has it.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("fix.txt"), "the fix\n");
+    commit(&clone, "fix");
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "main"]);
+    write(&mate.join("fix.txt"), "the fix\n");
+    commit(&mate, "fix (#1)");
+    git(&mate, &["push", "-q", "origin", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    git(&clone, &["branch", "-q", "-D", "main"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_branch_that_tracks_nothing_is_compared_with_its_namesake_on_the_remote() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["branch", "-q", "--unset-upstream", "feature"]);
+    git(&clone, &["branch", "-q", "-D", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_squash_that_leaves_out_part_of_the_branch_leaves_every_commit_counted() {
+    // No one commit's patch is the squash's, so the copy rule finds nothing. The
+    // squash rule compares the branch's whole change since it left `main`, and
+    // `feature.txt` is part of that change but not of this squash, so it finds
+    // nothing either. Stricter than it has to be (`feature.txt` is on
+    // `origin/feature`), and that is the safe side.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    for name in ["a", "b"] {
+        write(&clone.join(format!("{name}.txt")), "work\n");
+        commit(&clone, name);
+    }
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "main"]);
+    for name in ["a", "b"] {
+        write(&mate.join(format!("{name}.txt")), "work\n");
+    }
+    commit(&mate, "a and b (#2)");
+    git(&mate, &["push", "-q", "origin", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+/// Three unpushed commits on `feature`, the second editing the file the first
+/// wrote, so no one of them has the squash's patch.
+fn three_commits(clone: &Path) {
+    write(&clone.join("notes.txt"), "one\n");
+    commit(clone, "a");
+    write(&clone.join("notes.txt"), "one\ntwo\n");
+    commit(clone, "b");
+    write(&clone.join("other.txt"), "three\n");
+    commit(clone, "c");
+}
+
+/// Squash `feature` into the remote's `main` as one commit, the way GitHub
+/// writes a squash merge: the whole change of the branch since it left `main`.
+fn squash_feature_into_main(mate: &Path) {
+    git(mate, &["checkout", "-q", "main"]);
+    write(&mate.join("feature.txt"), "work\n");
+    write(&mate.join("notes.txt"), "one\ntwo\n");
+    write(&mate.join("other.txt"), "three\n");
+    commit(mate, "feature (#3)");
+    git(mate, &["push", "-q", "origin", "main"]);
+}
+
+#[test]
+fn a_branch_squashed_into_the_default_branch_holds_nothing_unsaved() {
+    // kinisi_ros#12035's workspace, which `rm` refused over 3 commits: the PR was
+    // squashed into `main`, and its whole change is on `origin/main` as one
+    // commit that matches none of the three.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+/// Twenty numbered lines, with line *n* replaced by *text* for each edit.
+fn numbered(edits: &[(usize, &str)]) -> String {
+    (1..=20)
+        .map(|n| {
+            let edit = edits.iter().find(|(line, _)| *line == n);
+            edit.map_or_else(|| format!("{n}\n"), |(_, text)| format!("{text}\n"))
+        })
+        .collect()
+}
+
+/// A SHA-256 clone that pushed `list.txt` on `feature`, then made three
+/// unpushed commits that edit lines 5 to 7 of it; and a teammate's push to
+/// `feature` of those three edits as one commit, with line 18 as *line_18*
+/// and line 6 as *line_6*. Both sides change `list.txt`, so the merge that
+/// compares them merges its content.
+fn squashed_on_feature_in_sha256(fixture: &Fixture, line_6: &str, line_18: &str) -> PathBuf {
+    let clone = fixture.clone();
+    assert_eq!(
+        git(&clone, &["rev-parse", "--show-object-format"]),
+        "sha256"
+    );
+    write(&clone.join("list.txt"), &numbered(&[]));
+    commit(&clone, "list");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    for (line, text) in [(5, "five"), (6, "six"), (7, "seven")] {
+        let edits: Vec<(usize, &str)> = [(5, "five"), (6, "six"), (7, "seven")]
+            .into_iter()
+            .filter(|(done, _)| *done <= line)
+            .collect();
+        write(&clone.join("list.txt"), &numbered(&edits));
+        commit(&clone, text);
+    }
+    let mate = teammate(fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(
+        &mate.join("list.txt"),
+        &numbered(&[(5, "five"), (6, line_6), (7, "seven"), (18, line_18)]),
+    );
+    commit(&mate, "five to seven, squashed");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+    clone
+}
+
+#[test]
+fn a_squash_in_a_sha256_repository_holds_nothing_unsaved() {
+    // The empty tree has another name under SHA-256, and a content merge told to
+    // read attributes from the SHA-1 name is refused.
+    let fixture = Fixture::named_by("sha256");
+    let clone = squashed_on_feature_in_sha256(&fixture, "six", "eighteen");
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_squash_that_conflicts_in_a_sha256_repository_leaves_every_commit_counted() {
+    // The control for the one above: the remote's line 6 is not the branch's,
+    // so the merge conflicts, and a conflict clears nothing.
+    let fixture = Fixture::named_by("sha256");
+    let clone = squashed_on_feature_in_sha256(&fixture, "SIX", "eighteen");
+
+    assert_eq!(would_lose(&held(&clone)), "3 unpushed commit(s)");
+}
+
+#[test]
+fn a_squash_the_default_branch_later_reverted_leaves_every_commit_counted() {
+    // `main` no longer holds the change, so the merge puts it back, and the tree
+    // it gives is not `main`'s. `main` moves on after the revert, so its tree is
+    // not the merge base's, and the merge is made.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    let mate = teammate(&fixture);
+    squash_feature_into_main(&mate);
+    git_as_author(&mate, &["revert", "--no-edit", "HEAD"]);
+    git(&mate, &["push", "-q", "origin", "main"]);
+    move_main(&mate);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "3 unpushed commit(s)");
+}
+
+#[test]
+fn a_commit_made_after_the_squash_is_the_one_counted() {
+    // The tip holds work `main` has not got, so the rule looks further down the
+    // branch for the last commit whose change `main` does hold.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    squash_feature_into_main(&teammate(&fixture));
+    write(&clone.join("later.txt"), "an hour of work\n");
+    commit(&clone, "later");
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 4);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_squash_the_default_branch_then_edited_on_the_same_lines_leaves_every_commit_counted() {
+    // The limit, pinned: `main` changed the lines the squash wrote, so the merge
+    // conflicts, and a conflict clears nothing. The change is still in `main`'s
+    // history, but this rule reads trees, not history.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    let mate = teammate(&fixture);
+    squash_feature_into_main(&mate);
+    write(&mate.join("notes.txt"), "one\nTWO\n");
+    commit(&mate, "edit the squash");
+    git(&mate, &["push", "-q", "origin", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "3 unpushed commit(s)");
+}
+
+#[test]
+fn a_squashed_branch_that_merged_the_default_branch_holds_nothing_unsaved() {
+    // A merge inside the branch moves where it left `main`, and the change the
+    // rule compares is the one since that merge.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("notes.txt"), "one\n");
+    commit(&clone, "a");
+    let mate = teammate(&fixture);
+    move_main(&mate);
+    git(&clone, &["fetch", "-q", "origin"]);
+    git_as_author(&clone, &["merge", "-q", "--no-edit", "origin/main"]);
+    write(&clone.join("notes.txt"), "one\ntwo\n");
+    commit(&clone, "b");
+    squash_feature_into_main(&mate);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_squashed_commit_another_branch_still_needs_stays_counted() {
+    // `a` wrote `one`, and `b` on `feature` replaced it with `two`, which is
+    // what the squash holds. So `feature` passes, and `a` is in its history
+    // only. `side` grew from `a` and does not pass at any commit: nothing on the
+    // remote holds `one`. `a` stays counted with `side`, and only `b` drops out.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("notes.txt"), "one\n");
+    commit(&clone, "a");
+    git(&clone, &["checkout", "-q", "-b", "side"]);
+    write(&clone.join("side.txt"), "an hour of work\n");
+    commit(&clone, "side");
+    git(&clone, &["checkout", "-q", "feature"]);
+    write(&clone.join("notes.txt"), "two\n");
+    commit(&clone, "b");
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "main"]);
+    write(&mate.join("feature.txt"), "work\n");
+    write(&mate.join("notes.txt"), "two\n");
+    commit(&mate, "feature (#3)");
+    git(&mate, &["push", "-q", "origin", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_merge_that_dropped_a_deleted_side_branch_leaves_that_branch_counted() {
+    // `merge -s ours` puts `side` in `feature`'s history and none of its change
+    // in `feature`'s tree, so the squash of `feature` holds none of `secret.txt`.
+    // `side` is gone, and its commit is reachable only through the merge's second
+    // parent. The squash proves the first-parent line, and the one commit it
+    // does not prove stays counted.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["checkout", "-q", "-b", "side"]);
+    write(&clone.join("secret.txt"), "an hour of work\n");
+    commit(&clone, "secret");
+    git(&clone, &["checkout", "-q", "feature"]);
+    three_commits(&clone);
+    git_as_author(&clone, &["merge", "-q", "--no-edit", "-s", "ours", "side"]);
+    git(&clone, &["branch", "-q", "-D", "side"]);
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 5);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_commit_and_its_revert_are_not_cleared_by_a_remote_that_moved() {
+    // The branch changes nothing since it left `origin/feature`, so any merge of
+    // it into `origin/feature` gives `origin/feature`'s tree. An empty change
+    // proves nothing, and the two commits stay counted.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("notes.txt"), "one\n");
+    commit(&clone, "a");
+    git_as_author(&clone, &["revert", "--no-edit", "HEAD"]);
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(&mate.join("mate.txt"), "the teammate's\n");
+    commit(&mate, "mate");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn the_squash_rule_never_clears_a_stashed_commit() {
+    // The stash reaches the branch's tip, so it holds the branch back as well:
+    // the rule clears a commit only when every ref that reaches it is a branch
+    // that passed. Two stash commits and the three under them.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    write(&clone.join("stashed.txt"), "half a plan\n");
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["stash", "-q"]);
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "5 unpushed commit(s)");
+}
+
+#[test]
+fn a_detached_head_on_a_squashed_branch_holds_it_back() {
+    // The same rule for a worktree on a detached HEAD, which is how an agent
+    // gets a second checkout: it is not a branch, so it cannot pass.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    let linked = fixture.path("detached");
+    git(
+        &clone,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().expect("utf-8"),
+            "feature~1",
+        ],
+    );
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_worktree_on_a_squashed_branch_does_not_hold_it_back() {
+    // A worktree that has the branch checked out is that branch, not a ref of
+    // its own.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    git(&clone, &["checkout", "-q", "--detach"]);
+    let linked = fixture.path("linked");
+    git(
+        &clone,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            linked.to_str().expect("utf-8"),
+            "feature",
+        ],
+    );
+    git(&clone, &["checkout", "-q", "main"]);
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+/// `feature` with `NOTES` under the built-in `union` driver, pushed; a local
+/// commit that deletes `old line`; and a teammate's push that rewrites it.
+/// Where the attribute lives is *attributes*' to say.
+fn a_deletion_the_remote_rewrote(fixture: &Fixture, attributes: impl Fn(&Path)) -> PathBuf {
+    let clone = fixture.clone();
+    attributes(&clone);
+    write(&clone.join("NOTES"), "keep\nold line\nkeep2\n");
+    commit(&clone, "notes");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    write(&clone.join("NOTES"), "keep\nkeep2\n");
+    commit(&clone, "drop the old line");
+    let mate = teammate(fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(&mate.join("NOTES"), "keep\nremote rewrite\nkeep2\n");
+    commit(&mate, "rewrite the old line");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    clone
+}
+
+#[test]
+fn a_union_merge_attribute_does_not_let_the_squash_rule_clear_a_commit() {
+    // `merge=union` keeps both sides' lines and never conflicts, so the merge of
+    // the deletion into `origin/feature` is clean and gives `origin/feature`'s
+    // tree: the deletion is dropped, not held. The rule merges as plain text.
+    let fixture = Fixture::new();
+    let clone = a_deletion_the_remote_rewrote(&fixture, |clone| {
+        write(&clone.join(".gitattributes"), "NOTES merge=union\n");
+    });
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_merge_attribute_in_info_attributes_leaves_the_commit_counted() {
+    // `--attr-source` does not reach `$GIT_DIR/info/attributes`, so a clone
+    // with one cannot say how git would merge, and clears nothing.
+    let fixture = Fixture::new();
+    let clone = a_deletion_the_remote_rewrote(&fixture, |clone| {
+        write(&clone.join(".git/info/attributes"), "NOTES merge=union\n");
+    });
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn an_empty_info_attributes_still_lets_the_squash_rule_clear() {
+    // An empty file names no merge driver, so the merge runs.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    write(&clone.join(".git/info/attributes"), "");
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_configured_merge_driver_does_not_let_the_squash_rule_clear_a_commit() {
+    // A driver of `true` keeps the remote's side of every file it owns, so the
+    // merge of the line added after the squash gives `main`'s tree.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["config", "merge.ours.driver", "true"]);
+    write(&clone.join(".gitattributes"), "notes.txt merge=ours\n");
+    write(&clone.join("notes.txt"), "one\n");
+    commit(&clone, "a");
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "main"]);
+    write(&mate.join("feature.txt"), "work\n");
+    write(&mate.join(".gitattributes"), "notes.txt merge=ours\n");
+    write(&mate.join("notes.txt"), "one\n");
+    commit(&mate, "feature (#3)");
+    git(&mate, &["push", "-q", "origin", "main"]);
+    write(&clone.join("notes.txt"), "one\ntwo\n");
+    commit(&clone, "b");
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+/// A clone at `/ws` with one branch, `feature`, and one counted commit whose
+/// change merges cleanly into its remote refs when *merge_tree* says so.
+fn scripted_squash(merge_tree: Response) -> ScriptedRunner {
+    scripted_squash_with(Response::stdout("base\n"), Response::stdout(""), merge_tree)
+}
+
+/// [`scripted_squash`], with the answers to `merge-base` and to the
+/// `rev-list` of the refs that are not branches as well.
+fn scripted_squash_with(
+    merge_base: Response,
+    off_every_branch: Response,
+    merge_tree: Response,
+) -> ScriptedRunner {
+    scripted_squash_after(
+        ScriptedRunner::new(),
+        merge_base,
+        off_every_branch,
+        merge_tree,
+    )
+}
+
+/// [`scripted_squash_with`], after the scripts *first* holds, which answer
+/// before any of its own.
+fn scripted_squash_after(
+    first: ScriptedRunner,
+    merge_base: Response,
+    off_every_branch: Response,
+    merge_tree: Response,
+) -> ScriptedRunner {
+    const COUNTED: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    fn at(verb: &'static str) -> [&'static str; 4] {
+        ["git", "--git-dir=/ws/.git", "--work-tree=/ws", verb]
+    }
+    first
+        .with_script(
+            [
+                "git",
+                "--git-dir=/ws/.git",
+                "--work-tree=/ws",
+                "for-each-ref",
+                "--format=%(refname)%00%(tree)",
+            ],
+            Response::stdout("refs/remotes/origin/feature\0remote-tree\n"),
+        )
+        .with_script(
+            at("for-each-ref"),
+            Response::stdout("refs/heads/feature\0refs/remotes/origin/feature\n"),
+        )
+        .with_script(
+            [
+                "git",
+                "--git-dir=/ws/.git",
+                "--work-tree=/ws",
+                "rev-list",
+                "--exclude=refs/heads/*",
+            ],
+            off_every_branch,
+        )
+        .with_script(at("rev-list"), Response::stdout(format!("{COUNTED}\n")))
+        .with_script(at("merge-base"), merge_base)
+        .with_script(
+            [
+                "git",
+                "--git-dir=/ws/.git",
+                "--work-tree=/ws",
+                "rev-parse",
+                "--git-path",
+            ],
+            Response::stdout("/ws/.git/info/attributes\nsha1\n"),
+        )
+        .with_script(
+            at("rev-parse"),
+            Response::stdout("tip-tree\nbase-tree\nremote-tree\n"),
+        )
+        .with_script(
+            [
+                "git",
+                "--git-dir=/ws/.git",
+                "--work-tree=/ws",
+                "-c",
+                "core.attributesFile=/dev/null",
+                "-c",
+                "merge.default=text",
+                "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+                "merge-tree",
+                "--stdin",
+            ],
+            Response::stdout("1\0remote-tree\0\0"),
+        )
+        .with_script(
+            ["git", "--git-dir=/ws/.git", "--work-tree=/ws", "-c"],
+            merge_tree,
+        )
+        .with_script(at("worktree"), Response::stdout(""))
+}
+
+#[test]
+fn the_squash_rule_makes_no_more_merges_than_its_budget() {
+    // 32 branches, each on an upstream of its own with eight counted points:
+    // each branch merges 8 points into 32 refs, 256 merges, so 16 branches fit
+    // and the other 16 are not merged. The spawns grow with the branches, not
+    // with the merges.
+    let branches = 32;
+    let at = |verb: &'static str| ["git", "--git-dir=/ws/.git", "--work-tree=/ws", verb];
+    let listing: String = (0..branches)
+        .map(|b| format!("refs/heads/b{b}\0refs/remotes/origin/b{b}\n"))
+        .collect();
+    let trees: String = (0..branches)
+        .map(|b| format!("refs/remotes/origin/b{b}\0tree-{b}\n"))
+        .collect();
+    let points: String = (0..LOOK_BACK).map(|p| format!("{p:040x}\n")).collect();
+    let fake = ScriptedRunner::new()
+        .with_script(
+            [
+                "git",
+                "--git-dir=/ws/.git",
+                "--work-tree=/ws",
+                "for-each-ref",
+                "--format=%(refname)%00%(tree)",
+            ],
+            Response::stdout(trees),
+        )
+        .with_script(at("for-each-ref"), Response::stdout(listing))
+        .with_script(
+            [
+                "git",
+                "--git-dir=/ws/.git",
+                "--work-tree=/ws",
+                "rev-parse",
+                "--git-path",
+            ],
+            Response::stdout("/ws/.git/info/attributes\nsha1\n"),
+        )
+        .with_script(at("rev-list"), Response::stdout(points))
+        .with_script(at("-c"), Response::stdout(""));
+    let counted = ["0000000 work".to_owned()];
+
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&fake), Path::new("/ws"), &counted, &[]),
+        Vec::<String>::new()
+    );
+    let calls = fake.calls();
+    let merged = calls
+        .iter()
+        .filter(|call| call.argv().iter().any(|arg| arg == "--stdin"))
+        .count();
+    assert_eq!(merged, MERGE_BUDGET / (LOOK_BACK * branches));
+    assert!(
+        calls.len() <= 3 * branches + 3,
+        "{} spawns for {branches} branches",
+        calls.len()
+    );
+}
+
+#[test]
+fn a_merge_git_refuses_clears_nothing() {
+    // A conflict, a timeout and a merge-tree too old to write a tree all arrive
+    // as a refusal, and a refusal is no evidence that the remote holds anything.
+    let counted = ["a1b2c3d squashed".to_owned()];
+    let refused = scripted_squash(Response::failed(1, "CONFLICT (content)"));
+
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&refused), Path::new("/ws"), &counted, &[]),
+        Vec::<String>::new()
+    );
+
+    // The control: the same script with a clean merge that gives the remote's
+    // tree clears the commit, so the refusal is what cleared nothing.
+    let clean = scripted_squash(Response::stdout("remote-tree\n"));
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&clean), Path::new("/ws"), &counted, &[]),
+        vec!["a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".to_owned()]
+    );
+}
+
+#[test]
+fn a_change_measured_from_two_merge_bases_clears_nothing() {
+    // With two bases git would merge the bases first, and a clean merge from a
+    // base git made up is no evidence. The same clean merge-tree as the control
+    // in `a_merge_git_refuses_clears_nothing` clears the commit there.
+    let counted = ["a1b2c3d squashed".to_owned()];
+    let two_bases = scripted_squash_with(
+        Response::stdout("base\nother-base\n"),
+        Response::stdout(""),
+        Response::stdout("remote-tree\n"),
+    );
+
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&two_bases), Path::new("/ws"), &counted, &[]),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn refs_that_are_not_branches_git_will_not_list_clear_nothing() {
+    // What was not read may reach the commit, so a passing branch clears
+    // nothing when git refuses to say what the stash, the tags and the detached
+    // HEADs reach.
+    let counted = ["a1b2c3d squashed".to_owned()];
+    let refused = scripted_squash_with(
+        Response::stdout("base\n"),
+        Response::failed(128, "fatal: nope"),
+        Response::stdout("remote-tree\n"),
+    );
+
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&refused), Path::new("/ws"), &counted, &[]),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_branch_git_will_not_list_after_one_passed_clears_nothing() {
+    // `feature` passes. What `other` reaches was not read, and it may hold the
+    // commit back, so nothing is cleared.
+    let counted = ["a1b2c3d squashed".to_owned()];
+    let two_branches = |other_reaches: Response| {
+        let first = ScriptedRunner::new()
+            .with_script(
+                [
+                    "git",
+                    "--git-dir=/ws/.git",
+                    "--work-tree=/ws",
+                    "for-each-ref",
+                    "--format=%(refname)%00%(upstream)",
+                ],
+                Response::stdout(
+                    "refs/heads/feature\0refs/remotes/origin/feature\nrefs/heads/other\0\n",
+                ),
+            )
+            .with_script(
+                [
+                    "git",
+                    "--git-dir=/ws/.git",
+                    "--work-tree=/ws",
+                    "rev-list",
+                    "refs/heads/other",
+                ],
+                other_reaches,
+            );
+        scripted_squash_after(
+            first,
+            Response::stdout("base\n"),
+            Response::stdout(""),
+            Response::stdout("remote-tree\n"),
+        )
+    };
+    let refused = two_branches(Response::failed(128, "fatal: nope"));
+
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&refused), Path::new("/ws"), &counted, &[]),
+        Vec::<String>::new()
+    );
+
+    // The control: `other` reaches nothing unpushed, and `feature`'s pass
+    // clears the commit.
+    let read = two_branches(Response::stdout(""));
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&read), Path::new("/ws"), &counted, &[]),
+        vec!["a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".to_owned()]
+    );
+}
+
+#[test]
+fn a_local_tag_on_a_squashed_commit_holds_it_back() {
+    // The tag is not a branch, so it cannot pass, and what it reaches stays
+    // counted: `a` and `b`, with `c` above it cleared.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    git(&clone, &["tag", "keep", "feature~1"]);
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+/// *count* commits on `feature` after the squashed three, each a file of its
+/// own.
+fn more_commits(clone: &Path, count: usize) {
+    for n in 0..count {
+        write(&clone.join(format!("later-{n}.txt")), "more work\n");
+        commit(clone, &format!("later {n}"));
+    }
+}
+
+#[test]
+fn a_squash_seven_commits_under_the_tip_is_found() {
+    // The eighth point down is the squashed tip, `c`, the last one looked at.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    squash_feature_into_main(&teammate(&fixture));
+    more_commits(&clone, 7);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "7 unpushed commit(s)");
+}
+
+#[test]
+fn a_squash_eight_commits_under_the_tip_is_not_looked_for() {
+    // The limit, pinned: every point looked at holds later work, so nothing
+    // passes, and the squashed three stay counted with the eight above them.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    squash_feature_into_main(&teammate(&fixture));
+    more_commits(&clone, 8);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "11 unpushed commit(s)");
+}
+
+#[test]
+fn a_merge_of_the_default_branch_adds_nothing_of_its_own() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    move_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    git_as_author(&clone, &["merge", "-q", "--no-edit", "origin/main"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_merge_with_a_conflict_resolved_by_hand_is_still_unsaved() {
+    // The resolution is work of the merge's own, and it may exist nowhere else.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("README.md"), "ours\n");
+    commit(&clone, "ours");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "main"]);
+    write(&mate.join("README.md"), "theirs\n");
+    commit(&mate, "theirs");
+    git(&mate, &["push", "-q", "origin", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    let conflicted = Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "merge",
+            "-q",
+            "origin/main",
+        ])
+        .current_dir(&clone)
+        .output()
+        .expect("git is installed");
+    assert!(!conflicted.status.success(), "the premise: a conflict");
+    // A merge that fails for any other reason, no identity on a CI runner say,
+    // fails the same way and leaves no merge in progress.
+    assert!(
+        clone.join(".git/MERGE_HEAD").exists(),
+        "the premise: a merge stopped on its conflict: {}",
+        String::from_utf8_lossy(&conflicted.stderr)
+    );
+    write(&clone.join("README.md"), "resolved by hand\n");
+    git(&clone, &["add", "README.md"]);
+    git_as_author(&clone, &["commit", "-q", "--no-edit"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_change_of_indentation_alone_is_not_a_copy() {
+    // git's patch id drops whitespace, and in Python, a Makefile or YAML the
+    // indentation is the change.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("guard.py"), "if a:\n    x()\n");
+    commit(&clone, "guard");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    write(&clone.join("guard.py"), "if a:\nx()\n");
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["commit", "-q", "--amend", "--no-edit"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+    assert_eq!(cherry_marked(&clone, "feature...origin/feature").len(), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+/// A clone whose pushed `guard.py` commit was amended to indent its body with
+/// *indent* instead of *pushed*.
+fn reindented_after_the_push(fixture: &Fixture, pushed: &str, indent: &str) -> PathBuf {
+    let clone = fixture.clone();
+    write(&clone.join("guard.py"), &format!("if a:\n{pushed}x()\n"));
+    commit(&clone, "guard");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    write(&clone.join("guard.py"), &format!("if a:\n{indent}x()\n"));
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["commit", "-q", "--amend", "--no-edit"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    clone
+}
+
+#[test]
+fn indentation_changed_but_not_removed_is_not_a_copy() {
+    // A run of whitespace that only changes its length, or a tab that turns
+    // into spaces, is still the change.
+    for (pushed, indent) in [("    ", "  "), ("\t", "    ")] {
+        let fixture = Fixture::new();
+        let clone = reindented_after_the_push(&fixture, pushed, indent);
+        assert_eq!(by_sha(&clone, "feature"), 1);
+        assert_eq!(
+            cherry_marked(&clone, "feature...origin/feature").len(),
+            1,
+            "the premise: the patch id matches {pushed:?} with {indent:?}"
+        );
+
+        assert_eq!(
+            would_lose(&held(&clone)),
+            "1 unpushed commit(s)",
+            "{pushed:?} became {indent:?}"
+        );
+    }
+}
+
+#[test]
+fn a_mode_change_added_to_a_pushed_commit_is_not_a_copy() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    make_executable(&clone.join("feature.txt"));
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["commit", "-q", "--amend", "--no-edit"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_mode_change_the_remote_rebased_is_saved() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    make_executable(&clone.join("feature.txt"));
+    commit(&clone, "executable");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 2);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+#[test]
+fn a_binary_change_the_remote_rebased_is_saved() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    let blob = clone.join("blob.bin");
+    std::fs::write(&blob, b"\x00\x01binary\xff\n").expect("written");
+    commit(&clone, "binary");
+    std::fs::write(&blob, b"\x00\x02binary, changed\xfe\n").expect("written");
+    commit(&clone, "binary changed");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_rename_with_an_edit_the_remote_rebased_is_saved() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    let lines: String = (1..=10).map(|n| format!("line {n}\n")).collect();
+    write(&clone.join("notes.txt"), &lines);
+    commit(&clone, "notes");
+    git(&clone, &["mv", "notes.txt", "moved.txt"]);
+    write(
+        &clone.join("moved.txt"),
+        &lines.replace("line 5", "line five"),
+    );
+    commit(&clone, "move the notes");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_commit_reindented_after_the_remote_rebase_is_the_one_counted() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    for name in ["a", "b"] {
+        write(&clone.join(format!("{name}.py")), "if a:\n    x()\n");
+        commit(&clone, name);
+    }
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    rebase_feature_on_the_remote(&teammate(&fixture));
+    write(&clone.join("b.py"), "if a:\n  x()\n");
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["commit", "-q", "--amend", "--no-edit"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+    assert_eq!(cherry_marked(&clone, "feature...origin/feature").len(), 3);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+/// The commits on the left of *range* that `rev-list --cherry-mark` marks `=`,
+/// the patch-id match the copy rule starts from.
+fn cherry_marked(clone: &Path, range: &str) -> Vec<String> {
+    git(
+        clone,
+        &[
+            "rev-list",
+            "--cherry-mark",
+            "--left-only",
+            "--no-merges",
+            range,
+        ],
+    )
+    .lines()
+    .filter_map(|line| line.strip_prefix('='))
+    .map(str::to_owned)
+    .collect()
+}
+
+#[test]
+fn the_same_edit_in_another_place_is_not_a_copy() {
+    // Two blocks with the same context make the same hunk, line numbers aside,
+    // and the local edit to the first block is on no remote.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    let block = |x: &str| format!("p\nq\nr\nx = {x}\ns\nt\nu\n");
+    write(
+        &clone.join("f.py"),
+        &format!("{}\n\n\n\n{}", block("1"), block("1")),
+    );
+    commit(&clone, "two blocks");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(
+        &mate.join("f.py"),
+        &format!("{}\n\n\n\n{}", block("1"), block("2")),
+    );
+    commit(&mate, "the second block");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    write(
+        &clone.join("f.py"),
+        &format!("{}\n\n\n\n{}", block("2"), block("1")),
+    );
+    commit(&clone, "the first block");
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+    assert_eq!(cherry_marked(&clone, "feature...origin/feature").len(), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn an_empty_commit_is_never_a_copy() {
+    // Its message is all it holds, and any empty commit on the remote would
+    // otherwise replay as it.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    git_as_author(
+        &mate,
+        &["commit", "-q", "--allow-empty", "-m", "ci: retrigger"],
+    );
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git_as_author(
+        &clone,
+        &["commit", "-q", "--allow-empty", "-m", "the only record"],
+    );
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+    assert_eq!(cherry_marked(&clone, "feature...origin/feature").len(), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_root_commit_is_never_a_copy() {
+    // `log.showRoot=false` prints a root commit with no patch at all, and even
+    // with its patch printed there is no parent to replay it on.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["config", "log.showRoot", "false"]);
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(&mate.join("n.txt"), "x\n");
+    commit(&mate, "n");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git(&clone, &["checkout", "-q", "--orphan", "orphan"]);
+    git(&clone, &["rm", "-q", "-r", "-f", "."]);
+    write(&clone.join("n.txt"), "x\n");
+    commit(&clone, "a root of its own");
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "orphan"), 1);
+    assert_eq!(cherry_marked(&clone, "orphan...origin/feature").len(), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_merged_parent_with_no_copy_is_still_unsaved() {
+    // The merge adds nothing of its own, so it drops out, but the commit it
+    // brought in is on no remote.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["checkout", "-q", "-b", "side"]);
+    write(&clone.join("side.txt"), "side work\n");
+    commit(&clone, "side");
+    git(&clone, &["checkout", "-q", "feature"]);
+    git_as_author(&clone, &["merge", "-q", "--no-ff", "--no-edit", "side"]);
+    assert_eq!(by_sha(&clone, "feature"), 2);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn an_octopus_merge_with_an_edit_of_its_own_is_still_unsaved() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    for name in ["a", "b"] {
+        git(&clone, &["checkout", "-q", "-b", name, "origin/main"]);
+        write(&clone.join(format!("{name}.txt")), "pushed\n");
+        commit(&clone, name);
+        git(&clone, &["push", "-q", "origin", name]);
+    }
+    git(&clone, &["checkout", "-q", "feature"]);
+    git_as_author(&clone, &["merge", "-q", "--no-ff", "--no-commit", "a", "b"]);
+    write(&clone.join("feature.txt"), "edited in the merge\n");
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["commit", "-q", "--no-edit"]);
+    assert_eq!(by_sha(&clone, "feature"), 1);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_copy_on_another_local_branch_is_not_a_copy_on_a_remote() {
+    // Two local copies of one change are still the only two copies.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("fix.txt"), "the fix\n");
+    commit(&clone, "fix");
+    git(&clone, &["checkout", "-q", "-b", "other", "origin/main"]);
+    git_as_author(&clone, &["cherry-pick", "feature"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_local_branch_as_an_upstream_is_not_a_remote() {
+    // `branch -u`, `--track` and `branch.autoSetupMerge=always` can all make a
+    // local branch the upstream, and a copy on it is still only local.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("fix.txt"), "the fix\n");
+    commit(&clone, "fix");
+    git(&clone, &["checkout", "-q", "-b", "other", "origin/main"]);
+    git(&clone, &["branch", "-q", "-u", "feature", "other"]);
+    git_as_author(&clone, &["cherry-pick", "feature"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_copy_that_git_will_not_look_for_leaves_every_commit_counted() {
+    // Every question the copy rule asks can fail, and a failure must never clear
+    // a commit: here git refuses them all, and nothing is found to be copied.
+    let refused = ScriptedRunner::new().with_script(["git"], Response::failed(128, "fatal: nope"));
+
+    assert_eq!(
+        already_on_a_remote(&Git::new(&refused), Path::new("/ws"), &[]),
+        Vec::<String>::new()
+    );
 }
 
 #[test]

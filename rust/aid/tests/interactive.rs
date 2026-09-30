@@ -534,6 +534,58 @@ fn a_resume_with_no_workspace_resumes_the_row_the_picker_took() {
 }
 
 #[test]
+fn a_resume_with_no_workspace_on_a_terminal_no_entry_can_draw_on_says_how_to_name_one() {
+    // `TERMINFO_DIRS` is the whole of the terminfo search when it is set, so an
+    // empty one leaves no entry, the fallback's included, that can move the
+    // cursor. No picker can be drawn, and aid says how to name the workspace
+    // instead of opening anything.
+    let world = World::with(&["--warm"]);
+    let nothing = world.root.join("terminfo");
+    std::fs::create_dir_all(&nothing).expect("an empty terminfo directory");
+    let mut session = PtyAid::spawn(
+        &world,
+        &["resume"],
+        &[
+            ("TERM", "xterm-no-such-entry"),
+            ("TERMINFO_DIRS", &nothing.display().to_string()),
+        ],
+    );
+    let seen = Arc::clone(&session.seen);
+    // Bounded: a picker that opened anyway would wait on this pty for ever.
+    let mut code = None;
+    wait_for(|| {
+        code = session.child.try_wait().expect("aid's status");
+        code.is_some()
+    });
+    let _ = session.child.kill();
+    assert_eq!(code.map(|status| status.exit_code()), Some(1));
+
+    // The reader thread may still hold the last bytes, so the line is waited for.
+    let said = || String::from_utf8_lossy(&seen.lock().expect("the pty buffer")).into_owned();
+    assert!(
+        wait_for(|| said().contains(
+            "so aid resume cannot draw its picker. Name the workspace instead: \
+             aid resume <workspace>"
+        )),
+        "the refusal was not given; the pty said:\n{:?}",
+        said()
+    );
+    assert!(
+        !said().contains("\x1b[?1049h"),
+        "a picker was opened anyway: {:?}",
+        said()
+    );
+    assert!(
+        !world
+            .devpod_calls()
+            .iter()
+            .any(|call| call.starts_with("devpod ssh")),
+        "a refused picker opened a session: {:?}",
+        world.devpod_calls()
+    );
+}
+
+#[test]
 fn the_boot_runs_while_the_prompt_is_still_being_typed() {
     // The overlap itself: a stopped workspace's `devpod up` is on the shim's log
     // while the editor is still open — nothing has been typed yet — and the
@@ -713,13 +765,21 @@ fn a_setting_a_flag_gave_is_not_asked_for() {
 }
 
 #[test]
-fn with_no_terminal_type_there_is_no_picker_and_the_editor_still_opens() {
+fn with_no_terminal_type_the_pickers_are_drawn_as_the_fallback_terminal() {
     // skim cannot draw without a `TERM`, and used to panic on one that was not
-    // set. The editor needs none, so the launch goes on with the defaults.
+    // set. The pickers take the workspace picker's fallback and say so, and each
+    // one is still answered with Enter.
     let world = World::with(&["--warm"]);
     let mut session = PtyAid::spawn(&world, &[MAIN], &[("TERM", "")]);
+    session.answer(AGENT_PICKER, "\r");
+    session.answer(MODEL_PICKER, "\r");
+    session.answer(EFFORT_PICKER, "\r");
     session.expect(BANNER);
-    assert!(!session.text().contains(MODEL_PICKER), "{}", session.text());
+    assert!(
+        session.text().contains("drawn as xterm-256color"),
+        "{}",
+        session.text()
+    );
     session.send_line("go");
     assert_eq!(session.wait(), 0);
     assert_eq!(

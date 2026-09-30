@@ -145,6 +145,7 @@ fn the_pinned_verbs_ask_exactly_what_python_asked() {
         [
             "log",
             "--oneline",
+            "--no-color",
             "--exclude=refs/tags/*",
             "--exclude=refs/original/*",
             "--all",
@@ -163,10 +164,31 @@ fn the_pinned_verbs_ask_exactly_what_python_asked() {
         [
             "log",
             "--oneline",
+            "--no-color",
             "--exclude=refs/tags/*",
             "--exclude=refs/original/*",
             "--all",
             "refs/tags/backup",
+            "--not",
+            "--remotes"
+        ]
+    );
+}
+
+#[test]
+fn the_per_branch_unpushed_query_asks_for_its_hashes_without_colour() {
+    let (dir, _root) = a_clone();
+    let fake = ScriptedRunner::new();
+
+    Git::new(&fake).unpushed_commits_from(dir.path(), "refs/heads/feature");
+
+    assert_eq!(
+        strs(&argv(&fake))[3..],
+        [
+            "log",
+            "--oneline",
+            "--no-color",
+            "refs/heads/feature",
             "--not",
             "--remotes"
         ]
@@ -190,6 +212,7 @@ fn the_attribution_query_is_the_unpushed_one_with_the_sides_swapped() {
         [
             "log",
             "--oneline",
+            "--no-color",
             "refs/tags/backup",
             "--not",
             "--remotes",
@@ -1324,6 +1347,276 @@ fn an_empty_listing_parses_to_nothing_rather_than_to_one_empty_name() {
     assert!(nul_separated("\0").is_empty());
 }
 
+const LOCAL: &str = "1111111111111111111111111111111111111111";
+const COPY: &str = "2222222222222222222222222222222222222222";
+const TREE: &str = "3333333333333333333333333333333333333333";
+
+/// A clone where *LOCAL* and *COPY* have the same patch, and the replay of
+/// *LOCAL* on *COPY*'s parent answers *replayed*.
+fn a_patch_match(root: &Path, replayed: Response, copy_tree: Response) -> ScriptedRunner {
+    let pinned = |verb: &[&str]| {
+        let mut argv = vec![
+            "git".to_owned(),
+            format!("--git-dir={}", root.join(".git").display()),
+            format!("--work-tree={}", root.display()),
+        ];
+        argv.extend(verb.iter().map(|arg| (*arg).to_owned()));
+        argv
+    };
+    let patch = "\ndiff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n";
+    ScriptedRunner::new()
+        .with_script(
+            pinned(&["rev-list", "--cherry-mark", "--left-only"]),
+            Response::stdout(format!("={LOCAL}\n")),
+        )
+        .with_script(
+            pinned(&["rev-list", "--cherry-mark", "--right-only"]),
+            Response::stdout(format!("={COPY}\n")),
+        )
+        .with_script(
+            pinned(&["log"]),
+            Response::stdout(format!("\0{LOCAL}{patch}\0{COPY}{patch}")),
+        )
+        .with_script(pinned(&AS_TEXT), replayed)
+        .with_script(
+            pinned(&["rev-parse", "--git-path"]),
+            Response::stdout(format!(
+                "{}\nsha1\n",
+                root.join(".git/info/attributes").display()
+            )),
+        )
+        .with_script(pinned(&["rev-parse"]), copy_tree)
+}
+
+#[test]
+fn a_patch_match_is_a_copy_only_when_git_replays_it_as_the_copy() {
+    let (dir, root) = a_clone();
+    let tree = || Response::stdout(format!("{TREE}\n"));
+
+    let fake = a_patch_match(&root, tree(), tree());
+    assert_eq!(
+        Git::new(&fake)
+            .patches_already_on(
+                dir.path(),
+                "refs/heads/feature",
+                &RemoteRef::of("origin", "feature")
+            )
+            .said(),
+        Some(vec![LOCAL.to_owned()])
+    );
+    let log = fake
+        .calls()
+        .iter()
+        .map(Call::argv)
+        .find(|argv| argv.get(3).map(String::as_str) == Some("log"))
+        .expect("the patches are read");
+    assert_eq!(
+        strs(&log)[3..],
+        [
+            "log",
+            "--no-walk",
+            "--no-merges",
+            "--root",
+            "-p",
+            "--binary",
+            "--no-renames",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--format=%x00%H",
+            LOCAL,
+            COPY,
+        ],
+        "`--root`, or `log.showRoot=false` prints a root commit with no patch"
+    );
+    let replay = fake
+        .calls()
+        .into_iter()
+        .find(|call| call.argv().get(8).map(String::as_str) == Some("merge-tree"))
+        .expect("the pair is replayed");
+    assert_eq!(
+        replay.invocation().env.entries.get("GIT_ATTR_NOSYSTEM"),
+        Some(&"1".to_owned()),
+        "a system gitattributes file could name a merge driver that `-c` does not reach"
+    );
+    let replay = replay.argv();
+    assert_eq!(strs(&replay)[3..7], AS_TEXT, "every path merged as text");
+    assert_eq!(
+        strs(&replay)[7],
+        "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "the attributes of the empty tree, which is no attributes"
+    );
+    assert_eq!(
+        strs(&replay)[8..],
+        [
+            "merge-tree",
+            "--write-tree",
+            &format!("--merge-base={LOCAL}^"),
+            &format!("{COPY}^"),
+            LOCAL,
+        ]
+    );
+
+    for (replayed, copy_tree, why) in [
+        (Response::exited(1), tree(), "a conflict"),
+        (tree(), Response::exited(128), "no tree for the copy"),
+        (
+            Response::stdout("4444444444444444444444444444444444444444\n"),
+            tree(),
+            "another tree",
+        ),
+    ] {
+        let fake = a_patch_match(&root, replayed, copy_tree);
+        assert_eq!(
+            Git::new(&fake)
+                .patches_already_on(
+                    dir.path(),
+                    "refs/heads/feature",
+                    &RemoteRef::of("origin", "feature")
+                )
+                .said(),
+            Some(vec![]),
+            "{why} clears nothing"
+        );
+    }
+}
+
+#[test]
+fn two_patches_pair_when_only_their_blobs_and_line_numbers_differ() {
+    let patch = |index: &str, hunk: &str, added: &str| {
+        format!(
+            "\ndiff --git a/f b/f\nindex {index} 100644\n--- a/f\n+++ b/f\n\
+             @@ {hunk} @@ def f():\n     a\n-    b\n+{added}\n"
+        )
+    };
+    assert_eq!(
+        normalized(&patch("1111111..2222222", "-1,2 +1,2", "    c")),
+        normalized(&patch("3333333..4444444", "-10,2 +12,2", "    c")),
+    );
+    assert_ne!(
+        normalized(&patch("1111111..2222222", "-1,2 +1,2", "    c")),
+        normalized(&patch("1111111..2222222", "-1,2 +1,2", "   c")),
+        "one space is a different change"
+    );
+    let last = patch("1111111..2222222", "-1,2 +1,2", "    c");
+    assert_eq!(
+        normalized(&last),
+        normalized(last.trim_end_matches('\n')),
+        "the last patch in the output, with its trailing newline trimmed away"
+    );
+}
+
+#[test]
+fn a_merge_with_a_remerge_diff_is_not_one_that_adds_nothing() {
+    assert_eq!(
+        merges_without_a_diff_in(&format!("\0{LOCAL}\n\0{COPY}\ndiff --git x\n")),
+        [LOCAL.to_owned()]
+    );
+    assert_eq!(
+        merges_without_a_diff_in(&format!("\0{TREE}")),
+        [TREE.to_owned()],
+        "the last merge, with its trailing newline trimmed away"
+    );
+    assert!(merges_without_a_diff_in("").is_empty());
+}
+
+/// A hash in SHA-256's length, which git prints in a repository made with
+/// `--object-format=sha256`.
+const SHA256: &str = "5555555555555555555555555555555555555555555555555555555555555555";
+
+#[test]
+fn a_nul_inside_a_diff_leaves_the_merges_unread() {
+    // A `diff` gitattribute makes git print a file that holds a NUL as text,
+    // so the NUL between entries can also turn up inside one.
+    assert!(
+        merges_without_a_diff_in(&format!("\0{LOCAL}\ndiff --git a/f b/f\n+a\0  y\n")).is_empty()
+    );
+    assert!(merges_without_a_diff_in(&format!("\0{LOCAL}\ndiff --git a/f b/f\n+a\0y")).is_empty());
+    assert_eq!(
+        merges_without_a_diff_in(&format!("\0{SHA256}\n")),
+        [SHA256.to_owned()]
+    );
+    for hash in [
+        "1111111",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        " 1111111111111111111111111111111111111111",
+        "g111111111111111111111111111111111111111",
+    ] {
+        assert!(
+            merges_without_a_diff_in(&format!("\0{hash}\n")).is_empty(),
+            "{hash:?} is not a full hash"
+        );
+    }
+}
+
+#[test]
+fn a_nul_inside_a_patch_leaves_the_patches_unread() {
+    let patch = "\ndiff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n+b\n";
+    assert_eq!(
+        patches_in(&format!("\0{LOCAL}{patch}\0{SHA256}{patch}"))
+            .into_iter()
+            .map(|(hash, _)| hash)
+            .collect::<Vec<_>>(),
+        [LOCAL.to_owned(), SHA256.to_owned()]
+    );
+    assert!(patches_in(&format!("\0{LOCAL}{patch}+a\0  y\n")).is_empty());
+    assert!(patches_in(&format!("\0{LOCAL}{patch}+a\0y")).is_empty());
+    assert!(
+        patches_in(&format!(
+            "\0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA{patch}"
+        ))
+        .is_empty()
+    );
+    assert!(
+        patches_in(&format!("{LOCAL}{patch}")).is_empty(),
+        "no NUL before the first"
+    );
+}
+
+#[test]
+fn a_branch_with_an_empty_upstream_field_tracks_nothing() {
+    let output = concat!(
+        "refs/heads/backup\0\n",
+        "refs/heads/feature\0refs/remotes/origin/feature\n",
+        "refs/heads/other\0refs/heads/feature\n",
+        "no-nul-here\n",
+    );
+
+    assert_eq!(
+        local_branches_in(output),
+        [
+            LocalBranch {
+                name: "refs/heads/backup".to_owned(),
+                upstream: None,
+            },
+            LocalBranch {
+                name: "refs/heads/feature".to_owned(),
+                upstream: RemoteRef::parse("refs/remotes/origin/feature"),
+            },
+            LocalBranch {
+                name: "refs/heads/other".to_owned(),
+                upstream: None,
+            },
+        ],
+        "a local upstream is no remote, and a copy on it is one more local copy"
+    );
+}
+
+#[test]
+fn only_a_remote_tracking_refname_is_a_remote_ref() {
+    assert_eq!(
+        RemoteRef::parse("refs/remotes/origin/feature").map(|remote| remote.as_str().to_owned()),
+        Some("refs/remotes/origin/feature".to_owned())
+    );
+    assert_eq!(
+        RemoteRef::of("origin", "HEAD").as_str(),
+        "refs/remotes/origin/HEAD"
+    );
+    for not_one in ["refs/heads/feature", "origin/feature", "refs/remotes/", ""] {
+        assert_eq!(RemoteRef::parse(not_one), None, "{not_one:?}");
+    }
+}
+
 // ------------------------------------------------------- the pointer sniff
 
 #[test]
@@ -1401,4 +1694,23 @@ fn a_symbolic_ref_keeps_a_branch_name_that_has_slashes_in_it() {
         "neither namespace: the last segment, where Python left it"
     );
     assert_eq!(branch_in_symbolic_ref("main"), "main");
+}
+
+#[test]
+fn clean_merge_trees_are_read_from_merge_tree_stdin_output() {
+    // A clean merge, a conflict with two paths, and a clean merge again, in
+    // the shape `merge-tree --stdin -z --name-only --no-messages` prints.
+    let output = "1\0aaa\0\x000\0bbb\0f\0g/h\0\x001\0ccc\0\0";
+    assert_eq!(
+        clean_merge_trees_in(output, 3),
+        Some(vec![Some("aaa".to_owned()), None, Some("ccc".to_owned())])
+    );
+
+    // Fewer records than merges, more, a status that is neither, and a
+    // record cut short all read as no answer.
+    assert_eq!(clean_merge_trees_in(output, 4), None);
+    assert_eq!(clean_merge_trees_in(output, 2), None);
+    assert_eq!(clean_merge_trees_in("2\0aaa\0\0", 1), None);
+    assert_eq!(clean_merge_trees_in("1\0aaa\0", 1), None);
+    assert_eq!(clean_merge_trees_in("", 1), None);
 }

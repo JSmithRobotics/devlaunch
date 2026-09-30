@@ -29,8 +29,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lines that arrived late for the agent to read as keystrokes. It is now a raw-mode
   editor with bracketed paste: a paste keeps its line breaks, Alt-Enter or Ctrl-J adds
   a line, and Enter submits.
-- **The pickers no longer panic** on a terminal with no `TERM` or a size of zero. They
-  are skipped, and the prompt editor still opens.
+- **The agent, model and effort pickers no longer panic** on a terminal with a size of
+  zero, and take the workspace picker's `TERM` fallback. With no terminal they can draw
+  on, they are skipped, and the prompt editor still opens.
+
+## [0.57.2] - 2026-09-30
+
+### Fixed
+
+- **`rm` no longer refuses over a branch squashed into `main` as one commit** (#659). A squash of
+  several commits matches none of them, so after #653 `rm` and `dl --ls --json` still
+  counted each one as unpushed. Now a branch whose whole change a remote ref already
+  holds is not counted: `git merge-tree` merges the branch into the remote refs the
+  copy rule compares with (its upstream, every other local branch's upstream, the
+  same-named remote branch and `origin/HEAD`), and the merge must be clean and give that
+  ref's tree exactly. Work added after the squash still counts, and so does a squash the
+  remote reverted, a squash the remote then edited on the same lines, a commit that
+  reached the branch only through a merge's second parent, and a commit that the stash,
+  a local tag, a detached HEAD or a branch that does not pass still reaches.
+  This merge and the copy rule's replay both run with merge attributes switched off, so
+  a `merge=union` or a custom merge driver cannot make a merge clean that drops the
+  branch's side, and a clone whose `info/attributes` file holds anything clears nothing.
+  The merges run in one `git merge-tree --stdin` per branch, at most 4,096 in a clone, so
+  a clone with many branches of local work pays about one git spawn per branch for them.
+
+## [0.57.1] - 2026-09-29
+
+### Fixed
+
+- **`rm` no longer refuses over commits the remote holds as new commits** (#653). After a
+  rebase, a cherry-pick or a squash merge, the old commits are on no remote ref, so
+  `rm` and `dl --ls --json` counted them as unpushed although nothing in them was
+  lost. A commit whose exact change a local branch's upstream, the same-named remote
+  branch or `origin/HEAD` already holds as a commit of its own is no longer counted:
+  git replays the commit on that copy's parent and must get the copy's tree. Nor is
+  a merge that adds nothing to its parents. A merge with a conflict resolved by hand,
+  the stash, and every commit with no copy still count.
+
+- **The picker no longer panics when `TERM` names no usable terminal** (#647). With `TERM` unset,
+  or naming a terminfo entry the machine does not have, `dl`'s workspace picker (and
+  `aid resume`'s) aborted with a panic before it drew a row. A name like `xterm-kitty`
+  with no entry behind it did not panic but drew a garbled picker, because the entry it
+  got could not move the cursor. Now any `TERM` whose entry cannot move the cursor is
+  drawn as `xterm-256color`, the picker says so once it closes, and the session it opens
+  gets your own `TERM` back. When `xterm-256color` cannot move the cursor here either,
+  the picker is not started, and the command says why and how to name the workspace
+  instead.
 
 ## [0.57.0] - 2026-09-28
 
