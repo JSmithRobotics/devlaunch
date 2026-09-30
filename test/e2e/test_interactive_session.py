@@ -33,6 +33,7 @@ import os
 import re
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator
@@ -391,11 +392,28 @@ class TestAidStartsAnAgent:
 
         session = workspace.aid()
         with session:
-            # On a terminal a promptless `aid` asks for the prompt while the
-            # workspace boots; an empty Enter is the plain session this test has
-            # always been about.
+            # On a terminal a promptless `aid` asks for the agent (one row per
+            # Claude login, then the other agents), the model and the effort, then
+            # the prompt, while the workspace boots. The agent picker is filtered
+            # to claude, since a recent choice could have put another agent first;
+            # Enter takes the first row of the rest. `\r`, not a newline: skim
+            # holds the terminal in raw mode, where a newline is Ctrl-J and moves
+            # the cursor down a row. With TERM=dumb there are no pickers.
+            session.expect(r"Agent for this launch|press Enter")
+            if "Agent for this launch" in session.text:
+                time.sleep(0.2)
+                session.send("claude", newline=False)
+                time.sleep(0.5)
+                session.send("\r", newline=False)
+                for picker in ("Model for claude", "Effort for claude"):
+                    session.expect(picker)
+                    time.sleep(0.2)
+                    session.send("\r", newline=False)
+            # An empty Enter is the plain session this test has always been about.
             session.expect(r"press Enter")
-            session.send("")
+            # The prompt editor is raw mode too: Enter is `\r`, and a newline
+            # would add a line to the prompt instead of submitting it.
+            session.send("\r", newline=False)
             # Claude Code prints its banner once the TUI is up; without a
             # terminal it exits before ever getting there.
             session.expect(r"Claude Code|Welcome to Claude")

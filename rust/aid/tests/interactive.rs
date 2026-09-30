@@ -130,6 +130,10 @@ impl PtyAid {
         command.env("GIT_SSH_COMMAND", "false");
         command.env("GIT_CONFIG_GLOBAL", "/dev/null");
         command.env("GIT_CONFIG_SYSTEM", "/dev/null");
+        // A terminal type, as every real terminal sets: skim reads terminfo by it
+        // and draws no picker without one. `aid`'s answer to no `TERM` is its own
+        // test below, which removes it again.
+        command.env("TERM", "xterm-256color");
         if !world.root.join("gh-bin/gh").exists() {
             command.env("DEVLAUNCH_NO_GH_TOKEN", "1");
         }
@@ -178,30 +182,76 @@ impl PtyAid {
 
     /// Type a line and press Enter, the way a person at the terminal would.
     ///
-    /// The line and its Enter go out in **one** `write_all`, and that is
-    /// load-bearing rather than tidy. A pty master write is copied into the line
-    /// discipline in one go, so a single write makes every completed line of a
-    /// paste readable at the same instant. Two writes are two of those, and the
-    /// gap between them is a window: the first one completes `fix this`, wakes
-    /// the read in `aid`, and `read_terminal_submission` drains what the terminal
-    /// holds *right now* — which, if the Enter completing `and then that` has not
-    /// been written yet, is line one alone. That is the flake in #401, and it is
-    /// the test lying about its own premise rather than a defect in what it
-    /// tests: a terminal delivering a paste writes it whole.
+    /// Enter is `\r`, which is what a terminal sends for it. The prompt editor
+    /// holds the terminal in raw mode, where nothing turns it into `\n`, and a
+    /// `\n` is Ctrl-J, which adds a line rather than submitting. So a `\n` inside
+    /// `line` is a line of the prompt.
+    ///
+    /// One `write_all`, so the Enter comes in the same burst as the text. The
+    /// editor reads an Enter with more input right behind it as a pasted line
+    /// break; nothing follows this one, so it submits.
     fn send_line(&mut self, line: &str) {
         self.writer
-            .write_all(format!("{line}\n").as_bytes())
+            .write_all(format!("{line}\r").as_bytes())
             .and_then(|()| self.writer.flush())
             .expect("typing into the pty");
     }
 
-    /// A terminal Ctrl-C: the byte the line discipline turns into SIGINT for the
-    /// whole foreground process group.
+    /// A terminal Ctrl-C. In cooked mode the line discipline turns it into SIGINT
+    /// for the whole foreground process group. The prompt editor and the pickers
+    /// hold the terminal in raw mode, where it is a byte they read and act on.
     fn interrupt(&mut self) {
         self.writer
             .write_all(b"\x03")
             .and_then(|()| self.writer.flush())
             .expect("interrupting the pty");
+    }
+
+    /// Press keys in a picker. Raw bytes, because skim holds the terminal in raw
+    /// mode: Enter is `\r` there, not a line.
+    fn press(&mut self, keys: &str) {
+        self.writer
+            .write_all(keys.as_bytes())
+            .and_then(|()| self.writer.flush())
+            .expect("typing into the pty");
+    }
+
+    /// Wait for the picker whose header holds `header` and answer it with `keys`.
+    ///
+    /// Counted by occurrences, so a second picker with the same words is waited
+    /// for rather than answered from the first one's screen.
+    fn answer(&mut self, header: &str, keys: &str) {
+        let before = self.text().matches(header).count();
+        assert!(
+            wait_for(|| self.text().matches(header).count() > before),
+            "the picker {header:?} never appeared; the pty said:\n{}",
+            self.text()
+        );
+        // skim draws its header before it reads keys; a short pause keeps a key
+        // from landing while it is still setting up the terminal.
+        std::thread::sleep(Duration::from_millis(150));
+        self.press(keys);
+    }
+
+    /// Answer a picker by typing `query`, then pressing Enter once skim has matched.
+    ///
+    /// Two writes with a pause between, because skim takes Enter against the last
+    /// match it finished: a query and its Enter in one write reach it before the
+    /// match does, and Enter takes the old first row.
+    fn answer_typed(&mut self, header: &str, query: &str) {
+        self.answer(header, query);
+        std::thread::sleep(Duration::from_millis(400));
+        self.press("\r");
+    }
+
+    /// Take the first row of the agent, model and effort pickers, then wait for
+    /// the prompt editor. On a first run that is claude with every default, which
+    /// is every launch's way in when nothing is chosen.
+    fn reach_the_editor(&mut self) {
+        self.answer(AGENT_PICKER, "\r");
+        self.answer(MODEL_PICKER, "\r");
+        self.answer(EFFORT_PICKER, "\r");
+        self.expect(BANNER);
     }
 
     fn wait(mut self) -> u32 {
@@ -223,6 +273,15 @@ fn wait_for(mut ready: impl FnMut() -> bool) -> bool {
 /// The words the editor's banner ends with — the string the tests key on, and
 /// the one the e2e suite keys on too.
 const BANNER: &str = "press Enter";
+
+/// Words in the header of claude's model picker.
+const MODEL_PICKER: &str = "Model for claude";
+
+/// Words in the header of claude's effort picker.
+const EFFORT_PICKER: &str = "Effort for claude";
+
+/// Words in the header of the agent picker, which also chooses claude's login.
+const AGENT_PICKER: &str = "Agent for this launch";
 
 /// The name [`MAIN`] is put on a terminal under.
 ///
@@ -255,7 +314,7 @@ fn the_terminal_really_is_named_on_a_real_pty() {
     let by_id = osc_title(MAIN);
     let world = World::with(&["--warm"]);
     let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
-    session.expect(BANNER);
+    session.reach_the_editor();
     // Exact bytes and from the very first one: nothing precedes the name on this
     // terminal, so a prefix check is the whole claim about what the editor window
     // is titled.
@@ -324,7 +383,7 @@ fn a_falsey_no_tty_leaves_the_terminal_alone_on_a_real_pty() {
     let world = World::with(&["--warm"]);
     for value in ["FALSE", " no "] {
         let mut session = PtyAid::spawn(&world, &[MAIN], &[("DEVLAUNCH_NO_TTY", value)]);
-        session.expect(BANNER);
+        session.reach_the_editor();
         session.send_line("fix the bug");
         session.expect("aid -> dl");
         assert_eq!(session.wait(), 0, "DEVLAUNCH_NO_TTY={value:?}");
@@ -358,7 +417,7 @@ fn a_typed_prompt_reaches_the_agent_with_no_shell_in_the_way() {
     // editor exists to end.
     let world = World::with(&["--warm"]);
     let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
-    session.expect(BANNER);
+    session.reach_the_editor();
     session.send_line("fix the \"flaky\" test");
     session.expect("aid -> dl");
     assert_eq!(session.wait(), 0);
@@ -373,6 +432,24 @@ fn a_typed_prompt_reaches_the_agent_with_no_shell_in_the_way() {
 }
 
 #[test]
+fn a_lone_esc_at_the_editor_does_not_swallow_the_next_key() {
+    // The pickers teach that Esc cancels, so a person presses it here too. On its
+    // own, with a pause after it, it is not the Alt of the next key.
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.reach_the_editor();
+    session.press("\x1b");
+    std::thread::sleep(Duration::from_millis(100));
+    session.press("go");
+    std::thread::sleep(Duration::from_millis(100));
+    session.press("\r");
+    session.expect("aid -> dl");
+    assert_eq!(session.wait(), 0);
+    let last = world.devpod_calls().last().expect("a session").clone();
+    assert!(last.ends_with(" go'"), "{last}");
+}
+
+#[test]
 fn a_pasted_multi_line_prompt_arrives_whole_rather_than_leaking() {
     // A paste delivers its newlines with it, and the terminal holds the later
     // lines as completed input. The editor must drain them into the prompt: a
@@ -381,11 +458,12 @@ fn a_pasted_multi_line_prompt_arrives_whole_rather_than_leaking() {
     // keystrokes.
     let world = World::with(&["--warm"]);
     let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
-    session.expect(BANNER);
-    // One write, as a terminal delivers a paste: both lines arrive together, so
-    // the second is already queued when the first's Enter is read. `send_line`
-    // issuing exactly one write is what keeps that sentence true.
-    session.send_line("fix this\nand then that");
+    session.reach_the_editor();
+    // One write, as a terminal without bracketed paste delivers one. Each line
+    // ends in `\r`, the same byte as Enter, and the second line is already queued
+    // when the first `\r` is read: that queued input is all that makes the first
+    // `\r` a line break. The last one has nothing behind it and submits.
+    session.press("fix this\rand then that\r");
     assert_eq!(session.wait(), 0);
     assert_eq!(
         &without_session_id(world.devpod_calls().last().expect("a session")),
@@ -401,7 +479,7 @@ fn a_pasted_multi_line_prompt_arrives_whole_rather_than_leaking() {
 fn an_empty_enter_is_the_plain_session_it_always_was() {
     let world = World::with(&["--warm"]);
     let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
-    session.expect(BANNER);
+    session.reach_the_editor();
     session.send_line("");
     assert_eq!(session.wait(), 0);
     assert_eq!(
@@ -533,7 +611,7 @@ fn the_boot_runs_while_the_prompt_is_still_being_typed() {
     // attach that follows the Enter finds it running.
     let world = World::with(&["--stopped"]);
     let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
-    session.expect(BANNER);
+    session.reach_the_editor();
     assert!(
         wait_for(|| {
             world
@@ -557,9 +635,10 @@ fn the_boot_runs_while_the_prompt_is_still_being_typed() {
 
 #[test]
 fn a_ctrl_c_at_the_editor_tears_the_whole_boot_down() {
-    // `tests/interrupt.rs` on the pty: the boot child is in aid's process group,
-    // so the terminal's SIGINT reaches it, and its own handler kills the blocked
-    // `devpod up` — now in a group of its own — and unlinks the staged token.
+    // `tests/interrupt.rs` on the pty. The editor holds the terminal in raw mode,
+    // so the Ctrl-C is a byte and no SIGINT is sent: aid itself interrupts the
+    // boot child, whose own handler kills the blocked `devpod up` (in a group of
+    // its own) and unlinks the staged token.
     let world = World::with(&["--gh"]);
     let devpod = world.root.join("bin/devpod");
     let original = std::fs::read_to_string(&devpod).expect("the scenario's devpod");
@@ -594,7 +673,7 @@ fn a_ctrl_c_at_the_editor_tears_the_whole_boot_down() {
             ("DL_UP_STARTED", &up_started.display().to_string()),
         ],
     );
-    session.expect(BANNER);
+    session.reach_the_editor();
     // Interrupt only once the boot is mid-`up` with the token staged — the exact
     // state the interrupt handler exists to clean.
     assert!(
@@ -629,6 +708,568 @@ fn token_file(dir: &Path) -> Option<PathBuf> {
         let name = path.file_name()?.to_string_lossy().into_owned();
         (name.starts_with("devlaunch-gh-") && name.ends_with(".env")).then_some(path)
     })
+}
+
+// ===========================================================================
+// the pickers ahead of the editor
+// ===========================================================================
+
+/// The claude payload a launch sends, with the words the pickers added.
+fn claude_session(settings: &str, prompt: &str) -> String {
+    format!(
+        "devpod ssh {MAIN} --log-output json --command bash -lc 'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 \
+         IS_SANDBOX=1 claude --dangerously-skip-permissions {settings}--remote-control={MAIN} {prompt}'"
+    )
+}
+
+#[test]
+fn a_model_that_is_not_listed_is_typed_and_reaches_the_agent() {
+    // Nothing lists `claude-opus-5-5`, so the query matches no row and Enter takes
+    // the query itself. The effort is picked from the list by filtering to it.
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.answer(AGENT_PICKER, "\r");
+    session.answer_typed(MODEL_PICKER, "claude-opus-5-5");
+    session.answer_typed(EFFORT_PICKER, "max");
+    session.expect("(model claude-opus-5-5, effort max)");
+    session.expect(BANNER);
+    session.send_line("go");
+    assert_eq!(session.wait(), 0);
+    assert_eq!(
+        &without_session_id(world.devpod_calls().last().expect("a session")),
+        &claude_session("--model claude-opus-5-5 --effort max ", "go")
+    );
+}
+
+#[test]
+fn the_last_choice_is_the_first_row_of_the_next_launch() {
+    // One world, two launches: the second takes the first row of each picker and
+    // gets what the first launch chose, because the cache remembered it.
+    let world = World::with(&["--warm"]);
+    let mut first = PtyAid::spawn(&world, &[MAIN], &[]);
+    first.answer(AGENT_PICKER, "\r");
+    first.answer_typed(MODEL_PICKER, "sonnet");
+    first.answer_typed(EFFORT_PICKER, "low");
+    first.expect(BANNER);
+    first.send_line("one");
+    assert_eq!(first.wait(), 0);
+
+    let mut second = PtyAid::spawn(&world, &[MAIN], &[]);
+    second.reach_the_editor();
+    second.send_line("two");
+    assert_eq!(second.wait(), 0);
+    assert_eq!(
+        &without_session_id(world.devpod_calls().last().expect("a session")),
+        &claude_session("--model sonnet --effort low ", "two")
+    );
+}
+
+#[test]
+fn a_setting_a_flag_gave_is_not_asked_for() {
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &["--model", "opus", MAIN], &[]);
+    session.answer(AGENT_PICKER, "\r");
+    session.answer(EFFORT_PICKER, "\r");
+    session.expect(BANNER);
+    assert!(
+        !session.text().contains(MODEL_PICKER),
+        "the model picker was drawn although --model gave the model"
+    );
+    session.send_line("go");
+    assert_eq!(session.wait(), 0);
+    assert_eq!(
+        &without_session_id(world.devpod_calls().last().expect("a session")),
+        &claude_session("--model opus ", "go")
+    );
+}
+
+#[test]
+fn with_no_terminal_type_the_pickers_are_drawn_as_the_fallback_terminal() {
+    // skim cannot draw without a `TERM`, and used to panic on one that was not
+    // set. The pickers take the workspace picker's fallback and say so, and each
+    // one is still answered with Enter.
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[("TERM", "")]);
+    session.answer(AGENT_PICKER, "\r");
+    session.answer(MODEL_PICKER, "\r");
+    session.answer(EFFORT_PICKER, "\r");
+    session.expect(BANNER);
+    assert!(
+        session.text().contains("drawn as xterm-256color"),
+        "{}",
+        session.text()
+    );
+    session.send_line("go");
+    assert_eq!(session.wait(), 0);
+    assert_eq!(
+        &without_session_id(world.devpod_calls().last().expect("a session")),
+        &claude_session("", "go")
+    );
+}
+
+#[test]
+fn a_named_claude_login_is_a_row_of_the_agent_picker_and_reaches_dl() {
+    // A host with one named profile holding a credential gets a claude row for it
+    // in the agent picker. The row is found by filtering to its name, as a person
+    // would.
+    let world = World::with(&["--warm"]);
+    let profiles = world.root.join("profiles");
+    std::fs::create_dir_all(profiles.join("work")).expect("a profile directory");
+    std::fs::write(profiles.join("work/.credentials.json"), "{}").expect("a credential");
+    let mut session = PtyAid::spawn(
+        &world,
+        &[MAIN],
+        &[(
+            "DEVLAUNCH_CLAUDE_PROFILES_DIR",
+            &profiles.display().to_string(),
+        )],
+    );
+    session.answer_typed(AGENT_PICKER, "work");
+    session.answer(MODEL_PICKER, "\r");
+    session.answer(EFFORT_PICKER, "\r");
+    session.expect(BANNER);
+    session.expect("(account work)");
+    session.send_line("go");
+    session.expect(&format!("aid -> dl --claude-profile work {MAIN} --"));
+    assert_eq!(session.wait(), 0);
+}
+
+#[test]
+fn another_agent_is_a_row_of_the_same_picker() {
+    // codex is chosen by name, and its own pickers follow. Remote Control was only
+    // claude's default, so codex starts without it and nothing refuses.
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.answer_typed(AGENT_PICKER, "codex");
+    session.answer(MODEL_PICKER.replace("claude", "codex").as_str(), "\r");
+    session.answer_typed(EFFORT_PICKER.replace("claude", "codex").as_str(), "high");
+    session.expect(BANNER);
+    session.send_line("hi");
+    assert_eq!(session.wait(), 0);
+    let last = world.devpod_calls().last().expect("a session").clone();
+    assert!(
+        last.contains(
+            "codex --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort=high hi"
+        ),
+        "{last}"
+    );
+}
+
+#[test]
+fn alt_enter_takes_a_model_that_is_a_prefix_of_a_listed_one() {
+    // Matching is by substring, so `gpt-5.5` still matches the remembered
+    // `gpt-5.5-codex` and Enter takes that row. Alt-Enter (ESC CR on a terminal)
+    // takes the query as typed.
+    let world = World::with(&["--warm"]);
+    let codex_model = MODEL_PICKER.replace("claude", "codex");
+    let codex_effort = EFFORT_PICKER.replace("claude", "codex");
+    let mut first = PtyAid::spawn(&world, &["--codex", MAIN], &[]);
+    first.answer_typed(&codex_model, "gpt-5.5-codex");
+    first.answer(&codex_effort, "\r");
+    first.expect(BANNER);
+    first.send_line("one");
+    assert_eq!(first.wait(), 0);
+
+    let mut second = PtyAid::spawn(&world, &["--codex", MAIN], &[]);
+    second.answer(&codex_model, "gpt-5.5");
+    std::thread::sleep(Duration::from_millis(400));
+    second.press("\x1b\r");
+    second.answer(&codex_effort, "\r");
+    second.expect("(model gpt-5.5)");
+    second.expect(BANNER);
+    second.send_line("two");
+    assert_eq!(second.wait(), 0);
+    let last = world.devpod_calls().last().expect("a session").clone();
+    assert!(last.contains("--model gpt-5.5 "), "{last}");
+}
+
+#[test]
+fn a_typed_agent_with_one_login_is_not_asked_which_agent() {
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &["--claude", MAIN], &[]);
+    session.answer(MODEL_PICKER, "\r");
+    session.answer(EFFORT_PICKER, "\r");
+    session.expect(BANNER);
+    assert!(!session.text().contains(AGENT_PICKER), "{}", session.text());
+    session.send_line("");
+    assert_eq!(session.wait(), 0);
+}
+
+#[test]
+fn esc_in_a_picker_stops_the_boot_and_launches_nothing() {
+    // The same world as the Ctrl-C test above: an `up` that blocks with the token
+    // staged. In a picker Ctrl-C and Esc are keys, not signals, so nothing reaches
+    // the boot unless aid sends it. The cleanup is the proof that it did.
+    let world = World::with(&["--gh"]);
+    let devpod = world.root.join("bin/devpod");
+    let original = std::fs::read_to_string(&devpod).expect("the scenario's devpod");
+    let delegate = original
+        .lines()
+        .find(|line| line.starts_with("exec "))
+        .expect("the delegate exec line");
+    let script = format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = \"up\" ]; then\n\
+         \x20 echo \"$$\" > \"$DL_UP_PID\"\n\
+         \x20 : > \"$DL_UP_STARTED\"\n\
+         \x20 exec sleep 30\n\
+         fi\n\
+         {delegate}\n"
+    );
+    std::fs::write(&devpod, script).expect("rewrite devpod");
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&devpod, std::fs::Permissions::from_mode(0o755))
+        .expect("keep devpod executable");
+    let tmpdir = world.root.join("tmp");
+    std::fs::create_dir_all(&tmpdir).expect("a scratch TMPDIR");
+    let up_pid = world.root.join("up.pid");
+    let up_started = world.root.join("up.started");
+
+    let mut session = PtyAid::spawn(
+        &world,
+        &["blooop/devlaunch@cold"],
+        &[
+            ("TMPDIR", &tmpdir.display().to_string()),
+            ("DL_UP_PID", &up_pid.display().to_string()),
+            ("DL_UP_STARTED", &up_started.display().to_string()),
+        ],
+    );
+    session.answer(AGENT_PICKER, "\r");
+    session.answer(MODEL_PICKER, "");
+    assert!(
+        wait_for(|| up_started.exists() && token_file(&tmpdir).is_some()),
+        "devpod up never blocked with a token staged"
+    );
+    let up = std::fs::read_to_string(&up_pid).expect("the up pid");
+    let up = up.trim().to_owned();
+
+    session.press("\x1b");
+    session.expect("cancelled");
+    let seen = Arc::clone(&session.seen);
+    assert_eq!(session.wait(), 130);
+    assert!(
+        !String::from_utf8_lossy(&seen.lock().expect("the pty buffer")).contains(BANNER),
+        "the editor opened after a cancel"
+    );
+    assert!(
+        token_file(&tmpdir).is_none(),
+        "the token file must be gone once aid has waited the boot out"
+    );
+    assert!(
+        wait_for(|| !Command::new("kill")
+            .args(["-0", &up])
+            .output()
+            .expect("kill is installed")
+            .status
+            .success()),
+        "the devpod up (pid {up}) must have been killed"
+    );
+    assert!(
+        !world
+            .devpod_calls()
+            .iter()
+            .any(|call| call.starts_with("devpod ssh")),
+        "a session was opened after a cancel: {:?}",
+        world.devpod_calls()
+    );
+}
+
+/// The agent sessions devpod was asked for so far. The boot's own `devpod ssh`
+/// calls provision the workspace and are left out: only a session asks for
+/// `--log-output json`.
+fn sessions(world: &World) -> Vec<String> {
+    world
+        .devpod_calls()
+        .into_iter()
+        .filter(|call| call.starts_with(&format!("devpod ssh {MAIN} --log-output json ")))
+        .collect()
+}
+
+#[test]
+fn the_agent_chosen_last_is_the_first_row_of_the_next_launch() {
+    // The first run lists claude first, so an Enter on the second launch's agent
+    // picker takes codex only if the first launch's choice moved it up.
+    let world = World::with(&["--warm"]);
+    let mut first = PtyAid::spawn(&world, &[MAIN], &[]);
+    first.answer_typed(AGENT_PICKER, "codex");
+    first.answer("Model for codex", "\r");
+    first.answer("Effort for codex", "\r");
+    first.expect(BANNER);
+    first.send_line("one");
+    assert_eq!(first.wait(), 0);
+
+    let mut second = PtyAid::spawn(&world, &[MAIN], &[]);
+    second.answer(AGENT_PICKER, "\r");
+    // Waited for by the words every agent's model picker shares, so a claude row
+    // fails here at once rather than at the deadline.
+    second.answer("Model for ", "\r");
+    assert!(
+        second.text().contains("Model for codex"),
+        "the first row was not codex; the pty said:\n{}",
+        second.text()
+    );
+    second.answer("Effort for codex", "\r");
+    second.expect(BANNER);
+    second.send_line("two");
+    assert_eq!(second.wait(), 0);
+    let last = world.devpod_calls().last().expect("a session").clone();
+    assert!(
+        last.contains("codex --dangerously-bypass-approvals-and-sandbox two"),
+        "{last}"
+    );
+}
+
+#[test]
+fn a_typed_agent_that_is_no_row_is_asked_for_again() {
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.answer_typed(AGENT_PICKER, "nonesuch");
+    // `answer` counts the header, so it waits for the picker drawn a second time.
+    session.answer(AGENT_PICKER, "\x1b");
+    session.expect("cancelled");
+    let seen = Arc::clone(&session.seen);
+    assert_eq!(session.wait(), 130);
+    let whole = String::from_utf8_lossy(&seen.lock().expect("the pty buffer")).into_owned();
+    assert!(
+        !whole.contains(MODEL_PICKER),
+        "a typed name that is no agent went on to the model picker; the pty said:\n{whole}"
+    );
+    assert!(
+        sessions(&world).is_empty(),
+        "a session was opened: {:?}",
+        sessions(&world)
+    );
+}
+
+#[test]
+fn esc_at_the_agent_picker_launches_nothing() {
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.answer(AGENT_PICKER, "\x1b");
+    session.expect("cancelled");
+    let seen = Arc::clone(&session.seen);
+    assert_eq!(session.wait(), 130);
+    let whole = String::from_utf8_lossy(&seen.lock().expect("the pty buffer")).into_owned();
+    assert!(
+        !whole.contains(MODEL_PICKER) && !whole.contains(BANNER),
+        "the launch went on after the Esc; the pty said:\n{whole}"
+    );
+    assert!(
+        sessions(&world).is_empty(),
+        "a session was opened after a cancel: {:?}",
+        sessions(&world)
+    );
+}
+
+#[test]
+fn a_setting_a_flag_gave_is_the_first_row_of_the_next_launch() {
+    // Remembered as a choice although no picker asked for it.
+    let world = World::with(&["--warm"]);
+    let mut first = PtyAid::spawn(&world, &["--model", "opus", MAIN], &[]);
+    first.answer(AGENT_PICKER, "\r");
+    first.answer(EFFORT_PICKER, "\r");
+    first.expect(BANNER);
+    first.send_line("one");
+    assert_eq!(first.wait(), 0);
+
+    let mut second = PtyAid::spawn(&world, &[MAIN], &[]);
+    second.reach_the_editor();
+    second.send_line("two");
+    assert_eq!(second.wait(), 0);
+    assert_eq!(
+        &without_session_id(world.devpod_calls().last().expect("a session")),
+        &claude_session("--model opus ", "two")
+    );
+}
+
+// ===========================================================================
+// the prompt editor
+// ===========================================================================
+
+#[test]
+fn a_pasted_prompt_keeps_its_line_breaks_and_waits_for_enter() {
+    // The paste ends in a line break, as a copied block of text often does. Under
+    // the cooked read that break submitted the prompt; here it is text, and the
+    // prompt is sent only on the Enter after it. Windows line ends are one break.
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.reach_the_editor();
+    // Two writes, so one read ends on a `\r` with nothing queued behind it. The
+    // open paste is then the only thing that keeps that `\r` a line break.
+    session.press("\x1b[200~first line\r");
+    std::thread::sleep(Duration::from_millis(200));
+    session.press("second line\r\n\x1b[201~");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !session.text().contains("aid -> dl"),
+        "the paste's own line break submitted the prompt; devpod was asked for {:?}",
+        world.devpod_calls()
+    );
+    session.press("\r");
+    assert_eq!(session.wait(), 0);
+    let last = world.devpod_calls().last().expect("a session").clone();
+    assert!(last.contains("first line\nsecond line'"), "{last}");
+}
+
+#[test]
+fn a_paste_longer_than_the_kernels_line_limit_arrives_whole() {
+    // The cooked read went through the line discipline, which holds 4096 bytes of
+    // one line and drops the rest. Twice that, in pieces, to be sure.
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.reach_the_editor();
+    let long = "y".repeat(9000);
+    session.press("\x1b[200~");
+    for chunk in long.as_bytes().chunks(3000) {
+        session.press(std::str::from_utf8(chunk).expect("ascii"));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    session.press("\x1b[201~");
+    std::thread::sleep(Duration::from_millis(200));
+    session.press("\r");
+    assert_eq!(session.wait(), 0);
+    let last = world.devpod_calls().last().expect("a session").clone();
+    assert!(
+        last.contains(&format!(" {long}'")),
+        "{} bytes long",
+        last.len()
+    );
+}
+
+#[test]
+fn a_paste_that_arrives_late_does_not_leak_into_the_agent() {
+    // The second half of the paste comes after a pause. The cooked read took what
+    // was queued at the first line break and left the rest for the agent session
+    // as keystrokes; the editor waits for the end of the paste.
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.reach_the_editor();
+    session.press("\x1b[200~part one\r");
+    std::thread::sleep(Duration::from_millis(300));
+    session.press("part two\x1b[201~");
+    std::thread::sleep(Duration::from_millis(200));
+    session.press("\r");
+    assert_eq!(session.wait(), 0);
+    let last = world.devpod_calls().last().expect("a session").clone();
+    assert!(last.contains("part one\npart two'"), "{last}");
+}
+
+#[test]
+fn a_line_is_added_by_typing_alt_enter_or_ctrl_j() {
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.reach_the_editor();
+    session.press("one\x1b\r");
+    std::thread::sleep(Duration::from_millis(100));
+    session.press("two\n");
+    std::thread::sleep(Duration::from_millis(100));
+    session.press("three");
+    std::thread::sleep(Duration::from_millis(100));
+    session.press("\r");
+    assert_eq!(session.wait(), 0);
+    let last = world.devpod_calls().last().expect("a session").clone();
+    assert!(last.contains("one\ntwo\nthree'"), "{last}");
+}
+
+// ===========================================================================
+// no workspace named
+// ===========================================================================
+
+/// Words in the header of dl's workspace picker.
+const WORKSPACE_PICKER: &str = "Select workspace";
+
+#[test]
+fn a_bare_aid_picks_a_workspace_as_a_bare_dl_does() {
+    // The scenario's one workspace is the only row, so Enter takes it, and the
+    // launch that follows is the ordinary one for that workspace.
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[], &[]);
+    session.answer(WORKSPACE_PICKER, "\r");
+    session.expect(&format!("-> {MAIN}"));
+    session.reach_the_editor();
+    session.send_line("go");
+    assert_eq!(session.wait(), 0);
+    assert_eq!(
+        &without_session_id(world.devpod_calls().last().expect("a session")),
+        &claude_session("", "go")
+    );
+}
+
+#[test]
+fn leading_flags_with_no_workspace_pick_one_and_keep_the_flags() {
+    // `--codex` still chooses the agent, so there is no agent picker after the
+    // workspace one: the typed flag already said.
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &["--codex"], &[]);
+    session.answer(WORKSPACE_PICKER, "\r");
+    session.answer("Model for codex", "\r");
+    session.answer("Effort for codex", "\r");
+    session.expect(BANNER);
+    assert!(!session.text().contains(AGENT_PICKER), "{}", session.text());
+    session.send_line("hi");
+    assert_eq!(session.wait(), 0);
+    let last = world.devpod_calls().last().expect("a session").clone();
+    assert!(
+        last.contains("codex --dangerously-bypass-approvals-and-sandbox hi"),
+        "{last}"
+    );
+}
+
+#[test]
+fn a_quit_workspace_picker_launches_nothing() {
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[], &[]);
+    session.answer(WORKSPACE_PICKER, "\x1b");
+    assert_eq!(session.wait(), 1);
+    assert!(
+        world.devpod_calls().is_empty(),
+        "{:?}",
+        world.devpod_calls()
+    );
+}
+
+#[test]
+fn a_retired_spelling_with_no_workspace_is_refused_before_any_picker() {
+    // dl is what refuses a retired spelling, and it needs a workspace to be asked
+    // about. A picked spec would land after the retired word, which then no longer
+    // ends the line, and the line would become an agent launch.
+    for line in [&["--stop"][..], &["resume", "--autorm"]] {
+        let world = World::with(&["--warm"]);
+        let mut session = PtyAid::spawn(&world, line, &[]);
+        let seen = Arc::clone(&session.seen);
+        // Bounded: a picker that opened anyway would wait on this pty for ever.
+        let mut code = None;
+        wait_for(|| {
+            code = session.child.try_wait().expect("aid's status");
+            code.is_some()
+        });
+        let _ = session.child.kill();
+        let said = || String::from_utf8_lossy(&seen.lock().expect("the pty buffer")).into_owned();
+        assert_eq!(
+            code.map(|status| status.exit_code()),
+            Some(1),
+            "{line:?}: the pty said:\n{:?}",
+            said()
+        );
+        assert!(
+            wait_for(|| said().contains("aid needs a workspace")),
+            "{line:?}: the refusal was not given; the pty said:\n{:?}",
+            said()
+        );
+        assert!(
+            !said().contains(WORKSPACE_PICKER),
+            "{line:?}: the workspace picker opened: {:?}",
+            said()
+        );
+        assert!(
+            !world
+                .devpod_calls()
+                .iter()
+                .any(|call| call.starts_with("devpod ssh")),
+            "{line:?}: a session was opened: {:?}",
+            world.devpod_calls()
+        );
+    }
 }
 
 /// A session call with aid's `--session-id <uuid>` taken out, after checking it is

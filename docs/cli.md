@@ -730,6 +730,113 @@ claude all take it offline immediately. The entry can sit in the claude.ai list 
 roughly 4 hours after that before it clears, which is the web side timing out rather
 than anything still running on your machine.
 
+## Model and effort, in each agent's spelling
+
+`--model` and `--effort` are `aid`'s own words. Each agent is told them in the
+spelling its own CLI takes:
+
+```bash
+aid --model opus --effort max blooop/devlaunch      # claude --model opus --effort max
+aid --codex --model gpt-5.5 --effort high blooop/devlaunch
+                                                   # codex --model gpt-5.5 -c model_reasoning_effort=high
+aid --gemini --model gemini-3-pro blooop/devlaunch  # gemini --model gemini-3-pro
+```
+
+Both take their value as the next word or joined with `=`, and both go ahead of the
+workspace like the agent flags do. After the workspace they are prompt text.
+
+**`aid` does not check the values.** Each agent adds models and effort levels on its
+own release schedule, and codex already takes effort values it does not know by
+name. A list in `aid` would be wrong a few weeks after each release. So `aid` holds
+only the spelling of each flag, in its agent table, and passes the value on as you
+typed it. A value the agent does not know is the agent's to answer for, in its own words: `claude` warns about an unknown effort and uses its default.
+Leave a flag off and no flag is passed, so the agent starts on its own default.
+
+**gemini has no effort setting.** `--effort` beside `--gemini` is refused before
+anything boots, the same way `--remote-control` is refused beside an agent without
+Remote Control. A value that is missing, empty or starts with `-` is refused too:
+`aid --model --codex <ws>` is a typo, not a model called `--codex`.
+
+## The pickers ahead of the prompt
+
+`aid <workspace>` with no prompt on a terminal asks for up to three settings before
+it opens the prompt editor. The workspace boots in the background the whole time.
+
+1. **The agent**, with one row per Claude login and one row for each other agent:
+
+   ```
+   AGENT   NAME      STATE          ACCOUNT
+   claude  default   authed         me@example.com
+   claude  work      authed         me@acme.example · team
+   codex
+   gemini
+   ```
+
+   The Claude rows are the ones `dl --claude-profiles` lists, less the named
+   profiles with no credential, since a launch naming one of those refuses. A
+   named row becomes `--claude --claude-profile <name>`, and `default` passes no
+   profile. codex and gemini have one row each, because `dl` forwards one login
+   for each of them.
+
+   Choosing a row puts its flags in front of your line and parses the line again,
+   so every rule of the line still holds. A row the line would refuse is not
+   shown: `--remote-control` on the line leaves only claude, and `--effort` leaves
+   out gemini. A typed `--codex` or `--claude` shows only that agent's rows, and a
+   typed `--claude-profile` skips this picker. So does a list of one row.
+2. **The model.**
+3. **The effort**, for the agents that have one.
+
+Each picker lists your recent choices first, newest at the top. For the model and
+the effort that is per agent, followed by `default`, then a few suggestions for a
+first run. The cursor starts on the
+first row, so one Enter repeats the last launch. Type to filter the rows. Type a
+name that no row holds and Enter uses it as typed, which is how a model that came
+out yesterday is chosen. It is listed from then on. Matching is exact rather than
+fuzzy for that reason: a fuzzy match finds a listed row for almost any query.
+Where the name is part of a listed row, such as `gpt-5.5` beside `gpt-5.5-codex`,
+Alt-Enter uses the text as typed instead of the row.
+
+A setting that a flag on the line already gave is not asked for, so
+`aid --model opus --effort max <ws>` goes straight to the prompt. A line with a
+prompt on it asks for nothing, as before.
+
+**Esc cancels the launch.** In a picker Esc and Ctrl-C are keys, not signals, so
+`aid` stops the background boot itself, the same way a Ctrl-C at the prompt editor
+does: its `devpod up` is killed and its staged token file is removed. The exit
+status is 130.
+
+The recent choices live in `aid-recent.tsv` in the devlaunch cache, so
+`XDG_CACHE_HOME` scopes them with everything else. A file that is missing or
+broken reads as no history, and never stops a launch.
+
+With no `TERM`, with `TERM=dumb`, or on a terminal whose size reads as zero,
+there are no pickers. The prompt editor still opens and every setting stays at
+its default.
+
+## The prompt editor
+
+After the pickers, `aid` draws a `> ` prompt under one line that says what is
+booting. It is a small editor of its own, not the terminal's line mode, because
+the line mode could not take a paste: it holds 4096 bytes of a line, it
+submitted at the first line break of a paste, and the lines of a paste that came
+a moment late went on to the agent as keystrokes.
+
+- **A paste is text, line breaks included.** The editor turns on the terminal's
+  bracketed paste, so it knows where a paste starts and ends, and a line break
+  inside one never submits. A terminal without bracketed paste still sends a
+  paste faster than anybody types, so an Enter with more input right behind it
+  is read as a line break too. Windows line ends are one break.
+- **Enter submits. Alt-Enter or Ctrl-J adds a line.**
+- **Backspace, Ctrl-U and Ctrl-W** delete a character, the line and a word.
+  There is no cursor to move: the arrow keys do nothing, rather than printing
+  `^[[D`.
+- **An empty Enter, or Ctrl-D on nothing,** starts the agent's plain session.
+- **Ctrl-C stops the boot** and exits with 130, as Esc does in a picker.
+
+A prompt taller than the screen shows its last lines under a line that counts the
+ones not shown. All of it is sent. Keys typed after the Enter are not read, so
+they reach the agent.
+
 ## `aid resume`: back into a session after a restart
 
 ```bash

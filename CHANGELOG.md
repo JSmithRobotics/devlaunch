@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.59.0] - 2026-09-30
+
+### Added
+
+- **`aid --model` and `aid --effort`** (#662). Each agent is told them in its own spelling:
+  `claude --model/--effort`, `codex --model` and `-c model_reasoning_effort=`, and
+  `gemini --model`. The values are passed on as typed, since the agents add models
+  faster than `aid` is released. `--effort` beside `--gemini` is refused, as gemini has
+  no such setting. Both work with `aid resume` too.
+- **`aid` asks for the agent, the model and the effort before the prompt** (#662). Each is a
+  picker that lists the recent choices first, so one Enter repeats the last launch. The
+  agent picker has one row per Claude login that `dl --claude-profiles` lists, then
+  `codex` and `gemini`. A name that is not listed can be typed. A flag on the line
+  skips its picker, and Esc stops the background boot.
+- **A bare `aid` picks a workspace** (#662), as a bare `dl` does. So does a line of flags with
+  no workspace, such as `aid --codex`.
+
+### Fixed
+
+- **A pasted prompt arrives whole** (#662). The prompt editor read the terminal in line mode,
+  which cut a paste off at 4096 bytes, submitted at its first line break, and left
+  lines that arrived late for the agent to read as keystrokes. It is now a raw-mode
+  editor with bracketed paste: a paste keeps its line breaks, Alt-Enter or Ctrl-J adds
+  a line, and Enter submits.
+- **The agent, model and effort pickers no longer panic** (#662) on a terminal with a size of
+  zero, and take the workspace picker's `TERM` fallback. With no terminal they can draw
+  on, they are skipped, and the prompt editor still opens.
+
 ## [0.58.0] - 2026-09-30
 
 ### Added

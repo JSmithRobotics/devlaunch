@@ -11,7 +11,7 @@ members = [
 # The single source of the version (docs/rust-rewrite-plan.md: cutover ships
 # 0.1.0, version read from Cargo.toml).
 [workspace.package]
-version = "0.58.0"
+version = "0.59.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/blooop/devlaunch"
@@ -36,6 +36,8 @@ toml = "0.9"
 toml_edit = "0.23"
 clap = { version = "4", features = ["derive"] }
 skim = "0.20"
+# The prompt editor's column widths. skim already brings this version in.
+unicode-width = "0.2"
 # The terminfo lookup skim's terminal setup makes and unwraps, made first so a
 # `TERM` it would panic on, or draw nothing with, can be replaced (dl's
 # `select.rs`). The version skim resolves, so the answer is the one skim would

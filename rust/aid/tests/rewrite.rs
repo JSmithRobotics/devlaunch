@@ -617,6 +617,50 @@ fn remote_control_beside_an_agent_that_has_none_is_refused_before_anything_opens
 }
 
 #[test]
+fn a_model_and_an_effort_reach_the_agent_and_dl_never_sees_either() {
+    // dl has never heard of `--model` or `--effort`, so a version that passed
+    // either through as an unknown leading option would exit 2 here.
+    let world = World::with(&["--warm"]);
+    world
+        .aid(&["--model", "opus", "--effort=max", MAIN, "fix", "it"])
+        .exited(0);
+    assert_eq!(
+        world.devpod_calls().last().expect("a session"),
+        &format!(
+            "devpod ssh {MAIN} --log-output json --command bash -lc \
+             'CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 IS_SANDBOX=1 claude \
+             --dangerously-skip-permissions --model opus --effort max \
+             --remote-control={MAIN} '\"'\"'fix it'\"'\"''"
+        )
+    );
+
+    let codex = World::with(&["--warm"]);
+    codex
+        .aid(&["--codex", "--effort", "high", MAIN, "hi"])
+        .exited(0);
+    let session = codex.devpod_calls().last().expect("a session").clone();
+    assert!(
+        session.contains(
+            "codex --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort=high hi"
+        ),
+        "{session}"
+    );
+}
+
+#[test]
+fn an_effort_beside_an_agent_that_has_none_is_refused_before_anything_opens() {
+    let world = World::with(&["--warm"]);
+    let run = world.aid(&["--gemini", "--effort", "high", MAIN, "hi"]);
+    run.exited(1);
+    assert_eq!(
+        run.err,
+        "--effort sets a reasoning effort, which gemini has no setting for. \
+         Drop the flag or pick one of: --claude, --codex.\n"
+    );
+    assert!(world.devpod_calls().is_empty());
+}
+
+#[test]
 fn a_dl_option_is_passed_through_and_a_flag_after_the_spec_is_prompt() {
     // `--devcontainer` reaches dl, which says what it thinks of it for a workspace
     // that is already running; `--verbose` after the spec is a word of the prompt,

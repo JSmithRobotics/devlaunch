@@ -19,7 +19,7 @@ one argument instead of a clone, a config file and a build command.
 [![GitHub pull-requests merged](https://badgen.net/github/merged-prs/blooop/devlaunch)](https://github.com/blooop/devlaunch/pulls?q=is%3Amerged)
 [![GitHub release](https://img.shields.io/github/release/blooop/devlaunch.svg)](https://GitHub.com/blooop/devlaunch/releases/)
 [![PyPI](https://img.shields.io/pypi/v/devlaunch)](https://pypi.org/project/devlaunch/)
-[![Conda](https://img.shields.io/badge/conda-v0.58.0-brightgreen?logo=anaconda)](https://prefix.dev/channels/blooop/packages/devlaunch)
+[![Conda](https://img.shields.io/badge/conda-v0.59.0-brightgreen?logo=anaconda)](https://prefix.dev/channels/blooop/packages/devlaunch)
 [![License](https://img.shields.io/github/license/blooop/devlaunch)](https://opensource.org/license/mit/)
 [![Platform](https://img.shields.io/badge/platform-linux--64-blue)](https://github.com/blooop/devlaunch/releases)
 [![Pixi Badge](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/prefix-dev/pixi/main/assets/badge/v0.json)](https://pixi.sh)
@@ -341,7 +341,7 @@ clone, and [docs/cleanup.md](docs/cleanup.md) says what it carries one past and 
 
 ```bash
 $ dl --version
-dl 0.58.0
+dl 0.59.0
 ```
 
 `--devcontainer <variant|path>` picks a non-default `devcontainer.json`. A bare name means
@@ -407,15 +407,23 @@ once for the whole run:
 aid https://github.com/blooop/devlaunch/pull/579 address the review comments
 ```
 
-With no prompt on the line, `aid` starts the container booting and asks for the prompt while it
-does. Type it free of shell quoting, with no escaping and no history expansion eating a `!`. An
-empty Enter starts the agent's plain session. Piping stdin or setting `DEVLAUNCH_NO_TTY=1` skips
-the question and launches one-shot, so scripts behave as they always have.
+With no workspace on the line, `aid` on a terminal lets you pick one of your workspaces, as `dl`
+does. With no prompt on the line, `aid` starts the container booting and asks for the prompt while it
+does. Type it free of shell quoting, with no escaping and no history expansion eating a `!`. A
+paste keeps its line breaks and can be any length, Alt-Enter or Ctrl-J adds a line, and an empty
+Enter starts the agent's plain session. Before the prompt it asks for the agent (one row per Claude
+login, then `codex` and `gemini`), the model and the effort, each in a picker that lists your
+recent choices first, so one Enter repeats the last launch. A flag on the line skips its picker,
+and Esc stops the boot. See [docs/cli.md](docs/cli.md#the-pickers-ahead-of-the-prompt). Piping
+stdin or setting `DEVLAUNCH_NO_TTY=1` skips the question and launches one-shot, so scripts behave
+as they always have.
 
 | Option | What it does |
 |---|---|
 | `--claude`, `--codex`, `--gemini` | Pick the agent. Default `claude` |
 | `--rm` | Delete the workspace when the agent is done. Appendable to a recalled line |
+| `--model <model>` | The model the agent runs, in that agent's own spelling. Passed on as typed and not checked. See [docs/cli.md](docs/cli.md#model-and-effort-in-each-agents-spelling) |
+| `--effort <level>` | How hard the agent thinks: claude's `--effort`, codex's `model_reasoning_effort`. gemini has none, so beside `--gemini` it stops |
 | `--no-remote-control`, `--no-remote` | Start a plain local session. Remote Control is on by default for `claude`: the session is named after the workspace and can be read and steered from claude.ai/code or the Claude app. It needs a claude.ai login in the container |
 | `--remote-control`, `--remote` | Ask for Remote Control by name. `claude` has it already; beside `--codex` or `--gemini` this says they have not got it and stops |
 | `--devcontainer <variant\|path>` | Passed through to `dl` |

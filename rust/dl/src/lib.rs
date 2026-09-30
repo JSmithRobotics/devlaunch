@@ -30,6 +30,7 @@ mod herdr_editor;
 mod herdr_environment;
 mod launch;
 mod pane_shell;
+mod prompt_editor;
 mod render;
 mod select;
 mod session;
@@ -62,6 +63,10 @@ pub use devlaunch_core::shell;
 /// name holding a quote or a control byte is spelled the same as everywhere else
 /// `dl` quotes what a tool or an environment said.
 pub use render::python_repr;
+
+/// The one-row chooser `aid`'s model and effort pickers are drawn with. See
+/// [`select::choose`].
+pub use select::{Choice, choose};
 
 /// `os.environ.get`, for the entry point that has environment variables of its
 /// own: `aid` reads `DEVLAUNCH_AID_AGENT` through here rather than through
@@ -407,6 +412,10 @@ pub fn workspace_id_of(spec: &str) -> Option<String> {
 /// asks for the pick first and builds a line for a named workspace, which is the
 /// path every other aid launch takes.
 ///
+/// A bare `aid`, and a line of flags with no workspace, take the same pick for the
+/// same reason: the agent, model and effort pickers, the banner and the background
+/// boot all come between the pick and the launch.
+///
 /// A pick that never came (Esc, an empty list, no terminal) is `Err(1)`, with the
 /// reason on stderr where there is one.
 pub fn pick_workspace() -> Result<String, i32> {
@@ -499,85 +508,44 @@ fn early_name(spec: &str, cache_dir: &Path) -> Option<String> {
     }
 }
 
-/// Read one submission from a cooked-mode terminal: the line the user ends with
-/// Enter, plus whatever input was already buffered at that moment — a multi-line
-/// paste — joined as the newlines it arrived with. Empty on a bare Enter or an
-/// immediate Ctrl-D.
+/// Send SIGINT to one process, as a terminal Ctrl-C would.
 ///
-/// The read is byte-by-byte from descriptor 0 rather than through
-/// `std::io::stdin()`, and that is load-bearing twice over. First, `Stdin`'s
-/// buffer would swallow the rest of a paste where nothing can see it — a
-/// zero-timeout `poll` on the descriptor answers for the kernel's queue, not for
-/// bytes a `BufRead` already took. Second, whatever this function does not
-/// consume stays in the terminal's queue for the *next* process to inherit — the
-/// agent session `aid` goes on to attach — so pasted lines that were not drained
-/// here would land inside the agent as keystrokes.
-///
-/// Cooked mode is also why this is safe to call and abandon: no raw mode is
-/// entered, so a Ctrl-C mid-read leaves the terminal exactly as it found it.
-pub fn read_terminal_submission() -> String {
-    let mut bytes: Vec<u8> = Vec::new();
-    // The line itself: up to Enter, or EOF (Ctrl-D on an empty line reads 0).
-    let mut ended_with_newline = false;
-    loop {
-        match read_stdin_byte() {
-            None => break,
-            Some(b'\n') => {
-                ended_with_newline = true;
-                break;
-            }
-            Some(byte) => bytes.push(byte),
-        }
-    }
-    // The paste tail: the newline-terminated lines the terminal already holds.
-    // Only what is *already* queued — the zero timeout is what keeps a person
-    // who typed one line from being waited on for a second — and in cooked mode
-    // that is only *completed* lines: a final fragment a paste left unterminated
-    // is not yet readable, stays queued, and reaches the agent's session as
-    // typed-ahead input. The Enter that ended the first line was consumed above,
-    // so it is put back before the tail or the first two lines would be glued
-    // into one word.
-    if ended_with_newline && stdin_readable_now() {
-        bytes.push(b'\n');
-        while stdin_readable_now() {
-            match read_stdin_byte() {
-                None => break,
-                Some(byte) => bytes.push(byte),
-            }
-        }
-    }
-    String::from_utf8_lossy(&bytes).trim_end().to_owned()
-}
-
-/// One byte from descriptor 0, or `None` on EOF or an unreadable stdin.
-fn read_stdin_byte() -> Option<u8> {
-    let mut byte: u8 = 0;
-    loop {
-        // SAFETY: reading one byte into a stack buffer of that size.
-        let read = unsafe { libc::read(0, std::ptr::from_mut(&mut byte).cast(), 1) };
-        match read {
-            1 => return Some(byte),
-            0 => return None,
-            // A signal that did not kill the process (SIGWINCH, a stopped and
-            // resumed job) interrupts the read without ending the input.
-            _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
-            _ => return None,
-        }
-    }
-}
-
-/// Whether descriptor 0 has bytes to read right now, without waiting for any.
-fn stdin_readable_now() -> bool {
-    let mut asked = libc::pollfd {
-        fd: 0,
-        events: libc::POLLIN,
-        revents: 0,
+/// Exported for `aid`. A cancel in its picker is a key, not a signal, so its
+/// background boot never sees it. SIGINT is what makes that boot run the handler
+/// [`install_signal_handlers`] installs: kill its `devpod up` group and unlink its
+/// staged token file. `Child::kill` sends SIGKILL, which does neither.
+pub fn interrupt(pid: u32) {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return;
     };
-    // SAFETY: polling one descriptor with a zero timeout; the struct outlives the
-    // call.
-    let ready = unsafe { libc::poll(&mut asked, 1, 0) };
-    ready > 0 && (asked.revents & libc::POLLIN) != 0
+    // SAFETY: `kill` on one pid this process spawned; the result is ignored
+    // because a child that already ended is the outcome being asked for.
+    unsafe {
+        libc::kill(pid, libc::SIGINT);
+    }
 }
+
+pub use render::ClaudeProfileOffer;
+
+/// The Claude logins this host can launch with, for `aid`'s account picker: the
+/// heading of the `dl --claude-profiles` table, and one row per login that can
+/// launch. See [`render::claude_profile_offers`].
+pub fn claude_profile_offers() -> (String, Vec<ClaudeProfileOffer>) {
+    render::claude_profile_offers(&devlaunch_core::flows::claude_profiles::from_process())
+}
+
+/// The name that means "the login this host uses anyway", which passes no flag.
+pub const DEFAULT_CLAUDE_PROFILE: &str = devlaunch_core::flows::claude_profiles::DEFAULT_PROFILE;
+
+/// devlaunch's cache directory, or `None` with no home directory to find it by.
+///
+/// Exported for `aid`, which keeps its recent model and effort choices there, so
+/// `XDG_CACHE_HOME` scopes them with everything else devlaunch stores.
+pub fn cache_dir() -> Option<std::path::PathBuf> {
+    devlaunch_core::domain::xdg::devlaunch_cache().ok()
+}
+
+pub use prompt_editor::{Submission, read_prompt};
 
 /// Run one `dl` command line — the words after the program name — and say how it
 /// ended.

@@ -15,6 +15,9 @@ clap = { workspace = true }
 # `signal(2)`, so Ctrl-C exits 130 the way Python's KeyboardInterrupt did rather
 # than killing this process by signal (which has no exit code at all).
 libc = { workspace = true }
+# The prompt editor's column count, so a line of wide characters wraps where the
+# terminal wraps it. Already in the tree through skim.
+unicode-width = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 skim = { workspace = true }

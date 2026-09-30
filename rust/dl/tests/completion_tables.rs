@@ -592,6 +592,17 @@ const AID_FLAGS_BESIDE_THE_AGENTS: [(&str, &str); 3] = [
 ];
 
 #[test]
+fn the_aid_flags_whose_value_is_stepped_over_are_aids_value_options() {
+    // A second copy of `AGENT_VALUE_OPTIONS`, so it is diffed here: the scan steps
+    // over these flags' values, and a flag missed here would make its value read
+    // as the workspace spec.
+    assert_eq!(
+        assigned(&completion_script(), "aid_value_opts="),
+        aid_flag_list(&aid_rewrite(), "AGENT_VALUE_OPTIONS")
+    );
+}
+
+#[test]
 fn aid_offers_one_flag_per_agent_it_can_start() {
     let script = completion_script();
     let rewrite = aid_rewrite();
@@ -601,6 +612,7 @@ fn aid_offers_one_flag_per_agent_it_can_start() {
         .map(|agent| format!("--{agent}"))
         .collect();
     expected.extend(aid_flag_list(&rewrite, "DL_VALUE_OPTIONS"));
+    expected.extend(aid_flag_list(&rewrite, "AGENT_VALUE_OPTIONS"));
     expected.extend(
         AID_FLAGS_BESIDE_THE_AGENTS
             .iter()
@@ -636,6 +648,7 @@ fn the_aid_flags_a_spec_may_follow_are_the_ones_parse_aid_args_reads_past() {
     for table in [
         "REMOTE_CONTROL_FLAGS",
         "NO_REMOTE_CONTROL_FLAGS",
+        "AGENT_VALUE_OPTIONS",
         "DL_VALUE_OPTIONS",
     ] {
         expected.extend(aid_flag_list(&rewrite, table));
