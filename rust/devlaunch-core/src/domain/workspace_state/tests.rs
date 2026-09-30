@@ -1025,6 +1025,16 @@ fn scripted_squash_after(
     }
     first
         .with_script(
+            [
+                "git",
+                "--git-dir=/ws/.git",
+                "--work-tree=/ws",
+                "for-each-ref",
+                "--format=%(refname)%00%(tree)",
+            ],
+            Response::stdout("refs/remotes/origin/feature\0remote-tree\n"),
+        )
+        .with_script(
             at("for-each-ref"),
             Response::stdout("refs/heads/feature\0refs/remotes/origin/feature\n"),
         )
@@ -1055,10 +1065,83 @@ fn scripted_squash_after(
             Response::stdout("tip-tree\nbase-tree\nremote-tree\n"),
         )
         .with_script(
+            [
+                "git",
+                "--git-dir=/ws/.git",
+                "--work-tree=/ws",
+                "-c",
+                "core.attributesFile=/dev/null",
+                "-c",
+                "merge.default=text",
+                "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+                "merge-tree",
+                "--stdin",
+            ],
+            Response::stdout("1\0remote-tree\0\0"),
+        )
+        .with_script(
             ["git", "--git-dir=/ws/.git", "--work-tree=/ws", "-c"],
             merge_tree,
         )
         .with_script(at("worktree"), Response::stdout(""))
+}
+
+#[test]
+fn the_squash_rule_makes_no_more_merges_than_its_budget() {
+    // 32 branches, each on an upstream of its own with eight counted points:
+    // each branch merges 8 points into 32 refs, 256 merges, so 16 branches fit
+    // and the other 16 are not merged. The spawns grow with the branches, not
+    // with the merges.
+    let branches = 32;
+    let at = |verb: &'static str| ["git", "--git-dir=/ws/.git", "--work-tree=/ws", verb];
+    let listing: String = (0..branches)
+        .map(|b| format!("refs/heads/b{b}\0refs/remotes/origin/b{b}\n"))
+        .collect();
+    let trees: String = (0..branches)
+        .map(|b| format!("refs/remotes/origin/b{b}\0tree-{b}\n"))
+        .collect();
+    let points: String = (0..LOOK_BACK).map(|p| format!("{p:040x}\n")).collect();
+    let fake = ScriptedRunner::new()
+        .with_script(
+            [
+                "git",
+                "--git-dir=/ws/.git",
+                "--work-tree=/ws",
+                "for-each-ref",
+                "--format=%(refname)%00%(tree)",
+            ],
+            Response::stdout(trees),
+        )
+        .with_script(at("for-each-ref"), Response::stdout(listing))
+        .with_script(
+            [
+                "git",
+                "--git-dir=/ws/.git",
+                "--work-tree=/ws",
+                "rev-parse",
+                "--git-path",
+            ],
+            Response::stdout("/ws/.git/info/attributes\nsha1\n"),
+        )
+        .with_script(at("rev-list"), Response::stdout(points))
+        .with_script(at("-c"), Response::stdout(""));
+    let counted = ["0000000 work".to_owned()];
+
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&fake), Path::new("/ws"), &counted, &[]),
+        Vec::<String>::new()
+    );
+    let calls = fake.calls();
+    let merged = calls
+        .iter()
+        .filter(|call| call.argv().iter().any(|arg| arg == "--stdin"))
+        .count();
+    assert_eq!(merged, MERGE_BUDGET / (LOOK_BACK * branches));
+    assert!(
+        calls.len() <= 3 * branches + 3,
+        "{} spawns for {branches} branches",
+        calls.len()
+    );
 }
 
 #[test]
@@ -1131,6 +1214,7 @@ fn a_branch_git_will_not_list_after_one_passed_clears_nothing() {
                     "--git-dir=/ws/.git",
                     "--work-tree=/ws",
                     "for-each-ref",
+                    "--format=%(refname)%00%(upstream)",
                 ],
                 Response::stdout(
                     "refs/heads/feature\0refs/remotes/origin/feature\nrefs/heads/other\0\n",

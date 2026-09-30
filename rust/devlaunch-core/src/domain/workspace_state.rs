@@ -69,10 +69,10 @@
 //!
 //! Ported from `devlaunch/workspace_state.py`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::clients::git::{Git, GitAnswer, LocalBranch, REFS_HEADS, RemoteRef, TagRef};
+use crate::clients::git::{Git, GitAnswer, LocalBranch, REFS_HEADS, RemoteRef, TagRef, TextMerge};
 
 /// The bare cache a clone was made from, when there is one to consult.
 ///
@@ -720,15 +720,18 @@ fn already_on_a_remote(git: &Git<'_>, clone: &Path, local_tags: &[String]) -> Ve
 /// a detached HEAD never pass, so what they reach stays counted too.
 ///
 /// It runs only when the copy rule left a commit counted, so a clone the copy
-/// rule accounted for pays nothing here. When it runs it pays one
-/// `for-each-ref` and one `rev-list` per local branch, and only a branch that
-/// still reaches a counted commit is merged: up to [`LOOK_BACK`] points times
-/// its remote refs.
+/// rule accounted for pays nothing here. When it runs it pays three spawns for
+/// the clone and one `rev-list` per local branch, and only a branch that still
+/// reaches a counted commit is merged: one more `rev-list` and one
+/// `merge-tree --stdin` of up to [`LOOK_BACK`] points times its remote refs,
+/// and three spawns more for each pair whose merge gives its ref's tree. The
+/// merges in one clone are bounded by [`MERGE_BUDGET`].
 ///
 /// **Every failure clears less, never more.** A refusal on any branch's commits
 /// or on the refs that are not branches clears nothing at all, because what
-/// was not read may hold a commit back. A refusal on one merge only fails that
-/// point.
+/// was not read may hold a commit back, and so does a refusal on the remote
+/// refs' trees or on how the clone merges. A refusal on one branch's batch of
+/// merges fails that branch, and one on a single merge fails that pair.
 fn squashed_onto_a_remote(
     git: &Git<'_>,
     clone: &Path,
@@ -738,10 +741,31 @@ fn squashed_onto_a_remote(
     let Some(branches) = git.branches_with_upstreams(clone).said() else {
         return Vec::new();
     };
+    let Some(Some(merge)) = git.text_merge(clone).said() else {
+        return Vec::new();
+    };
     let upstreams: Vec<&RemoteRef> = branches
         .iter()
         .filter_map(|branch| branch.upstream.as_ref())
         .collect();
+    let mut every_ref: Vec<RemoteRef> = Vec::new();
+    for branch in &branches {
+        for other in remote_refs_to_compare(branch, &upstreams) {
+            if !every_ref.contains(&other) {
+                every_ref.push(other);
+            }
+        }
+    }
+    let Some(ref_trees) = git.remote_ref_trees(clone, &every_ref).said() else {
+        return Vec::new();
+    };
+    let mut asked = Asked {
+        git,
+        clone,
+        merge: &merge,
+        ref_trees: &ref_trees,
+        merges_left: MERGE_BUDGET,
+    };
     let mut cleared: HashSet<String> = HashSet::new();
     let mut held_back: HashSet<String> = HashSet::new();
     for branch in &branches {
@@ -750,7 +774,7 @@ fn squashed_onto_a_remote(
         };
         let still_counted = counted.iter().any(|line| is_among(line, &reached));
         let passed = if still_counted {
-            passed_at(git, clone, branch, &upstreams)
+            asked.passed_at(branch, &upstreams)
         } else {
             HashSet::new()
         };
@@ -782,33 +806,82 @@ fn squashed_onto_a_remote(
 /// counted, which is the safe side.
 const LOOK_BACK: usize = 8;
 
-/// The commits *branch* passes at, as [`squashed_onto_a_remote`] asks it: every
-/// unpushed commit on the highest passing point's first-parent line, or none.
-fn passed_at(
-    git: &Git<'_>,
-    clone: &Path,
-    branch: &LocalBranch,
-    upstreams: &[&RemoteRef],
-) -> HashSet<String> {
-    let Some(points) = git
-        .unpushed_first_parents(clone, &branch.name, Some(LOOK_BACK))
-        .said()
-    else {
-        return HashSet::new();
-    };
-    let others = remote_refs_to_compare(branch, upstreams);
-    let passing = points.iter().find(|point| {
-        others.iter().any(|other| {
-            matches!(
-                git.holds_the_change_of(clone, point, other),
-                GitAnswer::Said(true)
-            )
-        })
-    });
-    passing
-        .and_then(|point| git.unpushed_first_parents(clone, point, None).said())
-        .map(|reached| reached.into_iter().collect())
-        .unwrap_or_default()
+/// How many merges [`squashed_onto_a_remote`] makes in one clone, at most.
+///
+/// Each branch is compared with every other branch's upstream, so the merges
+/// grow with the square of the branches: 15 branches of local work make 1,920.
+/// They run in one git per branch ([`Git::trees_of_clean_merges`]), and this
+/// bounds what those gits are asked. A branch whose merges no longer fit is not
+/// merged at all, and its commits stay counted, which is the safe side.
+const MERGE_BUDGET: usize = 4096;
+
+/// What [`squashed_onto_a_remote`] asks every branch with, and how many
+/// merges it has left.
+struct Asked<'g, 'a> {
+    git: &'a Git<'g>,
+    clone: &'a Path,
+    merge: &'a TextMerge,
+    ref_trees: &'a HashMap<String, String>,
+    merges_left: usize,
+}
+
+impl Asked<'_, '_> {
+    /// The commits *branch* passes at: every unpushed commit on the highest
+    /// passing point's first-parent line, or none.
+    ///
+    /// Every point is merged into every remote ref the clone has in one
+    /// [`Git::trees_of_clean_merges`], and only a pair whose merge gives its
+    /// ref's tree is asked [`Git::holds_the_change_of`], the question that
+    /// decides.
+    fn passed_at(&mut self, branch: &LocalBranch, upstreams: &[&RemoteRef]) -> HashSet<String> {
+        let Some(points) = self
+            .git
+            .unpushed_first_parents(self.clone, &branch.name, Some(LOOK_BACK))
+            .said()
+        else {
+            return HashSet::new();
+        };
+        let others: Vec<RemoteRef> = remote_refs_to_compare(branch, upstreams)
+            .into_iter()
+            .filter(|other| self.ref_trees.contains_key(other.as_str()))
+            .collect();
+        let pairs: Vec<(&str, &RemoteRef)> = points
+            .iter()
+            .flat_map(|point| others.iter().map(move |other| (point.as_str(), other)))
+            .collect();
+        if pairs.len() > self.merges_left {
+            return HashSet::new();
+        }
+        self.merges_left -= pairs.len();
+        let Some(merged) = self
+            .git
+            .trees_of_clean_merges(self.clone, self.merge, &pairs)
+            .said()
+        else {
+            return HashSet::new();
+        };
+        let passing = pairs
+            .iter()
+            .zip(merged)
+            .filter(|((_, other), tree)| {
+                tree.is_some() && tree.as_ref() == self.ref_trees.get(other.as_str())
+            })
+            .find(|((point, other), _)| {
+                matches!(
+                    self.git
+                        .holds_the_change_of(self.clone, self.merge, point, other),
+                    GitAnswer::Said(true)
+                )
+            });
+        passing
+            .and_then(|((point, _), _)| {
+                self.git
+                    .unpushed_first_parents(self.clone, point, None)
+                    .said()
+            })
+            .map(|reached| reached.into_iter().collect())
+            .unwrap_or_default()
+    }
 }
 
 /// The remote refs [`already_on_a_remote`] compares *branch* with, its own

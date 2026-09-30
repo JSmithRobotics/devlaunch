@@ -1695,3 +1695,22 @@ fn a_symbolic_ref_keeps_a_branch_name_that_has_slashes_in_it() {
     );
     assert_eq!(branch_in_symbolic_ref("main"), "main");
 }
+
+#[test]
+fn clean_merge_trees_are_read_from_merge_tree_stdin_output() {
+    // A clean merge, a conflict with two paths, and a clean merge again, in
+    // the shape `merge-tree --stdin -z --name-only --no-messages` prints.
+    let output = "1\0aaa\0\x000\0bbb\0f\0g/h\0\x001\0ccc\0\0";
+    assert_eq!(
+        clean_merge_trees_in(output, 3),
+        Some(vec![Some("aaa".to_owned()), None, Some("ccc".to_owned())])
+    );
+
+    // Fewer records than merges, more, a status that is neither, and a
+    // record cut short all read as no answer.
+    assert_eq!(clean_merge_trees_in(output, 4), None);
+    assert_eq!(clean_merge_trees_in(output, 2), None);
+    assert_eq!(clean_merge_trees_in("2\0aaa\0\0", 1), None);
+    assert_eq!(clean_merge_trees_in("1\0aaa\0", 1), None);
+    assert_eq!(clean_merge_trees_in("", 1), None);
+}
