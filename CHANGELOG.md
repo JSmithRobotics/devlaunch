@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ref's tree exactly. Work added after the squash still counts, and so does a squash the
   remote reverted, a squash the remote then edited on the same lines, and a commit that
   the stash, a local tag, a detached HEAD or a branch that does not pass still reaches.
+  This merge and the copy rule's replay both run with merge attributes switched off, so
+  a `merge=union` or a custom merge driver cannot make a merge clean that drops the
+  branch's side, and a clone with an `info/attributes` file clears nothing.
 
 ## [0.57.1] - 2026-09-29
 

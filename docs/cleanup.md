@@ -1018,7 +1018,12 @@ were merges of `origin/main`. Three more rules now run after the count:
   `git merge-tree` merges the branch into each remote ref the first rule
   compares with. When the merge is clean and gives the remote ref's own tree,
   the remote ref already holds what the branch changes since it left it, and
-  every unpushed commit on the branch drops out. When the remote reverted the
+  every unpushed commit on the branch drops out. Inside a branch that passes, a
+  commit and its later revert drop out with the rest, as a squash merge drops
+  them. The merge runs with merge attributes switched off, so a `merge=union`
+  or a custom merge driver cannot make a merge clean that drops the branch's
+  side: every file merges as plain text, and a clone with an
+  `info/attributes` file clears nothing. When the remote reverted the
   squash, the merge puts the change back, the tree differs, and nothing drops
   out. The tip is tried first, then up to seven commits under it on the
   branch's first-parent line, so work added after the squash stays counted and
