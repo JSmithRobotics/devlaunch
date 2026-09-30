@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.58.0] - 2026-09-29
+## [0.58.0] - 2026-09-30
 
 ### Added
 
@@ -21,6 +21,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on every `SessionStart`, so a restore after `/clear` or an in-agent `/resume` reopens
   the session you were in. herdr older than 0.9.2, or any refusal, costs the restore and
   never the launch.
+
+## [0.57.2] - 2026-09-30
+
+### Fixed
+
+- **`rm` no longer refuses over a branch squashed into `main` as one commit** (#659). A squash of
+  several commits matches none of them, so after #653 `rm` and `dl --ls --json` still
+  counted each one as unpushed. Now a branch whose whole change a remote ref already
+  holds is not counted: `git merge-tree` merges the branch into the remote refs the
+  copy rule compares with (its upstream, every other local branch's upstream, the
+  same-named remote branch and `origin/HEAD`), and the merge must be clean and give that
+  ref's tree exactly. Work added after the squash still counts, and so does a squash the
+  remote reverted, a squash the remote then edited on the same lines, a commit that
+  reached the branch only through a merge's second parent, and a commit that the stash,
+  a local tag, a detached HEAD or a branch that does not pass still reaches.
+  This merge and the copy rule's replay both run with merge attributes switched off, so
+  a `merge=union` or a custom merge driver cannot make a merge clean that drops the
+  branch's side, and a clone whose `info/attributes` file holds anything clears nothing.
+  The merges run in one `git merge-tree --stdin` per branch, at most 4,096 in a clone, so
+  a clone with many branches of local work pays about one git spawn per branch for them.
 
 ## [0.57.1] - 2026-09-29
 
