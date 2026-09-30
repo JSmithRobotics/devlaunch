@@ -724,7 +724,8 @@ fn already_on_a_remote(git: &Git<'_>, clone: &Path, local_tags: &[String]) -> Ve
 /// the clone and one `rev-list` per local branch, and only a branch that still
 /// reaches a counted commit is merged: one more `rev-list` and one
 /// `merge-tree --stdin` of up to [`LOOK_BACK`] points times its remote refs,
-/// and three spawns more for each pair whose merge gives its ref's tree. The
+/// and three spawns more for each pair whose merge gives its ref's tree. A
+/// pass costs one more read of the commits off every branch. The
 /// merges in one clone are bounded by [`MERGE_BUDGET`].
 ///
 /// **Every failure clears less, never more.** A refusal on any branch's commits

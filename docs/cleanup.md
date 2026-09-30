@@ -1044,7 +1044,7 @@ the squash wrote, the merge conflicts, and the squashed commits still count,
 although the change is in the remote's history. A branch whose squashed commits
 are more than seven commits under its tip also still counts, and so does a
 squash that holds only part of the branch. The rule makes at most 4,096 merges
-in one clone, which a clone with about 20 branches of unpushed work can reach,
+in one clone, which a clone with 23 or more branches of unpushed work can reach,
 and a branch whose merges do not fit still counts. A commit that reached a passing
 branch only through a merge's second parent still counts unless another rule
 clears it, even when the squash does hold its change. In each case the refusal is yours to
