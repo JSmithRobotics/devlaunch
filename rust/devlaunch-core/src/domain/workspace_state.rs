@@ -69,6 +69,7 @@
 //!
 //! Ported from `devlaunch/workspace_state.py`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::clients::git::{Git, GitAnswer, LocalBranch, REFS_HEADS, RemoteRef, TagRef};
@@ -603,7 +604,11 @@ fn unsaved(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Unsaved {
     match git.unpushed_commits(clone, &local_tags) {
         GitAnswer::Said(unpushed) => {
             if let Some(listed) = NonEmpty::of(unpushed.lines().map(str::to_owned)) {
-                let copied = already_on_a_remote(git, clone, &local_tags);
+                let mut copied = already_on_a_remote(git, clone, &local_tags);
+                let left = not_among(listed.iter(), &copied);
+                if !left.is_empty() {
+                    copied.extend(squashed_onto_a_remote(git, clone, &left, &local_tags));
+                }
                 if let Some(commits) = NonEmpty::of(not_among(listed.iter(), &copied)) {
                     let by_tags = owed_to_tags(git, clone, &local_tags)
                         .and_then(|by_tags| by_tags.leaving_out(&copied));
@@ -686,6 +691,119 @@ fn already_on_a_remote(git: &Git<'_>, clone: &Path, local_tags: &[String]) -> Ve
         }
     }
     copied
+}
+
+/// The counted commits whose branch's whole change a remote ref already holds,
+/// as full hashes.
+///
+/// What [`already_on_a_remote`] leaves: a squash of several commits. The
+/// squash's patch is none of theirs, so no copy is found, and each of them
+/// counts. A kinisi_ros workspace refused `rm` over 3 commits that way, with
+/// kinisi_ros#12035 squashed into `main` byte for byte.
+///
+/// So a branch is asked a question of its own: does a remote ref already hold
+/// the change the branch makes since it left that ref
+/// ([`Git::holds_the_change_of`])? The tip is asked first, then the commits
+/// under it on its first-parent line, because a branch that carried on after
+/// its squash holds new work at the tip and the squashed work under it. The
+/// first commit that passes clears every commit it reaches that no remote
+/// ref has, and the commits above it stay counted. The remote refs are the
+/// ones the copy rule compares with ([`remote_refs_to_compare`]).
+///
+/// **A commit is cleared only when every ref that reaches it is a branch that
+/// passed at or above it.** A second branch that grew from a squashed commit
+/// and does not pass holds that commit's own state, which the squash may have
+/// overwritten, so the commit stays counted with it. The stash, a local tag and
+/// a detached HEAD never pass, so what they reach stays counted too.
+///
+/// Only a branch that still reaches a counted commit is asked, so a clone the
+/// copy rule accounted for pays one `for-each-ref`. A branch with real
+/// unpushed work pays up to [`LOOK_BACK`] points times its remote refs.
+///
+/// **Every failure clears less, never more.** A refusal on any branch's commits
+/// or on the refs that are not branches clears nothing at all, because what
+/// was not read may hold a commit back. A refusal on one merge only fails that
+/// point.
+fn squashed_onto_a_remote(
+    git: &Git<'_>,
+    clone: &Path,
+    counted: &[String],
+    local_tags: &[String],
+) -> Vec<String> {
+    let Some(branches) = git.branches_with_upstreams(clone).said() else {
+        return Vec::new();
+    };
+    let upstreams: Vec<&RemoteRef> = branches
+        .iter()
+        .filter_map(|branch| branch.upstream.as_ref())
+        .collect();
+    let mut cleared: HashSet<String> = HashSet::new();
+    let mut held_back: HashSet<String> = HashSet::new();
+    for branch in &branches {
+        let Some(reached) = git.unpushed_hashes_from(clone, &branch.name).said() else {
+            return Vec::new();
+        };
+        let still_counted = counted.iter().any(|line| is_among(line, &reached));
+        let passed = if still_counted {
+            passed_at(git, clone, branch, &upstreams)
+        } else {
+            HashSet::new()
+        };
+        held_back.extend(reached.into_iter().filter(|hash| !passed.contains(hash)));
+        cleared.extend(passed);
+    }
+    if cleared.is_empty() {
+        return Vec::new();
+    }
+    let Some(elsewhere) = git.unpushed_off_every_branch(clone, local_tags).said() else {
+        return Vec::new();
+    };
+    held_back.extend(elsewhere);
+    let mut cleared: Vec<String> = cleared
+        .into_iter()
+        .filter(|hash| !held_back.contains(hash))
+        .collect();
+    cleared.sort();
+    cleared
+}
+
+/// How far down a branch [`squashed_onto_a_remote`] looks for a commit that
+/// passes.
+///
+/// A bound because `dl --ls --json` asks it of every workspace, and a branch of
+/// work that was never pushed passes at no commit, so the walk costs one merge
+/// per commit per remote ref and finds nothing. Eight covers a branch that
+/// carried on for seven commits after its squash. A commit further down stays
+/// counted, which is the safe side.
+const LOOK_BACK: usize = 8;
+
+/// The commits *branch* passes at, as [`squashed_onto_a_remote`] asks it: every
+/// unpushed commit the highest passing point reaches, or none.
+fn passed_at(
+    git: &Git<'_>,
+    clone: &Path,
+    branch: &LocalBranch,
+    upstreams: &[&RemoteRef],
+) -> HashSet<String> {
+    let Some(points) = git
+        .unpushed_first_parents(clone, &branch.name, LOOK_BACK)
+        .said()
+    else {
+        return HashSet::new();
+    };
+    let others = remote_refs_to_compare(branch, upstreams);
+    let passing = points.iter().find(|point| {
+        others.iter().any(|other| {
+            matches!(
+                git.holds_the_change_of(clone, point, other),
+                GitAnswer::Said(true)
+            )
+        })
+    });
+    passing
+        .and_then(|point| git.unpushed_hashes_from(clone, point).said())
+        .map(|reached| reached.into_iter().collect())
+        .unwrap_or_default()
 }
 
 /// The remote refs [`already_on_a_remote`] compares *branch* with, its own

@@ -915,6 +915,137 @@ impl<'r> Git<'r> {
             .map(|stdout| merges_without_a_diff_in(&stdout))
     }
 
+    /// The commits reachable from *rev* that no remote-tracking ref contains,
+    /// as full hashes.
+    ///
+    /// [`Git::unpushed_commits_from`] with hashes a set can be built from: the
+    /// squash rule adds and takes away whole branches' worth of these.
+    pub(crate) fn unpushed_hashes_from(&self, clone: &Path, rev: &str) -> GitAnswer<Vec<String>> {
+        self.about(clone, &["rev-list", rev, "--not", "--remotes"])
+            .map(|stdout| stdout.lines().map(str::to_owned).collect())
+    }
+
+    /// The first *limit* commits on *tip*'s first-parent line that no
+    /// remote-tracking ref contains, the tip first.
+    ///
+    /// The points the squash rule tries, in the order it tries them: the tip
+    /// is where a branch squashed whole is found in one merge, and the commits
+    /// under it are where a branch that carried on after its squash is found.
+    pub(crate) fn unpushed_first_parents(
+        &self,
+        clone: &Path,
+        tip: &str,
+        limit: usize,
+    ) -> GitAnswer<Vec<String>> {
+        let most = format!("--max-count={limit}");
+        self.about(
+            clone,
+            &[
+                "rev-list",
+                "--first-parent",
+                &most,
+                tip,
+                "--not",
+                "--remotes",
+            ],
+        )
+        .map(|stdout| stdout.lines().map(str::to_owned).collect())
+    }
+
+    /// Whether the remote ref *other* already holds the whole change *point*
+    /// makes since it left *other*.
+    ///
+    /// The one test that finds a squash of several commits, which no single
+    /// commit's patch matches (kinisi_ros#12035). `merge-tree --write-tree`
+    /// merges *point* into *other* in the object store, so the work tree and
+    /// the index are never touched. The merge takes *point*'s change since
+    /// their merge base and applies it to *other*. When that changes nothing,
+    /// *other* holds the change already. When *other* reverted it, the merge
+    /// puts it back, and the tree differs.
+    ///
+    /// Three answers are `false` before any merge is made:
+    ///
+    /// - More than one merge base. git would merge the bases first, and a
+    ///   change measured from a merge git made up is not one to clear work by.
+    /// - *point* changes nothing since the base: a commit and its revert, or an
+    ///   empty commit. Any merge of an empty change gives *other*'s tree, so it
+    ///   proves nothing.
+    /// - *other* changes nothing since the base. Then it holds nothing *point*
+    ///   could be in, and the merge is not worth its time.
+    ///
+    /// A conflict exits 1, which is a refusal, and so is a merge git gives up
+    /// on. `rev-parse` names the three trees in one spawn, each a full hash on
+    /// its own line.
+    pub(crate) fn holds_the_change_of(
+        &self,
+        clone: &Path,
+        point: &str,
+        other: &RemoteRef,
+    ) -> GitAnswer<bool> {
+        let bases = match self.about(clone, &["merge-base", "--all", point, other.as_str()]) {
+            GitAnswer::Said(bases) => bases,
+            GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
+        };
+        let mut bases = bases.lines();
+        let (Some(base), None) = (bases.next(), bases.next()) else {
+            return GitAnswer::Said(false);
+        };
+        let trees = [
+            format!("{point}^{{tree}}"),
+            format!("{base}^{{tree}}"),
+            format!("{}^{{tree}}", other.as_str()),
+        ];
+        let trees = match self.about(clone, &["rev-parse", &trees[0], &trees[1], &trees[2]]) {
+            GitAnswer::Said(trees) => trees,
+            GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
+        };
+        let [point_tree, base_tree, other_tree] = trees.lines().collect::<Vec<_>>()[..] else {
+            return GitAnswer::Said(false);
+        };
+        if point_tree == base_tree || other_tree == base_tree || other_tree.is_empty() {
+            return GitAnswer::Said(false);
+        }
+        let base = format!("--merge-base={base}");
+        self.about(
+            clone,
+            &["merge-tree", "--write-tree", &base, other.as_str(), point],
+        )
+        .map(|merged| merged == other_tree)
+    }
+
+    /// The commits no remote-tracking ref contains that a ref other than a
+    /// local branch reaches, as full hashes: the stash, a local tag, a
+    /// detached HEAD, and any other ref [`Git::unpushed_commits`] counts from.
+    ///
+    /// What the squash rule may not clear: it vouches for branches, and only
+    /// for the ones that pass. `--glob=*` is every ref under `refs/`, without
+    /// the HEADs `--all` adds, because a HEAD on a branch is that branch. The
+    /// detached HEADs come back by hash from the worktree listing. The tags
+    /// are [`NOT_WORK`]'s, with the local ones named again, as the count names
+    /// them.
+    pub(crate) fn unpushed_off_every_branch(
+        &self,
+        clone: &Path,
+        local_tags: &[String],
+    ) -> GitAnswer<Vec<String>> {
+        let detached = match self.worktree_listing(clone) {
+            GitAnswer::Said(listing) => detached_heads_in(&listing),
+            GitAnswer::Refused(refused) => return GitAnswer::Refused(refused),
+        };
+        let mut args: Vec<&str> = vec![
+            "rev-list",
+            "--exclude=refs/heads/*",
+            "--exclude=refs/remotes/*",
+        ];
+        args.extend(NOT_WORK);
+        args.push("--glob=*");
+        args.extend(local_tags.iter().map(String::as_str));
+        args.extend(detached.iter().map(String::as_str));
+        args.extend(["--not", "--remotes"]);
+        self.about(clone, &args)
+            .map(|stdout| stdout.lines().map(str::to_owned).collect())
+    }
+
     /// Every tag in the bare cache at *bare*, with the object each one names.
     ///
     /// `--git-dir` and no work tree, because a bare has none, and no cwd, because
@@ -1884,6 +2015,22 @@ impl RemoteRef {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// The commit each detached worktree HEAD names, from
+/// `worktree list --porcelain`: a paragraph per worktree, `HEAD <hash>` in each,
+/// and a bare `detached` line in the ones on no branch.
+fn detached_heads_in(listing: &str) -> Vec<String> {
+    listing
+        .split("\n\n")
+        .filter(|paragraph| paragraph.lines().any(|line| line == "detached"))
+        .filter_map(|paragraph| {
+            paragraph
+                .lines()
+                .find_map(|line| line.strip_prefix("HEAD "))
+                .map(str::to_owned)
+        })
+        .collect()
 }
 
 /// The branches in [`Git::branches_with_upstreams`] output, one per

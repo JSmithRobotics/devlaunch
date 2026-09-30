@@ -467,9 +467,12 @@ fn a_branch_that_tracks_nothing_is_compared_with_its_namesake_on_the_remote() {
 }
 
 #[test]
-fn a_squash_of_several_commits_leaves_each_of_them_counted() {
-    // No one commit's patch is the squash's, and telling a squash from a
-    // coincidence is not a question patches can answer.
+fn a_squash_that_leaves_out_part_of_the_branch_leaves_every_commit_counted() {
+    // No one commit's patch is the squash's, so the copy rule finds nothing. The
+    // squash rule compares the branch's whole change since it left `main`, and
+    // `feature.txt` is part of that change but not of this squash, so it finds
+    // nothing either. Stricter than it has to be (`feature.txt` is on
+    // `origin/feature`), and that is the safe side.
     let fixture = Fixture::new();
     let clone = fixture.clone();
     for name in ["a", "b"] {
@@ -486,6 +489,282 @@ fn a_squash_of_several_commits_leaves_each_of_them_counted() {
     git(&clone, &["fetch", "-q", "origin"]);
 
     assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+/// Three unpushed commits on `feature`, the second editing the file the first
+/// wrote, so no one of them has the squash's patch.
+fn three_commits(clone: &Path) {
+    write(&clone.join("notes.txt"), "one\n");
+    commit(clone, "a");
+    write(&clone.join("notes.txt"), "one\ntwo\n");
+    commit(clone, "b");
+    write(&clone.join("other.txt"), "three\n");
+    commit(clone, "c");
+}
+
+/// Squash `feature` into the remote's `main` as one commit, the way GitHub
+/// writes a squash merge: the whole change of the branch since it left `main`.
+fn squash_feature_into_main(mate: &Path) {
+    git(mate, &["checkout", "-q", "main"]);
+    write(&mate.join("feature.txt"), "work\n");
+    write(&mate.join("notes.txt"), "one\ntwo\n");
+    write(&mate.join("other.txt"), "three\n");
+    commit(mate, "feature (#3)");
+    git(mate, &["push", "-q", "origin", "main"]);
+}
+
+#[test]
+fn a_branch_squashed_into_the_default_branch_holds_nothing_unsaved() {
+    // kinisi_ros#12035's workspace, which `rm` refused over 3 commits: the PR was
+    // squashed into `main`, and its whole change is on `origin/main` as one
+    // commit that matches none of the three.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_squash_the_default_branch_later_reverted_leaves_every_commit_counted() {
+    // `main` no longer holds the change, so the merge puts it back, and the tree
+    // it gives is not `main`'s.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    let mate = teammate(&fixture);
+    squash_feature_into_main(&mate);
+    git_as_author(&mate, &["revert", "--no-edit", "HEAD"]);
+    git(&mate, &["push", "-q", "origin", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "3 unpushed commit(s)");
+}
+
+#[test]
+fn a_commit_made_after_the_squash_is_the_one_counted() {
+    // The tip holds work `main` has not got, so the rule looks further down the
+    // branch for the last commit whose change `main` does hold.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    squash_feature_into_main(&teammate(&fixture));
+    write(&clone.join("later.txt"), "an hour of work\n");
+    commit(&clone, "later");
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 4);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_squash_the_default_branch_then_edited_on_the_same_lines_leaves_every_commit_counted() {
+    // The limit, pinned: `main` changed the lines the squash wrote, so the merge
+    // conflicts, and a conflict clears nothing. The change is still in `main`'s
+    // history, but this rule reads trees, not history.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    let mate = teammate(&fixture);
+    squash_feature_into_main(&mate);
+    write(&mate.join("notes.txt"), "one\nTWO\n");
+    commit(&mate, "edit the squash");
+    git(&mate, &["push", "-q", "origin", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "3 unpushed commit(s)");
+}
+
+#[test]
+fn a_squashed_branch_that_merged_the_default_branch_holds_nothing_unsaved() {
+    // A merge inside the branch moves where it left `main`, and the change the
+    // rule compares is the one since that merge.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("notes.txt"), "one\n");
+    commit(&clone, "a");
+    let mate = teammate(&fixture);
+    move_main(&mate);
+    git(&clone, &["fetch", "-q", "origin"]);
+    git_as_author(&clone, &["merge", "-q", "--no-edit", "origin/main"]);
+    write(&clone.join("notes.txt"), "one\ntwo\n");
+    commit(&clone, "b");
+    squash_feature_into_main(&mate);
+    git(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_squashed_commit_another_branch_still_needs_stays_counted() {
+    // `a` wrote `one`, and `b` on `feature` replaced it with `two`, which is
+    // what the squash holds. So `feature` passes, and `a` is in its history
+    // only. `side` grew from `a` and does not pass at any commit: nothing on the
+    // remote holds `one`. `a` stays counted with `side`, and only `b` drops out.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("notes.txt"), "one\n");
+    commit(&clone, "a");
+    git(&clone, &["checkout", "-q", "-b", "side"]);
+    write(&clone.join("side.txt"), "an hour of work\n");
+    commit(&clone, "side");
+    git(&clone, &["checkout", "-q", "feature"]);
+    write(&clone.join("notes.txt"), "two\n");
+    commit(&clone, "b");
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "main"]);
+    write(&mate.join("feature.txt"), "work\n");
+    write(&mate.join("notes.txt"), "two\n");
+    commit(&mate, "feature (#3)");
+    git(&mate, &["push", "-q", "origin", "main"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_commit_and_its_revert_are_not_cleared_by_a_remote_that_moved() {
+    // The branch changes nothing since it left `origin/feature`, so any merge of
+    // it into `origin/feature` gives `origin/feature`'s tree. An empty change
+    // proves nothing, and the two commits stay counted.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("notes.txt"), "one\n");
+    commit(&clone, "a");
+    git_as_author(&clone, &["revert", "--no-edit", "HEAD"]);
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "feature"]);
+    write(&mate.join("mate.txt"), "the teammate's\n");
+    commit(&mate, "mate");
+    git(&mate, &["push", "-q", "origin", "feature"]);
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn the_squash_rule_never_clears_a_stashed_commit() {
+    // The stash reaches the branch's tip, so it holds the branch back as well:
+    // the rule clears a commit only when every ref that reaches it is a branch
+    // that passed. Two stash commits and the three under them.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    write(&clone.join("stashed.txt"), "half a plan\n");
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["stash", "-q"]);
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "5 unpushed commit(s)");
+}
+
+#[test]
+fn a_detached_head_on_a_squashed_branch_holds_it_back() {
+    // The same rule for a worktree on a detached HEAD, which is how an agent
+    // gets a second checkout: it is not a branch, so it cannot pass.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    let linked = fixture.path("detached");
+    git(
+        &clone,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().expect("utf-8"),
+            "feature~1",
+        ],
+    );
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_worktree_on_a_squashed_branch_does_not_hold_it_back() {
+    // A worktree that has the branch checked out is that branch, not a ref of
+    // its own.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    three_commits(&clone);
+    git(&clone, &["checkout", "-q", "--detach"]);
+    let linked = fixture.path("linked");
+    git(
+        &clone,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            linked.to_str().expect("utf-8"),
+            "feature",
+        ],
+    );
+    git(&clone, &["checkout", "-q", "main"]);
+    squash_feature_into_main(&teammate(&fixture));
+    git(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+/// A clone at `/ws` with one branch, `feature`, and one counted commit whose
+/// change merges cleanly into its remote refs when *merge_tree* says so.
+fn scripted_squash(merge_tree: Response) -> ScriptedRunner {
+    const COUNTED: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    fn at(verb: &'static str) -> [&'static str; 4] {
+        ["git", "--git-dir=/ws/.git", "--work-tree=/ws", verb]
+    }
+    ScriptedRunner::new()
+        .with_script(
+            at("for-each-ref"),
+            Response::stdout("refs/heads/feature\0refs/remotes/origin/feature\n"),
+        )
+        .with_script(
+            [
+                "git",
+                "--git-dir=/ws/.git",
+                "--work-tree=/ws",
+                "rev-list",
+                "--exclude=refs/heads/*",
+            ],
+            Response::stdout(""),
+        )
+        .with_script(at("rev-list"), Response::stdout(format!("{COUNTED}\n")))
+        .with_script(at("merge-base"), Response::stdout("base\n"))
+        .with_script(
+            at("rev-parse"),
+            Response::stdout("tip-tree\nbase-tree\nremote-tree\n"),
+        )
+        .with_script(at("merge-tree"), merge_tree)
+        .with_script(at("worktree"), Response::stdout(""))
+}
+
+#[test]
+fn a_merge_git_refuses_clears_nothing() {
+    // A conflict, a timeout and a merge-tree too old to write a tree all arrive
+    // as a refusal, and a refusal is no evidence that the remote holds anything.
+    let counted = ["a1b2c3d squashed".to_owned()];
+    let refused = scripted_squash(Response::failed(1, "CONFLICT (content)"));
+
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&refused), Path::new("/ws"), &counted, &[]),
+        Vec::<String>::new()
+    );
+
+    // The control: the same script with a clean merge that gives the remote's
+    // tree clears the commit, so the refusal is what cleared nothing.
+    let clean = scripted_squash(Response::stdout("remote-tree\n"));
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&clean), Path::new("/ws"), &counted, &[]),
+        vec!["a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".to_owned()]
+    );
 }
 
 #[test]
