@@ -855,6 +855,34 @@ fn another_agent_is_a_row_of_the_same_picker() {
 }
 
 #[test]
+fn alt_enter_takes_a_model_that_is_a_prefix_of_a_listed_one() {
+    // Matching is by substring, so `gpt-5.5` still matches the remembered
+    // `gpt-5.5-codex` and Enter takes that row. Alt-Enter (ESC CR on a terminal)
+    // takes the query as typed.
+    let world = World::with(&["--warm"]);
+    let codex_model = MODEL_PICKER.replace("claude", "codex");
+    let codex_effort = EFFORT_PICKER.replace("claude", "codex");
+    let mut first = PtyAid::spawn(&world, &["--codex", MAIN], &[]);
+    first.answer_typed(&codex_model, "gpt-5.5-codex");
+    first.answer(&codex_effort, "\r");
+    first.expect(BANNER);
+    first.send_line("one");
+    assert_eq!(first.wait(), 0);
+
+    let mut second = PtyAid::spawn(&world, &["--codex", MAIN], &[]);
+    second.answer(&codex_model, "gpt-5.5");
+    std::thread::sleep(Duration::from_millis(400));
+    second.press("\x1b\r");
+    second.answer(&codex_effort, "\r");
+    second.expect("(model gpt-5.5)");
+    second.expect(BANNER);
+    second.send_line("two");
+    assert_eq!(second.wait(), 0);
+    let last = world.devpod_calls().last().expect("a session").clone();
+    assert!(last.contains("--model gpt-5.5 "), "{last}");
+}
+
+#[test]
 fn a_typed_agent_with_one_login_is_not_asked_which_agent() {
     let world = World::with(&["--warm"]);
     let mut session = PtyAid::spawn(&world, &["--claude", MAIN], &[]);

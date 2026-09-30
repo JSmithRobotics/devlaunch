@@ -793,6 +793,8 @@ first row, so one Enter repeats the last launch. Type to filter the rows. Type a
 name that no row holds and Enter uses it as typed, which is how a model that came
 out yesterday is chosen. It is listed from then on. Matching is exact rather than
 fuzzy for that reason: a fuzzy match finds a listed row for almost any query.
+Where the name is part of a listed row, such as `gpt-5.5` beside `gpt-5.5-codex`,
+Alt-Enter uses the text as typed instead of the row.
 
 A setting that a flag on the line already gave is not asked for, so
 `aid --model opus --effort max <ws>` goes straight to the prompt. A line with a

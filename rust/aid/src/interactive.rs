@@ -396,8 +396,8 @@ fn ask_value(agent: &str, setting: Setting, recent: &Recent) -> Asked {
         rewrite::suggestions(agent, setting),
     );
     let header = format!(
-        "{} for {agent}. Type to filter, or type a name that is not listed. Esc cancels \
-         the launch.",
+        "{} for {agent}. Type to filter, or type a name that is not listed.\n\
+         Alt-Enter uses the text as typed. Esc cancels the launch.",
         match setting {
             Setting::Effort => "Effort",
             _ => "Model",

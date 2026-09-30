@@ -380,6 +380,7 @@ asks for the prompt while it does. First it asks for each setting the line
 left open: the agent (one row per Claude login, then each other agent), the
 model and the effort. Each picker lists your recent choices first, so one
 Enter repeats the last launch. Type a name that is not listed to use it.
+Alt-Enter uses the text as typed where it is part of a listed name.
 
 Then type the prompt free of shell quoting and press Enter to launch. A paste
 keeps its line breaks, and Alt-Enter or Ctrl-J adds a line. An empty Enter

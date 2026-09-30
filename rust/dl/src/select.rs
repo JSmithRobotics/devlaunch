@@ -1012,6 +1012,11 @@ pub enum Choice {
 /// name that is not in the list yet, and fuzzy matching finds a listed row for
 /// almost any query, so Enter would take that row instead of what was typed. And
 /// a query that matches no row is an answer, [`Choice::Typed`].
+///
+/// Exact matching still leaves a query that is a substring of a row, such as
+/// `gpt-5.5` beside a listed `gpt-5.5-codex`, and Enter takes that row. Alt-Enter
+/// ([`AS_TYPED_KEY`]) takes the query as typed whatever it matches, and the
+/// caller's header is what says so.
 pub fn choose(header: &str, rows: &[String]) -> Choice {
     if !a_terminal_exists() || !a_drawable_size(terminal_size()) {
         return Choice::NoTerminal;
@@ -1046,7 +1051,23 @@ pub fn choose(header: &str, rows: &[String]) -> Choice {
         return Choice::Cancelled;
     };
     let picked = output.selected_items.first().map(|item| item.get_index());
-    choice_of(output.is_abort, &output.query, picked, rows.len())
+    let accepted = match &output.final_event {
+        Event::EvActAccept(Some(key)) if key == AS_TYPED_KEY => Accepted::AsTyped,
+        _ => Accepted::Enter,
+    };
+    choice_of(output.is_abort, &output.query, picked, rows.len(), accepted)
+}
+
+/// The key that takes a [`choose`] query as typed, in skim's key names.
+const AS_TYPED_KEY: &str = "alt-enter";
+
+/// Which key accepted the chooser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Accepted {
+    /// Enter: the row under the cursor, or the query where no row matched.
+    Enter,
+    /// [`AS_TYPED_KEY`]: the query, whatever row is under the cursor.
+    AsTyped,
 }
 
 /// The terminal's size as rows and columns, or `None` if it cannot be read.
@@ -1088,6 +1109,7 @@ fn choose_options(header: &str) -> SkimOptions {
         // expanded by a `build` that `run_with` never calls.
         layout: String::from("reverse"),
         header: Some(header.to_owned()),
+        expect: vec![AS_TYPED_KEY.to_owned()],
         ..Default::default()
     }
 }
@@ -1097,10 +1119,17 @@ fn choose_options(header: &str) -> SkimOptions {
 ///
 /// An index outside `rows` is read as no row, and a query of only spaces as no
 /// query, so neither can turn into a value nobody chose.
-fn choice_of(aborted: bool, query: &str, picked: Option<usize>, rows: usize) -> Choice {
+fn choice_of(
+    aborted: bool,
+    query: &str,
+    picked: Option<usize>,
+    rows: usize,
+    accepted: Accepted,
+) -> Choice {
     if aborted {
         return Choice::Cancelled;
     }
+    let picked = picked.filter(|_| accepted == Accepted::Enter);
     if let Some(index) = picked.filter(|index| *index < rows) {
         return Choice::Row(index);
     }
@@ -2269,20 +2298,53 @@ mod tests {
 
     #[test]
     fn a_choice_is_the_row_taken_or_else_the_text_typed() {
-        assert_eq!(choice_of(false, "op", Some(1), 3), Choice::Row(1));
         assert_eq!(
-            choice_of(false, " claude-opus-5-5 ", None, 3),
+            choice_of(false, "op", Some(1), 3, Accepted::Enter),
+            Choice::Row(1)
+        );
+        assert_eq!(
+            choice_of(false, " claude-opus-5-5 ", None, 3, Accepted::Enter),
             Choice::Typed("claude-opus-5-5".to_owned())
         );
         // Esc wins over whatever was under the cursor or in the query.
-        assert_eq!(choice_of(true, "op", Some(1), 3), Choice::Cancelled);
+        assert_eq!(
+            choice_of(true, "op", Some(1), 3, Accepted::Enter),
+            Choice::Cancelled
+        );
         // Enter on nothing at all is no answer, not an empty value.
-        assert_eq!(choice_of(false, "  ", None, 3), Choice::Cancelled);
+        assert_eq!(
+            choice_of(false, "  ", None, 3, Accepted::Enter),
+            Choice::Cancelled
+        );
         // A row skim invented is not one of ours.
         assert_eq!(
-            choice_of(false, "x", Some(7), 3),
+            choice_of(false, "x", Some(7), 3, Accepted::Enter),
             Choice::Typed("x".to_owned())
         );
+    }
+
+    #[test]
+    fn alt_enter_takes_the_query_even_where_it_matches_a_row() {
+        // `gpt-5.5` is a substring of the row `gpt-5.5-codex`, so the row is under
+        // the cursor. Enter takes the row; Alt-Enter takes what was typed.
+        assert_eq!(
+            choice_of(false, "gpt-5.5", Some(0), 1, Accepted::Enter),
+            Choice::Row(0)
+        );
+        assert_eq!(
+            choice_of(false, " gpt-5.5 ", Some(0), 1, Accepted::AsTyped),
+            Choice::Typed("gpt-5.5".to_owned())
+        );
+        // Alt-Enter on no text is no answer, and Esc still wins.
+        assert_eq!(
+            choice_of(false, " ", Some(0), 1, Accepted::AsTyped),
+            Choice::Cancelled
+        );
+        assert_eq!(
+            choice_of(true, "gpt-5.5", Some(0), 1, Accepted::AsTyped),
+            Choice::Cancelled
+        );
+        assert_eq!(choose_options("h").expect, ["alt-enter"]);
     }
 
     #[test]
