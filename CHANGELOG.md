@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.58.0] - 2026-09-30
+
 ### Added
 
-- **An `aid` agent comes back by itself after herdr restarts.** In a herdr pane, `aid`
+- **An `aid` agent comes back by itself after herdr restarts** (#657). In a herdr pane, `aid`
   now names a fresh claude session (`--session-id`) and `dl` tells herdr the line that
   reopens it: `dl <workspace id> -- <the same agent line> --resume <id>`, with no prompt.
   With herdr's `resume_agents_on_restore` on, a server restart or a reboot brings every
