@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.59.1] - 2026-10-01
+
 ### Fixed
 
 - **`rm` no longer counts a commit and the commit that reverts it** (#664). Neither has a
