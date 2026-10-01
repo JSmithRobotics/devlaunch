@@ -258,8 +258,8 @@ impl PtyAid {
     }
 
     /// Take the first row of the agent, model and effort pickers, then wait for
-    /// the prompt editor. On a first run that is claude with every default, which
-    /// is every launch's way in when nothing is chosen.
+    /// the prompt editor. On a first run that is claude with every default. Only a
+    /// line with no workspace meets these pickers.
     fn take_the_defaults(&mut self) {
         self.answer(AGENT_PICKER, "\r");
         self.answer(MODEL_PICKER, "\r");
