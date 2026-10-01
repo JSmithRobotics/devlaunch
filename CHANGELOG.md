@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`aid <workspace>` goes straight to the prompt editor again.** 0.59.0 asked for the
+  agent, the model and the effort on every promptless launch on a terminal. Only a line
+  with no workspace, such as a bare `aid` or `aid --codex`, is asked now. A line that
+  names its workspace starts the agent on its defaults and the line's flags, as 0.58.0 did.
+
 ## [0.59.0] - 2026-09-30
 
 ### Added

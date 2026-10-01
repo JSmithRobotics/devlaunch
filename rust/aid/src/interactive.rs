@@ -162,6 +162,17 @@ impl BootChild {
     }
 }
 
+/// Whether the agent, model and effort pickers run before the editor.
+///
+/// Only a bare `aid`, or a line of flags with no workspace, asks. A line that
+/// names its workspace already said what it wanted, so it gets the editor alone
+/// and every setting it left open stays the agent's default.
+#[derive(Clone, Copy)]
+pub(crate) enum Pickers {
+    Ask,
+    Skip,
+}
+
 /// How the interactive flow ended.
 pub(crate) enum Collected {
     /// Launch this line, once the boot beside it, if any, has finished.
@@ -187,10 +198,12 @@ pub(crate) enum Collected {
 ///
 /// `argv` and `environment` are what `parsed` was parsed from: the agent picker
 /// builds its rows by parsing the line again with each row's flags in front.
+/// `pickers` says whether those pickers run at all.
 pub(crate) fn collect_prompt(
     parsed: AidArgs,
     argv: &[String],
     environment: Environment<'_>,
+    pickers: Pickers,
 ) -> Collected {
     let promptless_agent = matches!(
         &parsed.task,
@@ -216,9 +229,15 @@ pub(crate) fn collect_prompt(
     // The pickers come after the boot has started, so the minute they take is
     // also spent booting. Nothing they choose reaches the boot: `up` takes no
     // model, and `--claude-profile` is read when the session starts, not at `up`.
-    let Some(parsed) = settle(parsed, argv, environment) else {
-        boot.cancel();
-        return Collected::Cancelled;
+    let parsed = match pickers {
+        Pickers::Skip => parsed,
+        Pickers::Ask => {
+            let Some(parsed) = settle(parsed, argv, environment) else {
+                boot.cancel();
+                return Collected::Cancelled;
+            };
+            parsed
+        }
     };
     banner(&parsed);
     match dl::read_prompt() {

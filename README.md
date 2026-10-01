@@ -411,10 +411,11 @@ With no workspace on the line, `aid` on a terminal lets you pick one of your wor
 does. With no prompt on the line, `aid` starts the container booting and asks for the prompt while it
 does. Type it free of shell quoting, with no escaping and no history expansion eating a `!`. A
 paste keeps its line breaks and can be any length, Alt-Enter or Ctrl-J adds a line, and an empty
-Enter starts the agent's plain session. Before the prompt it asks for the agent (one row per Claude
-login, then `codex` and `gemini`), the model and the effort, each in a picker that lists your
-recent choices first, so one Enter repeats the last launch. A flag on the line skips its picker,
-and Esc stops the boot. See [docs/cli.md](docs/cli.md#the-pickers-ahead-of-the-prompt). Piping
+Enter starts the agent's plain session. A bare `aid`, which picks its workspace, also asks before
+the prompt for the agent (one row per Claude login, then `codex` and `gemini`), the model and the
+effort, each in a picker that lists your recent choices first, so one Enter repeats the last
+launch. A flag on the line skips its picker, and Esc stops the boot. `aid <workspace>` asks for
+none of them and goes straight to the prompt. See [docs/cli.md](docs/cli.md#the-pickers-ahead-of-the-prompt). Piping
 stdin or setting `DEVLAUNCH_NO_TTY=1` skips the question and launches one-shot, so scripts behave
 as they always have.
 
