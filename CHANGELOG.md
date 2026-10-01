@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.59.1] - 2026-10-01
+
 ### Fixed
 
 - **`rm` no longer counts a commit and the commit that reverts it** (#664). Neither has a
@@ -19,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and so does a second commit that grew from it, such as a branch or the stash. A merge,
   a root commit, an empty commit and a revert of a commit that another rule cleared
   still count, and so does an earlier draft of a commit that was edited later.
-- **`aid <workspace>` goes straight to the prompt editor again.** 0.59.0 asked for the
+- **`aid <workspace>` goes straight to the prompt editor again** (#666). 0.59.0 asked for the
   agent, the model and the effort on every promptless launch on a terminal. Only a line
   with no workspace, such as a bare `aid` or `aid --codex`, is asked now. A line that
   names its workspace starts the agent on its defaults and the line's flags, as 0.58.0 did.
