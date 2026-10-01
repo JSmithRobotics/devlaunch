@@ -1236,7 +1236,8 @@ impl<'r> Git<'r> {
     /// What the revert rule reads: a commit and its revert, and whether any
     /// other commit grew from the reverted one. `--all` with nothing excluded,
     /// so a commit that only a tag or `refs/original` reaches is still in the
-    /// graph. Such a commit is never counted, so it can only hold a pair back.
+    /// graph. When that tag came from the remote, or it is `refs/original`, such
+    /// a commit is never counted, so it can only hold a pair back.
     /// `--boundary` lists the pushed parents too, marked `-`, which is where the
     /// tree under a commit made on top of the remote comes from.
     ///
