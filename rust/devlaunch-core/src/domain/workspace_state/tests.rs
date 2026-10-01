@@ -1377,6 +1377,58 @@ fn a_commit_and_its_revert_hold_nothing_unsaved_in_a_sha256_repository() {
 }
 
 #[test]
+fn the_revert_rule_pairs_signed_commits_where_log_shows_signatures() {
+    // `log.showSignature` puts the signature check's lines between the
+    // commits the revert rule reads, and a line it cannot read clears nothing.
+    // The rule is asked on its own, with the count listed without signatures.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    let key = fixture.path("signing_key");
+    let made = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "t@t", "-f"])
+        .arg(&key)
+        .output()
+        .expect("ssh-keygen is installed");
+    assert!(made.status.success(), "{made:?}");
+    for (name, value) in [
+        ("gpg.format", "ssh"),
+        ("user.signingkey", key.to_str().expect("utf-8")),
+        ("commit.gpgsign", "true"),
+        ("log.showSignature", "true"),
+    ] {
+        git(&clone, &["config", name, value]);
+    }
+    a_commit_and_its_revert(&clone);
+    assert!(git(&clone, &["cat-file", "commit", "HEAD~1"]).contains("gpgsig"));
+    let counted: Vec<String> = git(
+        &clone,
+        &[
+            "log",
+            "--oneline",
+            "--no-color",
+            "--no-show-signature",
+            "feature",
+            "--not",
+            "--remotes",
+        ],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect();
+    let mut pair = vec![
+        git(&clone, &["rev-parse", "HEAD~1"]),
+        git(&clone, &["rev-parse", "HEAD"]),
+    ];
+    pair.sort();
+    let runner = ProcessRunner::new();
+
+    assert_eq!(
+        reverted_in_pairs(&Git::new(&runner), &clone, &counted),
+        pair
+    );
+}
+
+#[test]
 fn the_commits_around_a_commit_and_its_revert_stay_counted() {
     let fixture = Fixture::new();
     let clone = fixture.clone();
