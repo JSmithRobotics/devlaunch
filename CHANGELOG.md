@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`rm` no longer counts a commit and the commit that reverts it** (#PRNUM). Neither has a
+- **`rm` no longer counts a commit and the commit that reverts it** (#664). Neither has a
   copy on a remote, and a branch that changes nothing proves nothing to the squash rule,
   so after #653 and #659 `rm` and `dl --ls --json` still counted both. Now a counted
   commit whose tree is the tree under the counted commit it sits on drops out with that
