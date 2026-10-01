@@ -467,6 +467,31 @@ fn a_named_workspace_goes_straight_to_the_editor_with_no_picker() {
 }
 
 #[test]
+fn a_choice_a_bare_aid_remembered_stays_out_of_aid_workspace() {
+    // The cache remembers what a bare `aid` chose, but only to put it first in
+    // the next picker. A line that names its workspace draws no picker, so it
+    // gets the agent's defaults, not the last choice.
+    let world = World::with(&["--warm"]);
+    let mut first = PtyAid::spawn(&world, &[], &[]);
+    first.pick_the_workspace();
+    first.answer(AGENT_PICKER, "\r");
+    first.answer_typed(MODEL_PICKER, "sonnet");
+    first.answer_typed(EFFORT_PICKER, "low");
+    first.expect(BANNER);
+    first.send_line("one");
+    assert_eq!(first.wait(), 0);
+
+    let mut second = PtyAid::spawn(&world, &[MAIN], &[]);
+    second.reach_the_editor();
+    second.send_line("two");
+    assert_eq!(second.wait(), 0);
+    assert_eq!(
+        &without_session_id(world.devpod_calls().last().expect("a session")),
+        &claude_session("", "two")
+    );
+}
+
+#[test]
 fn a_lone_esc_at_the_editor_does_not_swallow_the_next_key() {
     // The pickers teach that Esc cancels, so a person presses it here too. On its
     // own, with a pause after it, it is not the Alt of the next key.
