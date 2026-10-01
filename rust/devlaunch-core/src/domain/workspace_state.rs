@@ -609,6 +609,10 @@ fn unsaved(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Unsaved {
                 if !left.is_empty() {
                     copied.extend(squashed_onto_a_remote(git, clone, &left, &local_tags));
                 }
+                let left = not_among(listed.iter(), &copied);
+                if !left.is_empty() {
+                    copied.extend(reverted_in_pairs(git, clone, &left));
+                }
                 if let Some(commits) = NonEmpty::of(not_among(listed.iter(), &copied)) {
                     let by_tags = owed_to_tags(git, clone, &local_tags)
                         .and_then(|by_tags| by_tags.leaving_out(&copied));
@@ -792,6 +796,112 @@ fn squashed_onto_a_remote(
     let mut cleared: Vec<String> = cleared
         .into_iter()
         .filter(|hash| !held_back.contains(hash))
+        .collect();
+    cleared.sort();
+    cleared
+}
+
+/// The counted commits that come in pairs of a commit and its revert, as full
+/// hashes.
+///
+/// What [`already_on_a_remote`] and [`squashed_onto_a_remote`] leave: a commit
+/// and the commit that reverts it. Neither has a copy on a remote, and a branch
+/// that changes nothing proves nothing to the squash rule. A kinisi_ros
+/// workspace refused `rm` over a probe commit and its revert that way, with
+/// the PR (kinisi_ros#11898) squashed into `main`. Together the two commits
+/// change nothing, so a push of them would change nothing either.
+///
+/// **A pair** is a counted commit *R* whose one parent is a counted commit *C*
+/// with one parent of its own, where *R*'s tree is the tree under *C* and
+/// *C*'s tree is not. Trees, not patches, so the revert must take back the
+/// whole change, byte for byte. So:
+///
+/// - an empty *C* is no pair, because an empty commit holds only its message;
+/// - a root *C* is no pair, because there is no tree under it;
+/// - a merge is no pair on either side, because its change is not one
+///   commit's;
+/// - a *C* that another rule cleared is no pair, because then *R* is the one
+///   record of taking a change on a remote out again.
+///
+/// **A commit is in one pair at most, and the pairs are taken from the
+/// bottom.** A revert of a revert puts the change back, so the third commit
+/// holds what the first did and stays counted while the first two drop out.
+///
+/// **A pair drops out only when nothing else holds the state of *C*.** A ref or
+/// a worktree's HEAD on *C* holds it, and so does a second commit that grew
+/// from *C*: a branch, or the stash. Then both commits stay counted. Every ref
+/// that reaches *C* then reaches it through *R*.
+///
+/// It runs only when the other rules left a commit counted, and it costs one
+/// `git log` of the unpushed graph, and one `rev-list` of the ref tips only
+/// when a pair is found. **Every failure clears nothing**: a refusal on either,
+/// or a graph in a shape this cannot read.
+fn reverted_in_pairs(git: &Git<'_>, clone: &Path, counted: &[String]) -> Vec<String> {
+    let Some(Some(graph)) = git.unpushed_graph(clone).said() else {
+        return Vec::new();
+    };
+    let is_counted = |hash: &str| {
+        graph.commit(hash).is_some()
+            && counted
+                .iter()
+                .any(|line| is_among(line, std::slice::from_ref(&hash.to_owned())))
+    };
+    let reverts = |hash: &str| -> Option<String> {
+        let revert = graph.commit(hash)?;
+        let [reverted] = revert.parents.as_slice() else {
+            return None;
+        };
+        let [under] = graph.commit(reverted)?.parents.as_slice() else {
+            return None;
+        };
+        let under_tree = graph.tree_of(under)?;
+        let changed = graph.tree_of(reverted)? != under_tree;
+        (changed && revert.tree == under_tree && is_counted(hash) && is_counted(reverted))
+            .then(|| reverted.clone())
+    };
+    let mut tops: HashMap<String, bool> = HashMap::new();
+    for (hash, _) in graph.unpushed() {
+        let mut chain: Vec<(String, String)> = Vec::new();
+        let mut at = hash.to_owned();
+        while !tops.contains_key(&at) {
+            match reverts(&at) {
+                Some(reverted) => {
+                    chain.push((at, reverted.clone()));
+                    at = reverted;
+                }
+                None => {
+                    tops.insert(at.clone(), false);
+                }
+            }
+        }
+        for (revert, reverted) in chain.into_iter().rev() {
+            let under_a_pair = tops.get(&reverted).copied().unwrap_or(false);
+            tops.insert(revert, !under_a_pair);
+        }
+    }
+    let pairs: Vec<(String, String)> = tops
+        .into_iter()
+        .filter(|(_, top)| *top)
+        .filter_map(|(revert, _)| reverts(&revert).map(|reverted| (reverted, revert)))
+        .collect();
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+    let Some(tips) = git.ref_tips(clone).said() else {
+        return Vec::new();
+    };
+    let mut children: HashMap<&str, usize> = HashMap::new();
+    for (_, commit) in graph.unpushed() {
+        for parent in &commit.parents {
+            *children.entry(parent.as_str()).or_default() += 1;
+        }
+    }
+    let mut cleared: Vec<String> = pairs
+        .into_iter()
+        .filter(|(reverted, _)| {
+            !tips.contains(reverted) && children.get(reverted.as_str()) == Some(&1)
+        })
+        .flat_map(|(reverted, revert)| [reverted, revert])
         .collect();
     cleared.sort();
     cleared

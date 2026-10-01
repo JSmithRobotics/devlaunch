@@ -46,7 +46,7 @@
 //! module, so the spans are wired in M4b/M5 against the real registry rather than
 //! guessed at here. The names above are the list to wire.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1230,6 +1230,48 @@ impl<'r> Git<'r> {
             .map(|stdout| stdout.lines().map(str::to_owned).collect())
     }
 
+    /// Every commit no remote-tracking ref contains, with its tree and its
+    /// parents, and the tree of each pushed commit one of them has as a parent.
+    ///
+    /// What the revert rule reads: a commit and its revert, and whether any
+    /// other commit grew from the reverted one. `--all` with nothing excluded,
+    /// so a commit that only a tag or `refs/original` reaches is still in the
+    /// graph. Such a commit is never counted, so it can only hold a pair back.
+    /// `--boundary` lists the pushed parents too, marked `-`, which is where the
+    /// tree under a commit made on top of the remote comes from.
+    ///
+    /// `--no-show-signature` because `log.showSignature` would put gpg's lines
+    /// between the commits. A line in any other shape reads as no graph at
+    /// all (`None`): a commit left out of it could be the one that holds a pair
+    /// back.
+    pub(crate) fn unpushed_graph(&self, clone: &Path) -> GitAnswer<Option<CommitGraph>> {
+        self.about(
+            clone,
+            &[
+                "log",
+                "--no-color",
+                "--no-show-signature",
+                "--boundary",
+                "--format=%m %H %T %P",
+                "--all",
+                "--not",
+                "--remotes",
+            ],
+        )
+        .map(|stdout| commit_graph_in(&stdout))
+    }
+
+    /// The commit each ref and each worktree's HEAD names, tags peeled.
+    ///
+    /// The revert rule's other half: a ref on the reverted commit holds the
+    /// state with that commit's change in it. `rev-list --all` reads every
+    /// ref under `refs/` and the HEAD of every worktree, detached or not, and
+    /// `--no-walk` lists the tips without their history.
+    pub(crate) fn ref_tips(&self, clone: &Path) -> GitAnswer<HashSet<String>> {
+        self.about(clone, &["rev-list", "--no-walk", "--all"])
+            .map(|stdout| stdout.lines().map(str::to_owned).collect())
+    }
+
     /// Every tag in the bare cache at *bare*, with the object each one names.
     ///
     /// `--git-dir` and no work tree, because a bare has none, and no cwd, because
@@ -2199,6 +2241,76 @@ impl RemoteRef {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// The unpushed commits of a clone, from [`Git::unpushed_graph`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CommitGraph {
+    /// Each commit no remote-tracking ref contains, by full hash.
+    unpushed: HashMap<String, GraphCommit>,
+    /// The tree of each pushed commit that an unpushed one has as a parent.
+    pushed_trees: HashMap<String, String>,
+}
+
+/// One unpushed commit in a [`CommitGraph`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GraphCommit {
+    pub(crate) tree: String,
+    /// Full hashes, the first parent first.
+    pub(crate) parents: Vec<String>,
+}
+
+impl CommitGraph {
+    /// Every unpushed commit, by full hash.
+    pub(crate) fn unpushed(&self) -> impl Iterator<Item = (&str, &GraphCommit)> {
+        self.unpushed
+            .iter()
+            .map(|(hash, commit)| (hash.as_str(), commit))
+    }
+
+    /// The unpushed commit *hash*, or `None` when it is pushed or unknown.
+    pub(crate) fn commit(&self, hash: &str) -> Option<&GraphCommit> {
+        self.unpushed.get(hash)
+    }
+
+    /// The tree of *hash*, pushed or not, when the graph lists it.
+    pub(crate) fn tree_of(&self, hash: &str) -> Option<&str> {
+        self.unpushed
+            .get(hash)
+            .map(|commit| commit.tree.as_str())
+            .or_else(|| self.pushed_trees.get(hash).map(String::as_str))
+    }
+}
+
+/// The graph in [`Git::unpushed_graph`] output, one `<mark> <hash> <tree>
+/// <parents>` line per commit, or `None` when a line is in any other shape.
+fn commit_graph_in(output: &str) -> Option<CommitGraph> {
+    let mut graph = CommitGraph {
+        unpushed: HashMap::new(),
+        pushed_trees: HashMap::new(),
+    };
+    for line in output.lines() {
+        let mut fields = line.split(' ').filter(|field| !field.is_empty());
+        let (Some(mark), Some(hash), Some(tree)) = (fields.next(), fields.next(), fields.next())
+        else {
+            return None;
+        };
+        let parents: Vec<String> = fields.map(str::to_owned).collect();
+        match mark {
+            ">" => {
+                let commit = GraphCommit {
+                    tree: tree.to_owned(),
+                    parents,
+                };
+                graph.unpushed.insert(hash.to_owned(), commit);
+            }
+            "-" => {
+                graph.pushed_trees.insert(hash.to_owned(), tree.to_owned());
+            }
+            _ => return None,
+        }
+    }
+    Some(graph)
 }
 
 /// What [`Git::text_merge`] found a clone can merge with: the `--attr-source`

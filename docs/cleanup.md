@@ -984,7 +984,7 @@ cherry-pick and a squash merge all put the same change on the remote under a new
 hash, so by hash the old commit is on no remote ref. A kinisi_ros workspace refused
 `rm` over 23 commits that way, and none of them was lost: its remote branch had
 been rebased, a merged PR had been squashed into `main`, and five of the commits
-were merges of `origin/main`. Three more rules now run after the count:
+were merges of `origin/main`. Four more rules now run after the count:
 
 - A commit drops out when a remote ref holds a copy of it: a commit that makes
   the same change in the same place. The candidates come from the patch id,
@@ -1032,12 +1032,29 @@ were merges of `origin/main`. Three more rules now run after the count:
   branch's first-parent line, so work added after the squash stays counted and
   the squashed commits under it do not. A branch that changes nothing since it
   left the remote ref proves nothing, because any merge of it gives the remote
-  ref's tree, so a commit and its revert on their own still count. A commit
+  ref's tree, so this rule leaves a commit and its revert on their own to the
+  next one. A commit
   drops out only when every ref that reaches it is a branch that passed: a
   second branch that grew from it and does not pass holds it back, and so do
   the stash, a local tag and a detached HEAD.
+- A commit and the commit that reverts it drop out together. Together they
+  change nothing, so a push of them would change nothing either. A kinisi_ros
+  workspace refused `rm` over a probe commit and its revert, left on a backup
+  branch after the PR was squashed. The pair is two counted commits with one
+  parent each, the second on top of the first, where the second's tree is the
+  tree under the first and the first's tree is not. Trees, not patches, so the
+  revert must take back the whole change, byte for byte. An empty commit is
+  never the first of a pair, because its message is all it holds. A root
+  commit is never one either, because there is no tree under it, and nor is a
+  merge on either side. When another rule already cleared the first commit,
+  the revert stays counted: it is the only record of taking that change out
+  again. A commit is in one pair at most, and the pairs are taken from the
+  bottom, so a revert of a revert stays counted, because it puts the change
+  back. The pair stays counted when anything else holds the state of the
+  first commit: a branch, a tag or a worktree's HEAD on it, or a second
+  commit that grew from it, such as another branch or the stash.
 
-All three rules can only take commits out of the count, and only when git
+All four rules can only take commits out of the count, and only when git
 answers. A question git refuses clears nothing, and so does a merge with a
 conflict. That is the limit of the third rule: when the remote edited the lines
 the squash wrote, the merge conflicts, and the squashed commits still count,

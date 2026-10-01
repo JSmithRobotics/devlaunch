@@ -821,10 +821,11 @@ fn a_merge_that_dropped_a_deleted_side_branch_leaves_that_branch_counted() {
 }
 
 #[test]
-fn a_commit_and_its_revert_are_not_cleared_by_a_remote_that_moved() {
+fn the_squash_rule_does_not_clear_a_commit_and_its_revert_by_a_remote_that_moved() {
     // The branch changes nothing since it left `origin/feature`, so any merge of
     // it into `origin/feature` gives `origin/feature`'s tree. An empty change
-    // proves nothing, and the two commits stay counted.
+    // proves nothing, so the squash rule leaves the two commits counted. The
+    // revert rule is what clears them, and it is asked on its own here.
     let fixture = Fixture::new();
     let clone = fixture.clone();
     write(&clone.join("notes.txt"), "one\n");
@@ -836,8 +837,21 @@ fn a_commit_and_its_revert_are_not_cleared_by_a_remote_that_moved() {
     commit(&mate, "mate");
     git(&mate, &["push", "-q", "origin", "feature"]);
     git(&clone, &["fetch", "-q", "origin"]);
+    let counted: Vec<String> = git(
+        &clone,
+        &["log", "--oneline", "feature", "--not", "--remotes"],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(counted.len(), 2);
+    let runner = ProcessRunner::new();
 
-    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+    assert_eq!(
+        squashed_onto_a_remote(&Git::new(&runner), &clone, &counted, &[]),
+        Vec::<String>::new()
+    );
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
 }
 
 #[test]
@@ -1301,6 +1315,388 @@ fn a_squash_eight_commits_under_the_tip_is_not_looked_for() {
     git(&clone, &["fetch", "-q", "origin"]);
 
     assert_eq!(would_lose(&held(&clone)), "11 unpushed commit(s)");
+}
+
+// ------------------------------------------------- a commit and its revert
+
+/// A commit on `feature` that writes `probe.txt`, then the commit
+/// `git revert` makes of it.
+fn a_commit_and_its_revert(clone: &Path) {
+    write(&clone.join("probe.txt"), "probe\n");
+    commit(clone, "probe (revert before merge)");
+    git_as_author(clone, &["revert", "--no-edit", "HEAD"]);
+}
+
+#[test]
+fn a_commit_and_its_revert_hold_nothing_unsaved() {
+    // kinisi_ros#11898's workspace: a probe commit and its revert, adjacent on
+    // a branch whose PR was squashed. Together they change nothing, so
+    // deleting them loses nothing.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    a_commit_and_its_revert(&clone);
+    assert_eq!(by_sha(&clone, "feature"), 2);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_commit_and_its_revert_hold_nothing_unsaved_in_a_sha256_repository() {
+    let fixture = Fixture::named_by("sha256");
+    let clone = fixture.clone();
+    a_commit_and_its_revert(&clone);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn the_commits_around_a_commit_and_its_revert_stay_counted() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("before.txt"), "work\n");
+    commit(&clone, "before");
+    a_commit_and_its_revert(&clone);
+    write(&clone.join("after.txt"), "work\n");
+    commit(&clone, "after");
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_commit_that_undoes_only_part_of_the_one_before_stays_counted() {
+    // The tree after the second commit is not the tree before the first, so
+    // `probe.txt` exists nowhere else.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("probe.txt"), "one\ntwo\n");
+    commit(&clone, "draft");
+    write(&clone.join("probe.txt"), "one\n");
+    commit(&clone, "edit the draft");
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn two_empty_commits_stay_counted() {
+    // The second one's tree is the tree under the first, as a revert's is, but
+    // an empty commit holds only its message, and nothing compares a message.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    for message in ["the only record", "and another"] {
+        git_as_author(&clone, &["commit", "-q", "--allow-empty", "-m", message]);
+    }
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_root_commit_and_its_revert_stay_counted() {
+    // A root commit has no tree under it to compare with.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["checkout", "-q", "--orphan", "orphan"]);
+    git(&clone, &["rm", "-q", "-r", "-f", "."]);
+    write(&clone.join("n.txt"), "x\n");
+    commit(&clone, "a root of its own");
+    git_as_author(&clone, &["revert", "--no-edit", "HEAD"]);
+    assert_eq!(by_sha(&clone, "orphan"), 2);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_revert_of_a_revert_stays_counted() {
+    // The third commit puts `probe.txt` back, so the clone is its only copy.
+    // A commit is in one pair at most, and the pairs are taken from the
+    // bottom, so the first two drop out and the third stays.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    a_commit_and_its_revert(&clone);
+    git_as_author(&clone, &["revert", "--no-edit", "HEAD"]);
+
+    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+}
+
+#[test]
+fn a_revert_of_a_revert_that_is_reverted_again_holds_nothing_unsaved() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    a_commit_and_its_revert(&clone);
+    git_as_author(&clone, &["revert", "--no-edit", "HEAD"]);
+    git_as_author(&clone, &["revert", "--no-edit", "HEAD"]);
+    assert_eq!(by_sha(&clone, "feature"), 4);
+
+    assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_local_tag_on_the_reverted_commit_holds_both_back() {
+    // The tag holds the state with `probe.txt` in it.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    a_commit_and_its_revert(&clone);
+    git(&clone, &["tag", "probe", "feature~1"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_branch_on_the_reverted_commit_holds_both_back() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    a_commit_and_its_revert(&clone);
+    git(&clone, &["branch", "keep", "feature~1"]);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_detached_head_on_the_reverted_commit_holds_both_back() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    a_commit_and_its_revert(&clone);
+    let linked = fixture.path("detached");
+    git(
+        &clone,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().expect("utf-8"),
+            "feature~1",
+        ],
+    );
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+#[test]
+fn a_stash_made_on_the_reverted_commit_holds_both_back() {
+    // The stash is a merge whose first parent is the reverted commit, so the
+    // revert is not the only commit that grew from it. The two stash commits
+    // count, and so do the pair.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("probe.txt"), "probe\n");
+    commit(&clone, "probe");
+    write(&clone.join("stashed.txt"), "half a plan\n");
+    git(&clone, &["add", "-A"]);
+    git_as_author(&clone, &["stash", "-q"]);
+    git_as_author(&clone, &["revert", "--no-edit", "HEAD"]);
+
+    assert_eq!(would_lose(&held(&clone)), "4 unpushed commit(s)");
+}
+
+#[test]
+fn a_branch_that_grew_from_the_reverted_commit_holds_both_back() {
+    // `other` builds on the state with `probe.txt` in it, and its tip is not
+    // the reverted commit, so only the second child shows it.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("probe.txt"), "probe\n");
+    commit(&clone, "probe");
+    git(&clone, &["checkout", "-q", "-b", "other"]);
+    write(&clone.join("more.txt"), "more\n");
+    commit(&clone, "more");
+    git(&clone, &["checkout", "-q", "feature"]);
+    git_as_author(&clone, &["revert", "--no-edit", "HEAD"]);
+
+    assert_eq!(would_lose(&held(&clone)), "3 unpushed commit(s)");
+}
+
+#[test]
+fn a_merge_that_takes_the_tree_back_stays_counted() {
+    // The merge has the tree under the probe, as a revert would, but it is a
+    // merge, and it drops `side.txt` as well.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["checkout", "-q", "-b", "side"]);
+    write(&clone.join("side.txt"), "side\n");
+    commit(&clone, "side");
+    git(&clone, &["checkout", "-q", "feature"]);
+    write(&clone.join("probe.txt"), "probe\n");
+    commit(&clone, "probe");
+    git_as_author(
+        &clone,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-s",
+            "ours",
+            "--no-commit",
+            "side",
+        ],
+    );
+    git(&clone, &["rm", "-q", "probe.txt"]);
+    commit(&clone, "merge side, dropping everything");
+    assert_eq!(
+        git(&clone, &["rev-parse", "HEAD^{tree}"]),
+        git(&clone, &["rev-parse", "HEAD~2^{tree}"])
+    );
+
+    assert_eq!(would_lose(&held(&clone)), "3 unpushed commit(s)");
+}
+
+#[test]
+fn a_merge_with_an_edit_of_its_own_and_its_revert_stay_counted() {
+    // `git revert -m 1` takes the tree back to the merge's first parent, but
+    // the merge is not a single commit's change: it brought `side` in and made
+    // an edit of its own.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    git(&clone, &["checkout", "-q", "-b", "side"]);
+    write(&clone.join("side.txt"), "side\n");
+    commit(&clone, "side");
+    git(&clone, &["checkout", "-q", "feature"]);
+    git_as_author(&clone, &["merge", "-q", "--no-ff", "--no-commit", "side"]);
+    write(&clone.join("merge.txt"), "the merge's own\n");
+    commit(&clone, "merge side, with an edit");
+    git_as_author(&clone, &["revert", "--no-edit", "-m", "1", "HEAD"]);
+
+    assert_eq!(would_lose(&held(&clone)), "3 unpushed commit(s)");
+}
+
+#[test]
+fn the_revert_of_a_commit_a_remote_holds_a_copy_of_stays_counted() {
+    // The probe is on `origin/main` as a cherry-pick, so the copy rule clears
+    // it, and the revert is the only record of taking it out again.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    write(&clone.join("probe.txt"), "probe\n");
+    commit(&clone, "probe");
+    git(&clone, &["push", "-q", "origin", "feature"]);
+    let mate = teammate(&fixture);
+    git(&mate, &["checkout", "-q", "main"]);
+    git_as_author(&mate, &["cherry-pick", "origin/feature"]);
+    git(&mate, &["push", "-q", "origin", "main"]);
+    git(&mate, &["push", "-q", "origin", "--delete", "feature"]);
+    git(&clone, &["fetch", "-q", "--prune", "origin"]);
+    git_as_author(&clone, &["revert", "--no-edit", "HEAD"]);
+    assert_eq!(by_sha(&clone, "feature"), 3);
+
+    assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
+}
+
+/// A counted commit `c…` and its revert `a…` on top of the pushed `e…`, as
+/// `log --boundary` lists them; `c…` changes `2…` to `1…` and `a…` puts `2…`
+/// back.
+const PAIR_GRAPH: &str = "> aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+2222222222222222222222222222222222222222 cccccccccccccccccccccccccccccccccccccccc\n\
+> cccccccccccccccccccccccccccccccccccccccc 1111111111111111111111111111111111111111 \
+eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n\
+- eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee 2222222222222222222222222222222222222222 \n";
+
+/// A clone at `/ws` whose unpushed graph is *graph* and whose ref tips are
+/// *tips*.
+fn scripted_pair(graph: Response, tips: Response) -> ScriptedRunner {
+    let at = |verb: &'static str| ["git", "--git-dir=/ws/.git", "--work-tree=/ws", verb];
+    ScriptedRunner::new()
+        .with_script(at("log"), graph)
+        .with_script(at("rev-list"), tips)
+}
+
+#[test]
+fn a_commit_graph_git_will_not_list_clears_nothing() {
+    let counted = [
+        "aaaaaaa Revert \"probe\"".to_owned(),
+        "ccccccc probe".to_owned(),
+    ];
+    let tips = || Response::stdout("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n");
+    let refused = scripted_pair(Response::failed(128, "fatal: nope"), tips());
+
+    assert_eq!(
+        reverted_in_pairs(&Git::new(&refused), Path::new("/ws"), &counted),
+        Vec::<String>::new()
+    );
+
+    // The control: the same answers with the graph read clear the pair.
+    let read = scripted_pair(Response::stdout(PAIR_GRAPH), tips());
+    assert_eq!(
+        reverted_in_pairs(&Git::new(&read), Path::new("/ws"), &counted),
+        vec![
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            "cccccccccccccccccccccccccccccccccccccccc".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn ref_tips_git_will_not_list_clear_nothing() {
+    // What was not read may be a ref on the reverted commit.
+    let counted = [
+        "aaaaaaa Revert \"probe\"".to_owned(),
+        "ccccccc probe".to_owned(),
+    ];
+    let refused = scripted_pair(
+        Response::stdout(PAIR_GRAPH),
+        Response::failed(128, "fatal: nope"),
+    );
+
+    assert_eq!(
+        reverted_in_pairs(&Git::new(&refused), Path::new("/ws"), &counted),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_commit_graph_line_in_another_shape_clears_nothing() {
+    // A line that could not be read may be a second commit on the reverted
+    // one, so the whole graph is unread.
+    let counted = [
+        "aaaaaaa Revert \"probe\"".to_owned(),
+        "ccccccc probe".to_owned(),
+    ];
+    let child = "dddddddddddddddddddddddddddddddddddddddd 3333333333333333333333333333333333333333 \
+                 cccccccccccccccccccccccccccccccccccccccc";
+    for odd_line in [
+        format!("? {child}"),
+        "> dddddddddddddddddddddddddddddddddddddddd".to_owned(),
+    ] {
+        let odd = scripted_pair(
+            Response::stdout(format!("{PAIR_GRAPH}{odd_line}\n")),
+            Response::stdout("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"),
+        );
+
+        assert_eq!(
+            reverted_in_pairs(&Git::new(&odd), Path::new("/ws"), &counted),
+            Vec::<String>::new(),
+            "{odd_line}"
+        );
+    }
+}
+
+#[test]
+fn a_revert_no_longer_counted_does_not_clear_the_commit_under_it() {
+    // Another rule cleared the revert, so the probe is counted alone, and
+    // nothing in the clone takes its change back out.
+    let counted = ["ccccccc probe".to_owned()];
+    let read = scripted_pair(
+        Response::stdout(PAIR_GRAPH),
+        Response::stdout("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"),
+    );
+
+    assert_eq!(
+        reverted_in_pairs(&Git::new(&read), Path::new("/ws"), &counted),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_reverted_commit_no_longer_counted_does_not_pair() {
+    // Another rule cleared the probe, so only its revert is still counted, and
+    // the revert alone is the record of taking the probe out.
+    let counted = ["aaaaaaa Revert \"probe\"".to_owned()];
+    let read = scripted_pair(
+        Response::stdout(PAIR_GRAPH),
+        Response::stdout("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"),
+    );
+
+    assert_eq!(
+        reverted_in_pairs(&Git::new(&read), Path::new("/ws"), &counted),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
