@@ -1327,6 +1327,33 @@ fn a_commit_and_its_revert(clone: &Path) {
     git_as_author(clone, &["revert", "--no-edit", "HEAD"]);
 }
 
+/// The unpushed commits a `WouldLose` names, sorted, or a failure naming the
+/// arm that came back.
+fn unpushed_commits(unsaved: &Unsaved) -> Vec<String> {
+    let Unsaved::WouldLose(losses) = unsaved else {
+        panic!("expected a WouldLose: {unsaved:?}");
+    };
+    let mut commits: Vec<String> = losses
+        .iter()
+        .flat_map(|loss| match loss {
+            Loss::Unpushed { commits, .. } => commits.iter().cloned().collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    commits.sort();
+    commits
+}
+
+/// *revs* as `log --oneline` names them, sorted.
+fn onelines(clone: &Path, revs: &[&str]) -> Vec<String> {
+    let mut lines: Vec<String> = revs
+        .iter()
+        .map(|rev| git(clone, &["log", "--oneline", "--no-color", "-1", rev]))
+        .collect();
+    lines.sort();
+    lines
+}
+
 #[test]
 fn a_commit_and_its_revert_hold_nothing_unsaved() {
     // kinisi_ros#11898's workspace: a probe commit and its revert, adjacent on
@@ -1427,6 +1454,22 @@ fn a_revert_of_a_revert_that_is_reverted_again_holds_nothing_unsaved() {
     assert_eq!(by_sha(&clone, "feature"), 4);
 
     assert_eq!(held(&clone), Unsaved::NothingToLose);
+}
+
+#[test]
+fn a_branch_on_one_pair_holds_back_only_that_pair() {
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    a_commit_and_its_revert(&clone);
+    git_as_author(&clone, &["revert", "--no-edit", "HEAD"]);
+    git_as_author(&clone, &["revert", "--no-edit", "HEAD"]);
+    git(&clone, &["branch", "keep", "feature~1"]);
+    let held_back = onelines(&clone, &["feature~1", "feature"]);
+
+    let unsaved = held(&clone);
+
+    assert_eq!(would_lose(&unsaved), "2 unpushed commit(s)");
+    assert_eq!(unpushed_commits(&unsaved), held_back);
 }
 
 #[test]
