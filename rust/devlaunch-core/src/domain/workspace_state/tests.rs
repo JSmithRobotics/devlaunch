@@ -1492,8 +1492,12 @@ fn a_revert_of_a_revert_stays_counted() {
     let clone = fixture.clone();
     a_commit_and_its_revert(&clone);
     git_as_author(&clone, &["revert", "--no-edit", "HEAD"]);
+    let third = onelines(&clone, &["feature"]);
 
-    assert_eq!(would_lose(&held(&clone)), "1 unpushed commit(s)");
+    let unsaved = held(&clone);
+
+    assert_eq!(would_lose(&unsaved), "1 unpushed commit(s)");
+    assert_eq!(unpushed_commits(&unsaved), third);
 }
 
 #[test]
