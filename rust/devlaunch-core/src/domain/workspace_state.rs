@@ -864,40 +864,43 @@ fn reverted_in_pairs(git: &Git<'_>, clone: &Path, counted: &[String]) -> Vec<Str
         (changed && revert.tree == under_tree && is_counted(hash) && is_counted(reverted))
             .then(|| reverted.clone())
     };
-    let mut tops: HashMap<String, bool> = HashMap::new();
+    struct Pair {
+        reverted: String,
+        revert: String,
+    }
+    let mut taken: HashMap<String, Option<Pair>> = HashMap::new();
     for (hash, _) in graph.unpushed() {
-        let mut chain: Vec<(String, String)> = Vec::new();
+        let mut chain: Vec<Pair> = Vec::new();
         let mut at = hash.to_owned();
         let mut walked: HashSet<String> = HashSet::new();
-        while !tops.contains_key(&at) {
+        while !taken.contains_key(&at) {
             if !walked.insert(at.clone()) {
                 // A cycle, which only `refs/replace` or grafts can make: git
                 // shows the replaced parents. Nothing on it is a pair.
-                for (revert, _) in chain.drain(..) {
-                    tops.insert(revert, false);
+                for pair in chain.drain(..) {
+                    taken.insert(pair.revert, None);
                 }
                 break;
             }
             match reverts(&at) {
                 Some(reverted) => {
-                    chain.push((at, reverted.clone()));
+                    chain.push(Pair {
+                        reverted: reverted.clone(),
+                        revert: at,
+                    });
                     at = reverted;
                 }
                 None => {
-                    tops.insert(at.clone(), false);
+                    taken.insert(at.clone(), None);
                 }
             }
         }
-        for (revert, reverted) in chain.into_iter().rev() {
-            let under_a_pair = tops.get(&reverted).copied().unwrap_or(false);
-            tops.insert(revert, !under_a_pair);
+        for pair in chain.into_iter().rev() {
+            let under_a_pair = matches!(taken.get(&pair.reverted), Some(Some(_)));
+            taken.insert(pair.revert.clone(), (!under_a_pair).then_some(pair));
         }
     }
-    let pairs: Vec<(String, String)> = tops
-        .into_iter()
-        .filter(|(_, top)| *top)
-        .filter_map(|(revert, _)| reverts(&revert).map(|reverted| (reverted, revert)))
-        .collect();
+    let pairs: Vec<Pair> = taken.into_values().flatten().collect();
     if pairs.is_empty() {
         return Vec::new();
     }
@@ -912,10 +915,10 @@ fn reverted_in_pairs(git: &Git<'_>, clone: &Path, counted: &[String]) -> Vec<Str
     }
     let mut cleared: Vec<String> = pairs
         .into_iter()
-        .filter(|(reverted, _)| {
-            !tips.contains(reverted) && children.get(reverted.as_str()) == Some(&1)
+        .filter(|pair| {
+            !tips.contains(&pair.reverted) && children.get(pair.reverted.as_str()) == Some(&1)
         })
-        .flat_map(|(reverted, revert)| [reverted, revert])
+        .flat_map(|pair| [pair.reverted, pair.revert])
         .collect();
     cleared.sort();
     cleared
