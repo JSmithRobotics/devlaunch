@@ -1579,6 +1579,49 @@ fn the_revert_of_a_commit_a_remote_holds_a_copy_of_stays_counted() {
     assert_eq!(would_lose(&held(&clone)), "2 unpushed commit(s)");
 }
 
+#[test]
+fn a_replace_ref_that_makes_a_cycle_does_not_hang_the_revert_rule() {
+    // git follows `refs/replace`, so a replacement of the probe whose parent is
+    // its revert makes `git log` print a cycle: each commit reverts the other.
+    // The walk down the pairs must stop, and a cycle is no pair.
+    let fixture = Fixture::new();
+    let clone = fixture.clone();
+    a_commit_and_its_revert(&clone);
+    let probe = git(&clone, &["rev-parse", "HEAD~1"]);
+    let revert = git(&clone, &["rev-parse", "HEAD"]);
+    let tree = git(&clone, &["rev-parse", "HEAD~1^{tree}"]);
+    let object = format!(
+        "tree {tree}\nparent {revert}\nauthor t <t@t> 1 +0000\ncommitter t <t@t> 1 +0000\n\nprobe\n"
+    );
+    let path = fixture.path("replacement");
+    write(&path, &object);
+    let replacement = git(
+        &clone,
+        &[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            path.to_str().expect("utf-8"),
+        ],
+    );
+    git(&clone, &["replace", "-f", &probe, &replacement]);
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let asked = clone.clone();
+    std::thread::spawn(move || {
+        let _ = sender.send(held(&asked));
+    });
+    let answer = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the guard answers in 30 s");
+
+    assert!(
+        matches!(answer, Unsaved::WouldLose(_)),
+        "a cycle is no pair: {answer:?}"
+    );
+}
+
 /// A counted commit `c…` and its revert `a…` on top of the pushed `e…`, as
 /// `log --boundary` lists them; `c…` changes `2…` to `1…` and `a…` puts `2…`
 /// back.

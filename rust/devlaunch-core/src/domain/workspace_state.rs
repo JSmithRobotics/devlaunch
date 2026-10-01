@@ -830,7 +830,12 @@ fn squashed_onto_a_remote(
 /// **A pair drops out only when nothing else holds the state of *C*.** A ref or
 /// a worktree's HEAD on *C* holds it, and so does a second commit that grew
 /// from *C*: a branch, or the stash. Then both commits stay counted. Every ref
-/// that reaches *C* then reaches it through *R*.
+/// that reaches *C* then reaches it through *R*. "Every ref" is every ref
+/// `--all` reads, as for the count: a linked worktree's own `refs/worktree/*`
+/// and `refs/bisect/*` are not among them.
+///
+/// A cycle in the graph, which only `refs/replace` or grafts can make, holds
+/// no pair.
 ///
 /// It runs only when the other rules left a commit counted, and it costs one
 /// `git log` of the unpushed graph, and one `rev-list` of the ref tips only
@@ -863,7 +868,16 @@ fn reverted_in_pairs(git: &Git<'_>, clone: &Path, counted: &[String]) -> Vec<Str
     for (hash, _) in graph.unpushed() {
         let mut chain: Vec<(String, String)> = Vec::new();
         let mut at = hash.to_owned();
+        let mut walked: HashSet<String> = HashSet::new();
         while !tops.contains_key(&at) {
+            if !walked.insert(at.clone()) {
+                // A cycle, which only `refs/replace` or grafts can make: git
+                // shows the replaced parents. Nothing on it is a pair.
+                for (revert, _) in chain.drain(..) {
+                    tops.insert(revert, false);
+                }
+                break;
+            }
             match reverts(&at) {
                 Some(reverted) => {
                     chain.push((at, reverted.clone()));

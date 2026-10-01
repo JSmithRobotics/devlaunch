@@ -1266,7 +1266,9 @@ impl<'r> Git<'r> {
     /// The revert rule's other half: a ref on the reverted commit holds the
     /// state with that commit's change in it. `rev-list --all` reads every
     /// ref under `refs/` and the HEAD of every worktree, detached or not, and
-    /// `--no-walk` lists the tips without their history.
+    /// `--no-walk` lists the tips without their history. A linked worktree's
+    /// own `refs/worktree/*` and `refs/bisect/*` are not read, as the count
+    /// does not read them either.
     pub(crate) fn ref_tips(&self, clone: &Path) -> GitAnswer<HashSet<String>> {
         self.about(clone, &["rev-list", "--no-walk", "--all"])
             .map(|stdout| stdout.lines().map(str::to_owned).collect())
