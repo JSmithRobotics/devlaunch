@@ -244,10 +244,23 @@ impl PtyAid {
         self.press("\r");
     }
 
+    /// Wait for the prompt editor. A line that names its workspace reaches it with
+    /// no picker in the way.
+    fn reach_the_editor(&self) {
+        self.expect(BANNER);
+    }
+
+    /// Take the first row of dl's workspace picker, which is how a line with no
+    /// workspace names one. In the scenario that row is [`MAIN`], and only a line
+    /// that took this way in is asked for the agent, the model and the effort.
+    fn pick_the_workspace(&mut self) {
+        self.answer(WORKSPACE_PICKER, "\r");
+    }
+
     /// Take the first row of the agent, model and effort pickers, then wait for
-    /// the prompt editor. On a first run that is claude with every default, which
-    /// is every launch's way in when nothing is chosen.
-    fn reach_the_editor(&mut self) {
+    /// the prompt editor. On a first run that is claude with every default. Only a
+    /// line with no workspace meets these pickers.
+    fn take_the_defaults(&mut self) {
         self.answer(AGENT_PICKER, "\r");
         self.answer(MODEL_PICKER, "\r");
         self.answer(EFFORT_PICKER, "\r");
@@ -428,6 +441,53 @@ fn a_typed_prompt_reaches_the_agent_with_no_shell_in_the_way() {
              --dangerously-skip-permissions --remote-control={MAIN} \
              '\"'\"'fix the \"flaky\" test'\"'\"''"
         )
+    );
+}
+
+#[test]
+fn a_named_workspace_goes_straight_to_the_editor_with_no_picker() {
+    // The pickers belong to a bare `aid`. A line that names its workspace said
+    // what it wanted, so it gets the editor alone and the agent's defaults.
+    let world = World::with(&["--warm"]);
+    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    session.expect(BANNER);
+    for picker in [AGENT_PICKER, MODEL_PICKER, EFFORT_PICKER] {
+        assert!(
+            !session.text().contains(picker),
+            "{picker:?} was drawn for a named workspace; the pty said:\n{}",
+            session.text()
+        );
+    }
+    session.send_line("go");
+    assert_eq!(session.wait(), 0);
+    assert_eq!(
+        &without_session_id(world.devpod_calls().last().expect("a session")),
+        &claude_session("", "go")
+    );
+}
+
+#[test]
+fn a_choice_a_bare_aid_remembered_stays_out_of_aid_workspace() {
+    // The cache remembers what a bare `aid` chose, but only to put it first in
+    // the next picker. A line that names its workspace draws no picker, so it
+    // gets the agent's defaults, not the last choice.
+    let world = World::with(&["--warm"]);
+    let mut first = PtyAid::spawn(&world, &[], &[]);
+    first.pick_the_workspace();
+    first.answer(AGENT_PICKER, "\r");
+    first.answer_typed(MODEL_PICKER, "sonnet");
+    first.answer_typed(EFFORT_PICKER, "low");
+    first.expect(BANNER);
+    first.send_line("one");
+    assert_eq!(first.wait(), 0);
+
+    let mut second = PtyAid::spawn(&world, &[MAIN], &[]);
+    second.reach_the_editor();
+    second.send_line("two");
+    assert_eq!(second.wait(), 0);
+    assert_eq!(
+        &without_session_id(world.devpod_calls().last().expect("a session")),
+        &claude_session("", "two")
     );
 }
 
@@ -727,7 +787,8 @@ fn a_model_that_is_not_listed_is_typed_and_reaches_the_agent() {
     // Nothing lists `claude-opus-5-5`, so the query matches no row and Enter takes
     // the query itself. The effort is picked from the list by filtering to it.
     let world = World::with(&["--warm"]);
-    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    let mut session = PtyAid::spawn(&world, &[], &[]);
+    session.pick_the_workspace();
     session.answer(AGENT_PICKER, "\r");
     session.answer_typed(MODEL_PICKER, "claude-opus-5-5");
     session.answer_typed(EFFORT_PICKER, "max");
@@ -746,7 +807,8 @@ fn the_last_choice_is_the_first_row_of_the_next_launch() {
     // One world, two launches: the second takes the first row of each picker and
     // gets what the first launch chose, because the cache remembered it.
     let world = World::with(&["--warm"]);
-    let mut first = PtyAid::spawn(&world, &[MAIN], &[]);
+    let mut first = PtyAid::spawn(&world, &[], &[]);
+    first.pick_the_workspace();
     first.answer(AGENT_PICKER, "\r");
     first.answer_typed(MODEL_PICKER, "sonnet");
     first.answer_typed(EFFORT_PICKER, "low");
@@ -754,8 +816,9 @@ fn the_last_choice_is_the_first_row_of_the_next_launch() {
     first.send_line("one");
     assert_eq!(first.wait(), 0);
 
-    let mut second = PtyAid::spawn(&world, &[MAIN], &[]);
-    second.reach_the_editor();
+    let mut second = PtyAid::spawn(&world, &[], &[]);
+    second.pick_the_workspace();
+    second.take_the_defaults();
     second.send_line("two");
     assert_eq!(second.wait(), 0);
     assert_eq!(
@@ -767,7 +830,8 @@ fn the_last_choice_is_the_first_row_of_the_next_launch() {
 #[test]
 fn a_setting_a_flag_gave_is_not_asked_for() {
     let world = World::with(&["--warm"]);
-    let mut session = PtyAid::spawn(&world, &["--model", "opus", MAIN], &[]);
+    let mut session = PtyAid::spawn(&world, &["--model", "opus"], &[]);
+    session.pick_the_workspace();
     session.answer(AGENT_PICKER, "\r");
     session.answer(EFFORT_PICKER, "\r");
     session.expect(BANNER);
@@ -789,7 +853,8 @@ fn with_no_terminal_type_the_pickers_are_drawn_as_the_fallback_terminal() {
     // set. The pickers take the workspace picker's fallback and say so, and each
     // one is still answered with Enter.
     let world = World::with(&["--warm"]);
-    let mut session = PtyAid::spawn(&world, &[MAIN], &[("TERM", "")]);
+    let mut session = PtyAid::spawn(&world, &[], &[("TERM", "")]);
+    session.pick_the_workspace();
     session.answer(AGENT_PICKER, "\r");
     session.answer(MODEL_PICKER, "\r");
     session.answer(EFFORT_PICKER, "\r");
@@ -818,12 +883,13 @@ fn a_named_claude_login_is_a_row_of_the_agent_picker_and_reaches_dl() {
     std::fs::write(profiles.join("work/.credentials.json"), "{}").expect("a credential");
     let mut session = PtyAid::spawn(
         &world,
-        &[MAIN],
+        &[],
         &[(
             "DEVLAUNCH_CLAUDE_PROFILES_DIR",
             &profiles.display().to_string(),
         )],
     );
+    session.pick_the_workspace();
     session.answer_typed(AGENT_PICKER, "work");
     session.answer(MODEL_PICKER, "\r");
     session.answer(EFFORT_PICKER, "\r");
@@ -839,7 +905,8 @@ fn another_agent_is_a_row_of_the_same_picker() {
     // codex is chosen by name, and its own pickers follow. Remote Control was only
     // claude's default, so codex starts without it and nothing refuses.
     let world = World::with(&["--warm"]);
-    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    let mut session = PtyAid::spawn(&world, &[], &[]);
+    session.pick_the_workspace();
     session.answer_typed(AGENT_PICKER, "codex");
     session.answer(MODEL_PICKER.replace("claude", "codex").as_str(), "\r");
     session.answer_typed(EFFORT_PICKER.replace("claude", "codex").as_str(), "high");
@@ -863,14 +930,16 @@ fn alt_enter_takes_a_model_that_is_a_prefix_of_a_listed_one() {
     let world = World::with(&["--warm"]);
     let codex_model = MODEL_PICKER.replace("claude", "codex");
     let codex_effort = EFFORT_PICKER.replace("claude", "codex");
-    let mut first = PtyAid::spawn(&world, &["--codex", MAIN], &[]);
+    let mut first = PtyAid::spawn(&world, &["--codex"], &[]);
+    first.pick_the_workspace();
     first.answer_typed(&codex_model, "gpt-5.5-codex");
     first.answer(&codex_effort, "\r");
     first.expect(BANNER);
     first.send_line("one");
     assert_eq!(first.wait(), 0);
 
-    let mut second = PtyAid::spawn(&world, &["--codex", MAIN], &[]);
+    let mut second = PtyAid::spawn(&world, &["--codex"], &[]);
+    second.pick_the_workspace();
     second.answer(&codex_model, "gpt-5.5");
     std::thread::sleep(Duration::from_millis(400));
     second.press("\x1b\r");
@@ -886,7 +955,8 @@ fn alt_enter_takes_a_model_that_is_a_prefix_of_a_listed_one() {
 #[test]
 fn a_typed_agent_with_one_login_is_not_asked_which_agent() {
     let world = World::with(&["--warm"]);
-    let mut session = PtyAid::spawn(&world, &["--claude", MAIN], &[]);
+    let mut session = PtyAid::spawn(&world, &["--claude"], &[]);
+    session.pick_the_workspace();
     session.answer(MODEL_PICKER, "\r");
     session.answer(EFFORT_PICKER, "\r");
     session.expect(BANNER);
@@ -897,10 +967,12 @@ fn a_typed_agent_with_one_login_is_not_asked_which_agent() {
 
 #[test]
 fn esc_in_a_picker_stops_the_boot_and_launches_nothing() {
-    // The same world as the Ctrl-C test above: an `up` that blocks with the token
-    // staged. In a picker Ctrl-C and Esc are keys, not signals, so nothing reaches
-    // the boot unless aid sends it. The cleanup is the proof that it did.
-    let world = World::with(&["--gh"]);
+    // The same blocking `up` as the Ctrl-C test above, with the token staged. In a
+    // picker Ctrl-C and Esc are keys, not signals, so nothing reaches the boot
+    // unless aid sends it. The cleanup is the proof that it did. Only a line with
+    // no workspace gets the pickers, so the workspace is the stopped one the
+    // workspace picker lists, which the boot has to `up`.
+    let world = World::with(&["--gh", "--stopped"]);
     let devpod = world.root.join("bin/devpod");
     let original = std::fs::read_to_string(&devpod).expect("the scenario's devpod");
     let delegate = original
@@ -927,13 +999,14 @@ fn esc_in_a_picker_stops_the_boot_and_launches_nothing() {
 
     let mut session = PtyAid::spawn(
         &world,
-        &["blooop/devlaunch@cold"],
+        &[],
         &[
             ("TMPDIR", &tmpdir.display().to_string()),
             ("DL_UP_PID", &up_pid.display().to_string()),
             ("DL_UP_STARTED", &up_started.display().to_string()),
         ],
     );
+    session.pick_the_workspace();
     session.answer(AGENT_PICKER, "\r");
     session.answer(MODEL_PICKER, "");
     assert!(
@@ -990,7 +1063,8 @@ fn the_agent_chosen_last_is_the_first_row_of_the_next_launch() {
     // The first run lists claude first, so an Enter on the second launch's agent
     // picker takes codex only if the first launch's choice moved it up.
     let world = World::with(&["--warm"]);
-    let mut first = PtyAid::spawn(&world, &[MAIN], &[]);
+    let mut first = PtyAid::spawn(&world, &[], &[]);
+    first.pick_the_workspace();
     first.answer_typed(AGENT_PICKER, "codex");
     first.answer("Model for codex", "\r");
     first.answer("Effort for codex", "\r");
@@ -998,7 +1072,8 @@ fn the_agent_chosen_last_is_the_first_row_of_the_next_launch() {
     first.send_line("one");
     assert_eq!(first.wait(), 0);
 
-    let mut second = PtyAid::spawn(&world, &[MAIN], &[]);
+    let mut second = PtyAid::spawn(&world, &[], &[]);
+    second.pick_the_workspace();
     second.answer(AGENT_PICKER, "\r");
     // Waited for by the words every agent's model picker shares, so a claude row
     // fails here at once rather than at the deadline.
@@ -1022,7 +1097,8 @@ fn the_agent_chosen_last_is_the_first_row_of_the_next_launch() {
 #[test]
 fn a_typed_agent_that_is_no_row_is_asked_for_again() {
     let world = World::with(&["--warm"]);
-    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    let mut session = PtyAid::spawn(&world, &[], &[]);
+    session.pick_the_workspace();
     session.answer_typed(AGENT_PICKER, "nonesuch");
     // `answer` counts the header, so it waits for the picker drawn a second time.
     session.answer(AGENT_PICKER, "\x1b");
@@ -1044,7 +1120,8 @@ fn a_typed_agent_that_is_no_row_is_asked_for_again() {
 #[test]
 fn esc_at_the_agent_picker_launches_nothing() {
     let world = World::with(&["--warm"]);
-    let mut session = PtyAid::spawn(&world, &[MAIN], &[]);
+    let mut session = PtyAid::spawn(&world, &[], &[]);
+    session.pick_the_workspace();
     session.answer(AGENT_PICKER, "\x1b");
     session.expect("cancelled");
     let seen = Arc::clone(&session.seen);
@@ -1065,15 +1142,17 @@ fn esc_at_the_agent_picker_launches_nothing() {
 fn a_setting_a_flag_gave_is_the_first_row_of_the_next_launch() {
     // Remembered as a choice although no picker asked for it.
     let world = World::with(&["--warm"]);
-    let mut first = PtyAid::spawn(&world, &["--model", "opus", MAIN], &[]);
+    let mut first = PtyAid::spawn(&world, &["--model", "opus"], &[]);
+    first.pick_the_workspace();
     first.answer(AGENT_PICKER, "\r");
     first.answer(EFFORT_PICKER, "\r");
     first.expect(BANNER);
     first.send_line("one");
     assert_eq!(first.wait(), 0);
 
-    let mut second = PtyAid::spawn(&world, &[MAIN], &[]);
-    second.reach_the_editor();
+    let mut second = PtyAid::spawn(&world, &[], &[]);
+    second.pick_the_workspace();
+    second.take_the_defaults();
     second.send_line("two");
     assert_eq!(second.wait(), 0);
     assert_eq!(
@@ -1186,7 +1265,7 @@ fn a_bare_aid_picks_a_workspace_as_a_bare_dl_does() {
     let mut session = PtyAid::spawn(&world, &[], &[]);
     session.answer(WORKSPACE_PICKER, "\r");
     session.expect(&format!("-> {MAIN}"));
-    session.reach_the_editor();
+    session.take_the_defaults();
     session.send_line("go");
     assert_eq!(session.wait(), 0);
     assert_eq!(

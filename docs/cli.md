@@ -759,8 +759,14 @@ Remote Control. A value that is missing, empty or starts with `-` is refused too
 
 ## The pickers ahead of the prompt
 
-`aid <workspace>` with no prompt on a terminal asks for up to three settings before
-it opens the prompt editor. The workspace boots in the background the whole time.
+`aid` with no workspace and no prompt on a terminal asks for up to three settings
+after the workspace picker and before it opens the prompt editor. The workspace
+boots in the background the whole time. A line of flags with no workspace, such as
+`aid --codex`, is asked the same way.
+
+`aid <workspace>` asks for none of them. A line that names its workspace said what
+it wanted, so it goes straight to the prompt editor, and every setting its flags
+left open stays at the agent's default.
 
 1. **The agent**, with one row per Claude login and one row for each other agent:
 
@@ -797,7 +803,7 @@ Where the name is part of a listed row, such as `gpt-5.5` beside `gpt-5.5-codex`
 Alt-Enter uses the text as typed instead of the row.
 
 A setting that a flag on the line already gave is not asked for, so
-`aid --model opus --effort max <ws>` goes straight to the prompt. A line with a
+`aid --model opus --effort max` asks for the workspace and the agent only. A line with a
 prompt on it asks for nothing, as before.
 
 **Esc cancels the launch.** In a picker Esc and Ctrl-C are keys, not signals, so

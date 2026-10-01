@@ -150,14 +150,22 @@ fn run(argv: &[String]) -> i32 {
     // id is added to the end of the line, after the leading flags, which is where a
     // typed spec goes, and from here on the line is that longer one, because the
     // agent picker parses it again.
+    //
+    // Only that last pick, a workspace for a line that named none, earns the agent,
+    // model and effort pickers: a line that names its workspace goes straight to
+    // the editor.
     let with_pick: Vec<String>;
-    let (argv, parsed) = match rewrite::parse_aid_args(argv, environment) {
-        Ok(rewrite::Line::Ready(parsed)) => (argv, parsed),
+    let (argv, parsed, pickers) = match rewrite::parse_aid_args(argv, environment) {
+        Ok(rewrite::Line::Ready(parsed)) => (argv, parsed, interactive::Pickers::Skip),
         // `aid resume` with no workspace. The pick comes before everything below,
         // which is all about one named workspace, so from here on this line is an
         // `aid resume <id>` like any other.
         Ok(rewrite::Line::Unpicked(unpicked)) => match dl::pick_workspace() {
-            Ok(workspace_id) => (argv, unpicked.picked(workspace_id)),
+            Ok(workspace_id) => (
+                argv,
+                unpicked.picked(workspace_id),
+                interactive::Pickers::Skip,
+            ),
             Err(code) => return code,
         },
         Err(UsageError::NoWorkspace)
@@ -169,7 +177,9 @@ fn run(argv: &[String]) -> i32 {
             };
             with_pick = argv.iter().cloned().chain([spec]).collect();
             match rewrite::parse_aid_args(&with_pick, environment) {
-                Ok(rewrite::Line::Ready(parsed)) => (with_pick.as_slice(), parsed),
+                Ok(rewrite::Line::Ready(parsed)) => {
+                    (with_pick.as_slice(), parsed, interactive::Pickers::Ask)
+                }
                 // A line that names its workspace is never unpicked.
                 Ok(rewrite::Line::Unpicked(_)) => {
                     eprintln!("{}", refusal(&UsageError::NoWorkspace));
@@ -199,7 +209,7 @@ fn run(argv: &[String]) -> i32 {
         Ok(spec) => parsed.with_spec(spec),
         Err(code) => return code,
     };
-    let (parsed, boot) = match interactive::collect_prompt(parsed, argv, environment) {
+    let (parsed, boot) = match interactive::collect_prompt(parsed, argv, environment, pickers) {
         interactive::Collected::Launch(parsed, boot) => (*parsed, boot),
         // 130, the code a Ctrl-C at the prompt editor ends with, because a cancel
         // in a picker is the same request made with a different key.
@@ -408,14 +418,15 @@ resume words: claude and codex open their session picker, and gemini
 reopens its latest session.
 
 With no workspace on a terminal, aid lets you pick one of your workspaces, as
-dl does.
+dl does. Then it asks for each setting the line left open: the agent (one row
+per Claude login, then each other agent), the model and the effort. Each
+picker lists your recent choices first, so one Enter repeats the last launch.
+Type a name that is not listed to use it. Alt-Enter uses the text as typed
+where it is part of a listed name. A line that names its workspace asks for
+none of these, and the agent starts on its defaults and the line's flags.
 
 With no prompt on a terminal, aid boots the workspace in the background and
-asks for the prompt while it does. First it asks for each setting the line
-left open: the agent (one row per Claude login, then each other agent), the
-model and the effort. Each picker lists your recent choices first, so one
-Enter repeats the last launch. Type a name that is not listed to use it.
-Alt-Enter uses the text as typed where it is part of a listed name.
+asks for the prompt while it does.
 
 Then type the prompt free of shell quoting and press Enter to launch. A paste
 keeps its line breaks, and Alt-Enter or Ctrl-J adds a line. An empty Enter
