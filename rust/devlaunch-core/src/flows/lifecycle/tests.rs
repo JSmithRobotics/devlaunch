@@ -2062,6 +2062,145 @@ fn a_delete_blocked_behind_an_orphan_sweeps_it_and_reports_the_sweep() {
     );
 }
 
+/// A runner that answers `ps` with `tables` in turn, the last one for every read
+/// after it, and hands every other spawn to `rest`. For a sweep whose second
+/// reading of the host is not its first.
+struct TablesInTurn<'a> {
+    rest: &'a dyn Runner,
+    tables: Vec<FakeRunner>,
+    read: std::sync::Mutex<usize>,
+}
+
+impl<'a> TablesInTurn<'a> {
+    fn new(rest: &'a dyn Runner, tables: &[&str]) -> Self {
+        assert!(!tables.is_empty(), "at least one table to answer with");
+        Self {
+            rest,
+            tables: tables
+                .iter()
+                .map(|table| FakeRunner::new().with_script(["ps"], Response::stdout(*table)))
+                .collect(),
+            read: std::sync::Mutex::new(0),
+        }
+    }
+
+    fn tables_read(&self) -> usize {
+        *self
+            .read
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Runner for TablesInTurn<'_> {
+    fn capture(&self, spec: &SpawnSpec) -> Outcome<CapturedText> {
+        if spec.invocation.program != "ps" {
+            return self.rest.capture(spec);
+        }
+        let mut read = self
+            .read
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let table = &self.tables[(*read).min(self.tables.len() - 1)];
+        *read += 1;
+        table.capture(spec)
+    }
+
+    fn passthrough(&self, spec: &SpawnSpec) -> Outcome {
+        self.rest.passthrough(spec)
+    }
+
+    fn session(&self, spec: &SpawnSpec, on_stderr_line: &mut dyn FnMut(&str)) -> Outcome {
+        self.rest.session(spec, on_stderr_line)
+    }
+
+    fn watched(&self, spec: &SpawnSpec, on_line: &mut dyn FnMut(&str)) -> Outcome {
+        self.rest.watched(spec, on_line)
+    }
+
+    fn detach(&self, what: &RawInvocation) -> DetachOutcome {
+        self.rest.detach(what)
+    }
+}
+
+/// What one blocked delete did, beyond deleting.
+struct DeleteBlocked {
+    said: Vec<DeleteStalled>,
+    /// Every `kill` the delete ran, in order.
+    signals: Vec<Vec<String>>,
+    /// How many times it read the host's process table.
+    tables_read: usize,
+}
+
+/// One delete of `myws` that devpod parks on its workspace lock for `lines` of
+/// its lock line, against a host whose process table reads `tables` in turn.
+fn delete_blocked_for_lines(tables: &[&str], lines: usize) -> DeleteBlocked {
+    let world = a_stopping_world();
+    world.devpod.fake.script(
+        ["devpod", "delete"],
+        Response::exited(0).and_stdout(
+            "info Trying to lock workspace, seems like another process is running that \
+             blocks this workspace machine_client.go:311\n"
+                .repeat(lines),
+        ),
+    );
+    let runner = TablesInTurn::new(&world.devpod, tables);
+    let mut world_cache = World::empty();
+    let clones = clones_for(&world_cache.repos_dir, &world_cache.devpod);
+    let mut context = CommandContext::new(&runner);
+    let mut refresh = Refresh::new(&world.updater, &world.cache_path);
+    let mut said = Vec::new();
+
+    let copies = world_cache.copies();
+    workspace_delete(
+        &mut context,
+        &mut refresh,
+        &clones,
+        &mut world_cache.storage,
+        None,
+        &copies,
+        "myws",
+        Insistence::NotInsisted,
+        Persistence::Ordinary,
+        &mut |stalled| said.push(stalled),
+        &mut ignoring(),
+    )
+    .expect("devpod ran");
+
+    DeleteBlocked {
+        said,
+        signals: world.devpod.fake.args_to("kill"),
+        tables_read: runner.tables_read(),
+    }
+}
+
+/// Somebody else's live `dl`, building `myws` through its own `devpod up`.
+const A_LIVE_BUILD_HOLDING_MYWS: &str =
+    "    1       0 /sbin/init\n 5000       1 dl myws\n 5001    5000 devpod up myws\n";
+
+/// A wait that goes on is swept again, once a minute of devpod's lines, as a
+/// launch's is. The repeat says nothing when it took nothing.
+#[test]
+fn a_delete_that_stays_blocked_sweeps_again_and_repeats_no_finding() {
+    let lines = 1 + usize::try_from(devpod::SWEEP_AGAIN_EVERY).expect("a small count");
+
+    let blocked = delete_blocked_for_lines(&[A_LIVE_BUILD_HOLDING_MYWS], lines);
+
+    assert_eq!(
+        blocked.tables_read, 2,
+        "the delete swept on the first lock line and once more a minute later",
+    );
+    assert!(blocked.signals.is_empty(), "{:?}", blocked.signals);
+    assert!(
+        matches!(
+            blocked.said.as_slice(),
+            [DeleteStalled::OnTheLock, DeleteStalled::Swept(_)]
+        ),
+        "a repeat that took nothing is not said: {:?}",
+        blocked.said,
+    );
+}
+
 /// The deadline firing is a devpod that *ran* — for a minute, and was then
 /// SIGKILLed by the runner — so it may have got far enough to unlink the
 /// workspace record before it went. The two lines that answer for that are
