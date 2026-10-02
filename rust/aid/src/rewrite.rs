@@ -1000,8 +1000,35 @@ fn peel_suffix(argv: &[String]) -> Option<Suffix<'_>> {
             || NO_REMOTE_CONTROL_FLAGS.contains(&word)
     };
     let mut at = argv.len();
-    while at > 0 && is_suffix(argv[at - 1].as_str()) {
-        at -= 1;
+    loop {
+        if at > 0 && is_suffix(argv[at - 1].as_str()) {
+            at -= 1;
+            continue;
+        }
+        // A dl option that takes a value, typed at the END of the line, as a
+        // `<flag> <value>` pair. `--rm` is already appendable and this is the
+        // same request written the other way round, but it could not be peeled
+        // word-at-a-time: the scan walks backwards and stops on the VALUE, which
+        // is not a flag and never will be.
+        //
+        // Measured, and the reason this exists: `aid <ws> --claude-profile bear`
+        // put `--claude-profile bear` into the prompt as a single argument and
+        // handed it to the agent, which answered `unknown option
+        // '--claude-profile bear'`. The flag was accepted in one position and
+        // silently became prompt text in the other.
+        //
+        // Bounded like the rest: only at the very end, only the exact words in
+        // DL_VALUE_OPTIONS, and only when the value is not itself a flag -- so
+        // `aid <ws> explain the --claude-profile flag` keeps its prompt, since
+        // `flag` follows and the pair is not at the end.
+        if at >= 2
+            && DL_VALUE_OPTIONS.contains(&argv[at - 2].as_str())
+            && !argv[at - 1].starts_with('-')
+        {
+            at -= 2;
+            continue;
+        }
+        break;
     }
     let run = &argv[at..];
     let names = |list: &[&str]| run.iter().any(|word| list.contains(&word.as_str()));
@@ -1011,6 +1038,7 @@ fn peel_suffix(argv: &[String]) -> Option<Suffix<'_>> {
         && !names(SUFFIX_RETIRED)
         && !names(REMOTE_CONTROL_FLAGS)
         && !names(NO_REMOTE_CONTROL_FLAGS)
+        && !names(DL_VALUE_OPTIONS)
     {
         return None;
     }
@@ -1715,6 +1743,65 @@ mod tests {
         assert_eq!(parsed.dl_options, ["--devcontainer", "robot"]);
         assert_eq!(parsed.spec, "owner/repo");
         assert_eq!(prompt(&parsed), "hi");
+    }
+
+    /// The same for `--claude-profile`, which had the constant and no test.
+    ///
+    /// Worth its own case rather than trusting the shared list, because the way
+    /// this breaks is silent and specific: drop it from DL_VALUE_OPTIONS and the
+    /// line still runs, but "bear" is read as the first word of the PROMPT and
+    /// the workspace opens under whichever login dl would have picked anyway. No
+    /// error, an agent on the wrong account, and the evidence is a prompt that
+    /// starts with a profile name.
+    #[test]
+    fn a_claude_profile_and_its_value_are_dls_and_not_the_prompt() {
+        let parsed = parsed(&["--claude-profile", "bear", "owner/repo", "fix it"]);
+
+        assert_eq!(parsed.dl_options, ["--claude-profile", "bear"]);
+        assert_eq!(parsed.spec, "owner/repo");
+        assert_eq!(prompt(&parsed), "fix it");
+    }
+
+    /// The line the operator actually typed, which used to become prompt text.
+    ///
+    /// MEASURED on a live host: `aid <ws> --claude-profile bear` reached the agent
+    /// as the single argument `--claude-profile bear` and died with `unknown
+    /// option '--claude-profile bear'`. The flag worked ahead of the spec and
+    /// silently did not behind it, which is the worst version of both.
+    #[test]
+    fn a_trailing_claude_profile_is_dls_and_not_the_prompt() {
+        let parsed = parsed(&["owner/repo", "--claude-profile", "bear"]);
+
+        assert_eq!(parsed.spec, "owner/repo");
+        assert!(
+            parsed.spec_options.contains(&"--claude-profile".to_owned()),
+            "{:?}",
+            parsed.spec_options
+        );
+        assert!(
+            parsed.spec_options.contains(&"bear".to_owned()),
+            "{:?}",
+            parsed.spec_options
+        );
+        assert_eq!(prompt(&parsed), "");
+    }
+
+    /// A prompt that merely mentions the flag keeps it.
+    ///
+    /// The pair is peeled only at the very END of the line, so a sentence that
+    /// goes on afterwards is untouched -- the same bound `--rm` has always had.
+    #[test]
+    fn a_prompt_that_mentions_claude_profile_is_still_the_prompt() {
+        let parsed = parsed(&[
+            "owner/repo",
+            "explain",
+            "--claude-profile",
+            "bear",
+            "please",
+        ]);
+
+        assert_eq!(parsed.spec, "owner/repo");
+        assert_eq!(prompt(&parsed), "explain --claude-profile bear please");
     }
 
     #[test]
