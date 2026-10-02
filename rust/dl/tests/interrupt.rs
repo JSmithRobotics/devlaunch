@@ -59,8 +59,8 @@ impl World {
             String::from_utf8_lossy(&built.stderr)
         );
 
-        // Replace the fake `devpod`: `up` records its own pid and then blocks,
-        // every other subcommand delegates to the shim the scenario installed.
+        // Replace the fake `devpod`: `up` records its own pid, forks a child that
+        // records its pid, and blocks on it; every other subcommand delegates to the shim the scenario installed.
         // The original is `#!/bin/sh` + one `exec <python> <shim> "$@"` line, and
         // the delegate reuses that exact line so `status`/`list`/`ssh` behave as
         // before.
@@ -74,8 +74,10 @@ impl World {
             "#!/bin/sh\n\
              if [ \"$1\" = \"up\" ]; then\n\
              \x20 echo \"$$\" > \"$DL_UP_PID\"\n\
+             \x20 sleep 30 &\n\
+             \x20 echo \"$!\" > \"$DL_UP_CHILD_PID\"\n\
              \x20 : > \"$DL_UP_STARTED\"\n\
-             \x20 exec sleep 30\n\
+             \x20 wait\n\
              fi\n\
              {delegate}\n"
         );
@@ -147,7 +149,9 @@ struct Aftermath {
     code: Option<i32>,
     /// Whether the plaintext GitHub-token file is still on disk.
     token_left: bool,
-    /// Whether the `devpod up` child outlived the `dl` that started it.
+    /// Whether the `devpod up` child, or the child it forked, outlived the `dl`
+    /// that started it. The forked one is what pins the drain's group-wide
+    /// SIGKILL: unlike the `up`, it does not die with `dl` by pdeathsig.
     up_alive: bool,
 }
 
@@ -159,6 +163,7 @@ struct MidUp {
     child: std::process::Child,
     tmpdir: PathBuf,
     up: String,
+    up_child: String,
 }
 
 impl MidUp {
@@ -195,6 +200,7 @@ impl MidUp {
         let tmpdir = world.path("tmp");
         let up_pid = world.path("up.pid");
         let up_started = world.path("up.started");
+        let up_child_pid = world.path("up-child.pid");
 
         let child = command
             .env_clear()
@@ -213,6 +219,7 @@ impl MidUp {
             .env("TMPDIR", tmpdir.display().to_string())
             .env("DL_UP_PID", up_pid.display().to_string())
             .env("DL_UP_STARTED", up_started.display().to_string())
+            .env("DL_UP_CHILD_PID", up_child_pid.display().to_string())
             .env("GIT_SSH_COMMAND", "false")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -231,11 +238,13 @@ impl MidUp {
             "the token is on disk before the signal"
         );
         let up = std::fs::read_to_string(&up_pid).expect("the up pid");
+        let up_child = std::fs::read_to_string(&up_child_pid).expect("the up's child's pid");
         MidUp {
             _world: world,
             child,
             tmpdir,
             up: up.trim().to_string(),
+            up_child: up_child.trim().to_string(),
         }
     }
 
@@ -267,7 +276,7 @@ impl MidUp {
         Aftermath {
             code: status.code(),
             token_left: token_file(&self.tmpdir).is_some(),
-            up_alive: !is_dead(&self.up),
+            up_alive: !is_dead(&self.up) || !is_dead(&self.up_child),
         }
     }
 }
@@ -328,7 +337,8 @@ const INHERITED_IGNORE: [(&str, Ignored); 3] = [
     // `trap '' TERM` is inherited by everything `dl` spawns, so the drain's
     // SIGTERM does not reach the build here. This row's child used to outlive the
     // Ctrl-C for that reason. The drain now SIGKILLs the group after a short wait,
-    // so the build goes either way.
+    // so the build goes either way. The `up`'s forked child is what proves it:
+    // pdeathsig ends the `up` itself when `dl` exits, but not a child it forked.
     ("TERM", Ignored::Honoured),
     ("HUP", Ignored::Honoured),
 ];
