@@ -297,7 +297,7 @@ might still be wanted, and `kill` when it is stuck and finished with. An `rm` th
 get the workspace's lock for now says so while it waits, then clears every holder that nothing
 is waiting on and carries on. So does a launch: `dl <ws>`, `up`, `restart`, `recreate`, `reset`,
 `code` and `dotfiles` all sweep the lock while their `devpod up` sits behind it. Only a holder
-somebody is still waiting on is left, and the line names the `kill` that ends it. See
+somebody is still waiting on is left, and the line says what is left to do. See
 [docs/cli.md](docs/cli.md) for the details.
 
 [docs/cli.md](docs/cli.md) has the rest: what the delete asks of devpod, what stands it down,

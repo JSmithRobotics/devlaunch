@@ -940,7 +940,9 @@ or on another host, can still wedge the workspace, and the sweep below is for th
 dl watches for that line. **An `rm`, `rme` or `--rm` behind the lock does not wait
 for you either.** It says devpod is waiting, then runs the same sweep a launch runs,
 described next, and the delete goes on once the holder lets go. A holder that
-somebody is still waiting on is spared, and the line names the `kill` that ends it.
+somebody is still waiting on is spared. When that is a live build, which `kill`
+spares too, the line says to stop it in its own terminal, and the delete goes on
+once it lets go.
 
 **A launch behind the lock does not wait for you.** It says devpod is waiting and
 that the wait has no deadline, and then it clears the lock itself: the same sweep

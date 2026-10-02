@@ -1991,7 +1991,7 @@ fn swept_the_lock(workspace_id: &str, released: &Released, waiter: Waiter<'_>) -
             "dl: cleared {} from {workspace_id}, and {}, so this {noun} is still waiting.{}",
             named(cleared.iter().copied().map(cleared_line)),
             what_is_left(&still_held),
-            what_is_left_to_do(workspace_id, &still_held),
+            what_is_left_to_do(workspace_id, &still_held, waiter),
         ),
         // Nothing was dl's to take. Which of the three sentences is a match on
         // `StillHeld` rather than a fold to `bool` over the holders: a spared
@@ -2000,7 +2000,7 @@ fn swept_the_lock(workspace_id: &str, released: &Released, waiter: Waiter<'_>) -
         Freed::Nothing { still_held } => format!(
             "dl: {workspace_id} {}. This {noun} is still waiting.{}",
             what_is_left(&still_held),
-            what_is_left_to_do(workspace_id, &still_held),
+            what_is_left_to_do(workspace_id, &still_held, waiter),
         ),
         // The sweep looked and found no holder. A finding rather than a failure,
         // and the one that says the wait is not an orphan and not dl's to clear.
@@ -2064,17 +2064,29 @@ fn what_is_left(still_held: &StillHeld<'_>) -> String {
 /// waiting with no command at all.
 ///
 /// The two arms need different answers, which is why it is not one sentence.
-/// Against a spared build, `kill` works and the sentence has to say what it
-/// costs, because the build is somebody else's and `kill` deletes the workspace
-/// under it. Against an orphan that sat through SIGKILL, `kill` would fail
+/// Against a spared build, a launch is told the `kill` and what it costs, because
+/// the build is somebody else's and `kill` deletes the workspace under it. A
+/// delete is not: `kill` spares that same build and then withholds its own
+/// delete, so the only way past it is the build ending, from the terminal of
+/// whoever started it, after which this delete goes on. Against an orphan that sat through SIGKILL, `kill` would fail
 /// exactly as this sweep just did, for the same reason -- it is another user's
 /// and dl has no privilege to add -- so naming it would send the reader round
 /// the same loop.
-fn what_is_left_to_do(workspace_id: &str, still_held: &StillHeld<'_>) -> String {
-    let end_the_build = format!(
-        " If that build is not wanted, 'dl {workspace_id} kill' ends it and deletes the \
-                 workspace."
-    );
+fn what_is_left_to_do(
+    workspace_id: &str,
+    still_held: &StillHeld<'_>,
+    waiter: Waiter<'_>,
+) -> String {
+    let end_the_build = match waiter {
+        Waiter::Launch => format!(
+            " If that build is not wanted, 'dl {workspace_id} kill' ends it and deletes the \
+                     workspace."
+        ),
+        Waiter::Delete(word) => format!(
+            " If that build is not wanted, stop it in its own terminal, and this {word} deletes \
+             the workspace once it lets go."
+        ),
+    };
     let not_ours = " Only whoever owns that process, or root, can end it.";
     match still_held {
         StillHeld::Attended(_) => end_the_build,
@@ -5304,6 +5316,43 @@ mod tests {
             line.contains("deletes the workspace"),
             "and what it costs, because this arm is somebody else's build: {line}"
         );
+    }
+
+    /// A delete behind somebody's live build has no `kill` to be sent to: `kill`
+    /// spares that build exactly as this sweep did, then withholds its own delete
+    /// (`kill_delete_withheld`). The only way past it is the build ending, which
+    /// whoever started it does from their own terminal.
+    #[test]
+    fn a_delete_behind_a_spared_build_does_not_name_a_kill_that_cannot_end_it() {
+        for word in ["rm", "rme", "--rm"] {
+            let line = delete_swept(
+                "my-ws",
+                word,
+                &Released::Swept(Release {
+                    signalled: Vec::new(),
+                    holding: Holding::StillHeld {
+                        holders: vec![Standing::ABuild(HostProcess {
+                            pid: 5001,
+                            parent: 5000,
+                            command: "devpod up my-ws".to_owned(),
+                        })],
+                    },
+                }),
+            );
+
+            assert!(
+                !line.contains("kill"),
+                "kill spares a live build and keeps its delete back: {line}"
+            );
+            assert!(
+                line.contains("in its own terminal"),
+                "the reader is told where that build can be stopped: {line}"
+            );
+            assert!(
+                line.contains(&format!("this {word} deletes the workspace")),
+                "and that this {word} then goes on with the delete: {line}"
+            );
+        }
     }
 
     /// An orphan dl signalled and could not stop is almost always another user's,
