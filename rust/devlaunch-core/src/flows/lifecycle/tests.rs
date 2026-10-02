@@ -2201,6 +2201,46 @@ fn a_delete_that_stays_blocked_sweeps_again_and_repeats_no_finding() {
     );
 }
 
+/// A holder the first sweep spared, because a live `dl` was behind it, is an
+/// orphan once that `dl` dies. The later sweep that takes it is said, because
+/// this time the sweep did something.
+#[test]
+fn a_delete_whose_spared_holder_is_orphaned_later_reports_the_later_sweep() {
+    let lines = 1 + usize::try_from(devpod::SWEEP_AGAIN_EVERY).expect("a small count");
+
+    let blocked = delete_blocked_for_lines(
+        &[
+            A_LIVE_BUILD_HOLDING_MYWS,
+            "    1       0 /sbin/init\n 5001       1 devpod up myws\n",
+            "    1       0 /sbin/init\n",
+        ],
+        lines,
+    );
+
+    assert_eq!(
+        blocked.signals.first().map(Vec::as_slice),
+        Some(["-TERM".to_owned(), "5001".to_owned()].as_slice()),
+        "the second sweep signalled the holder its `dl` left behind: {:?}",
+        blocked.signals,
+    );
+    let [
+        DeleteStalled::OnTheLock,
+        DeleteStalled::Swept(kill::Released::Swept(spared)),
+        DeleteStalled::Swept(kill::Released::Swept(taken)),
+    ] = blocked.said.as_slice()
+    else {
+        panic!(
+            "the block, its first sweep, then the sweep that took something: {:?}",
+            blocked.said
+        );
+    };
+    assert!(spared.signalled.is_empty(), "{spared:?}");
+    assert!(
+        matches!(taken.freed(), kill::Freed::Entirely { .. }),
+        "{taken:?}"
+    );
+}
+
 /// The deadline firing is a devpod that *ran* — for a minute, and was then
 /// SIGKILLed by the runner — so it may have got far enough to unlink the
 /// workspace record before it went. The two lines that answer for that are

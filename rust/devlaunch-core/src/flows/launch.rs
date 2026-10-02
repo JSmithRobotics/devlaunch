@@ -6577,15 +6577,18 @@ mod tests {
     /// The same, with devpod saying its lock line `lines` times before it gets
     /// the lock.
     fn up_blocked_for_lines(table: &str, lines: usize) -> Blocked {
+        up_blocked_through(&[table], lines)
+    }
+
+    /// The same, against a host whose process table reads `tables` in turn.
+    fn up_blocked_through(tables: &[&str], lines: usize) -> Blocked {
         let scene = Scene::new();
         scene.runner.script(
             ["devpod", "up"],
             Response::exited(0).and_stdout(BLOCKED_ON_THE_LOCK.repeat(lines)),
         );
-        scene
-            .runner
-            .script(["ps"], Response::stdout(table.to_owned()));
-        let mut context = CommandContext::new(&scene.runner);
+        let runner = TablesInTurn::new(&scene.runner, tables);
+        let mut context = CommandContext::new(&runner);
         let token = HostToken::new();
         let request = UpRequest::new(
             "owner/repo",
@@ -6610,7 +6613,61 @@ mod tests {
         Blocked {
             notices,
             signals: scene.runner.args_to("kill"),
-            tables_read: scene.runner.calls_to("ps").len(),
+            tables_read: runner.tables_read(),
+        }
+    }
+
+    /// A runner that answers `ps` with `tables` in turn, the last one for every
+    /// read after it, and hands every other spawn to `rest`.
+    struct TablesInTurn<'a> {
+        rest: &'a FakeRunner,
+        tables: Vec<FakeRunner>,
+        read: Mutex<usize>,
+    }
+
+    impl<'a> TablesInTurn<'a> {
+        fn new(rest: &'a FakeRunner, tables: &[&str]) -> Self {
+            assert!(!tables.is_empty(), "at least one table to answer with");
+            Self {
+                rest,
+                tables: tables
+                    .iter()
+                    .map(|table| FakeRunner::new().with_script(["ps"], Response::stdout(*table)))
+                    .collect(),
+                read: Mutex::new(0),
+            }
+        }
+
+        fn tables_read(&self) -> usize {
+            *self.read.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+    }
+
+    impl Runner for TablesInTurn<'_> {
+        fn capture(&self, spec: &SpawnSpec) -> Outcome<CapturedText> {
+            if spec.program() != "ps" {
+                return self.rest.capture(spec);
+            }
+            let mut read = self.read.lock().unwrap_or_else(PoisonError::into_inner);
+            let table = &self.tables[(*read).min(self.tables.len() - 1)];
+            *read += 1;
+            table.capture(spec)
+        }
+
+        fn passthrough(&self, spec: &SpawnSpec) -> Outcome {
+            self.rest.passthrough(spec)
+        }
+
+        fn session(&self, spec: &SpawnSpec, on_stderr_line: &mut dyn FnMut(&str)) -> Outcome {
+            self.rest.session(spec, on_stderr_line)
+        }
+
+        fn watched(&self, spec: &SpawnSpec, on_line: &mut dyn FnMut(&str)) -> Outcome {
+            self.rest.watched(spec, on_line)
+        }
+
+        fn detach(&self, what: &Invocation) -> DetachOutcome {
+            self.rest.detach(what)
         }
     }
 
@@ -6750,6 +6807,43 @@ mod tests {
             1,
             "a repeat that took nothing is not said: {:?}",
             blocked.notices,
+        );
+    }
+
+    /// A holder the first sweep spared, because a live `dl` was behind it, is an
+    /// orphan once that `dl` dies. The later sweep that takes it is said, because
+    /// this time the sweep did something.
+    #[test]
+    fn an_up_whose_spared_holder_is_orphaned_later_reports_the_later_sweep() {
+        let lines = 1 + usize::try_from(devpod::SWEEP_AGAIN_EVERY).expect("a small count");
+
+        let blocked = up_blocked_through(
+            &[
+                "    1       0 /sbin/init\n 5000       1 dl myws\n 5001    5000 devpod up myws\n",
+                "    1       0 /sbin/init\n 5001       1 devpod up myws\n",
+                "    1       0 /sbin/init\n",
+            ],
+            lines,
+        );
+
+        assert_eq!(
+            blocked.signals.first().map(Vec::as_slice),
+            Some(["-TERM".to_owned(), "5001".to_owned()].as_slice()),
+            "the second sweep signalled the holder its `dl` left behind: {:?}",
+            blocked.signals,
+        );
+        let reported = releases(&blocked.notices);
+        let [kill::Released::Swept(spared), kill::Released::Swept(taken)] = reported.as_slice()
+        else {
+            panic!(
+                "the first sweep, then the sweep that took something: {:?}",
+                blocked.notices
+            );
+        };
+        assert!(spared.signalled.is_empty(), "{spared:?}");
+        assert!(
+            matches!(taken.freed(), kill::Freed::Entirely { .. }),
+            "{taken:?}"
         );
     }
 
