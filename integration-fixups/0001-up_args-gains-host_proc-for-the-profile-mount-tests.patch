@@ -1,0 +1,12 @@
+diff --git a/rust/devlaunch-core/src/flows/launch.rs b/rust/devlaunch-core/src/flows/launch.rs
+index efbeb960..441fdca5 100644
+--- a/rust/devlaunch-core/src/flows/launch.rs
++++ b/rust/devlaunch-core/src/flows/launch.rs
+@@ -10517,6 +10517,7 @@ mod tests {
+             },
+             &mount,
+             true,
++            &HostProcView::Absent,
+             &[],
+         );
+ 
