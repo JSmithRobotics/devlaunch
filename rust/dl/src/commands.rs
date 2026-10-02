@@ -488,23 +488,48 @@ fn warn_if_the_profiles_root_could_not_be_read() -> bool {
     true
 }
 
-/// The error [`std::fs::read_dir`] gives for `root`, unless it is the one that means
-/// "there is nothing here at all" rather than "I could not look".
+/// The error reading `root` gives, unless it is the one that means "there is nothing
+/// here at all" rather than "I could not look".
 ///
 /// `NotFound` is that ordinary absence: most hosts have never made this directory,
 /// and that is not a failure to read it. Every other error -- permissions, a plain
 /// file where a directory should be -- is a real "I could not look" and this is `Some`
 /// of it.
 ///
+/// **The whole iterator is walked, not just opened.** `read_dir` returning `Ok`
+/// only says the directory could be OPENED; each entry is a second fallible read,
+/// and `claude_profiles::summarise` consumes them with `entries.flatten()`, which
+/// drops a failing one silently. Checking the open alone therefore reported "fine"
+/// for the exact case this function exists to catch: a listing that is short a
+/// profile, printed with no warning and exit 0. That is the "a host with five
+/// profiles being told it has none" outcome named in
+/// [`warn_if_the_profiles_root_could_not_be_read`], arrived at one entry at a time.
+///
+/// Walking it twice (here and in `summarise`) is deliberate. `summarise` is pure
+/// and returns a list, so it has no channel to report this, and widening its return
+/// type for a case only the binary can print would put the cost on every caller.
+/// The directory holds one entry per Claude login; two walks of it is not a cost
+/// worth shaping an API around.
+///
+/// Reported by review on #650.
+///
+/// **Not covered by a test, and said rather than hidden.** A per-entry `readdir`
+/// failure is not something a portable unit test can provoke: removing entries
+/// mid-walk does not error, nor does a name that is not UTF-8, and the kernel
+/// paths that do fail (a stale NFS handle, a disappearing mount) cannot be
+/// arranged from inside the suite. The three tests below pin what can be pinned
+/// -- absent, readable, not a directory. This arm rests on the type.
+///
 /// Split out so a test can hand this a path it built (a plain file where a directory
 /// should be) instead of shaping a process environment every other test in the binary
 /// shares.
 fn profiles_root_read_error(root: &Path) -> Option<std::io::Error> {
-    match std::fs::read_dir(root) {
-        Ok(_) => None,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => Some(error),
-    }
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => return Some(error),
+    };
+    entries.filter_map(Result::err).next()
 }
 
 /// The known `owner/repo` strings, one per line.
