@@ -2200,11 +2200,22 @@ fn bind_placeholder(path: &Path) -> Option<PathBuf> {
     if path.as_os_str().len() >= SUN_PATH {
         return None;
     }
-    if is_our_socket(path) {
-        return Some(path.to_owned());
-    }
+    // The directory is settled BEFORE the socket is, and the order is the whole
+    // guarantee rather than a tidy-up. `is_our_socket` decides with
+    // `symlink_metadata`, which refuses to follow a symlink at the FINAL
+    // component and follows every component above it -- so a parent replaced by
+    // a symlink leaves a perfectly genuine socket of this user's reachable
+    // through it, and a reuse that returned here first would hand devpod a path
+    // whose directory is somebody else's. devpod `Lchown`s the whole of
+    // `filepath.Dir(SSH_AUTH_SOCK)`, so that is the tree it would walk.
+    //
+    // Reported by review on #648. The doc above already claimed the parent was
+    // refused "the same" as the socket; only the no-socket path actually did it.
     if !ensure_our_dir(path.parent()?) {
         return None;
+    }
+    if is_our_socket(path) {
+        return Some(path.to_owned());
     }
     // SAFETY: as above.
     let staging = path.with_extension(format!("{}.tmp", std::process::id()));
@@ -7511,6 +7522,41 @@ mod tests {
                 .next()
                 .is_none(),
             "something was written into a directory this process does not own"
+        );
+    }
+
+    /// The same refusal when the socket is already there to be REUSED, which the
+    /// check above it used to return before.
+    ///
+    /// This is the case that makes the ordering load-bearing rather than tidy.
+    /// `is_our_socket` only declines to follow a symlink at the last component,
+    /// so a genuine socket of this user's, reached through a symlinked parent,
+    /// passes it: the reuse returns a path whose DIRECTORY belongs to whoever
+    /// made the link, and devpod recursively chowns exactly that directory.
+    #[test]
+    fn an_existing_socket_under_a_directory_this_user_does_not_own_is_not_reused() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).expect("their directory");
+
+        // A real socket, bound by this process, so it is ours by every test
+        // `is_our_socket` makes -- the point being that the socket is fine and
+        // the directory is not.
+        let theirs = elsewhere.join(AGENT_SOCKET_FILE_NAME);
+        drop(std::os::unix::net::UnixListener::bind(&theirs).expect("a socket"));
+
+        let aliased = dir.path().join(AGENT_SOCKET_DIR_NAME);
+        std::os::unix::fs::symlink(&elsewhere, &aliased).expect("a symlinked directory");
+        let through_the_link = aliased.join(AGENT_SOCKET_FILE_NAME);
+        assert!(
+            is_our_socket(&through_the_link),
+            "the socket itself is this user's, which is what makes this a trap"
+        );
+
+        assert_eq!(
+            bind_placeholder(&through_the_link),
+            None,
+            "a socket under a directory this process does not own was handed to devpod"
         );
     }
 
