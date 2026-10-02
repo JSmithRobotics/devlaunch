@@ -316,9 +316,13 @@ unsafe fn drain() {
         // nobody, off Linux. The rest of the group goes with it: devpod's own
         // children are in it.
         //
-        // SAFETY: `waitpid`, `poll` and `killpg` are async-signal-safe. The wait
-        // reaps the leader, which is this process's own child, so the pid cannot
-        // be reused while the group is signalled after it.
+        // SAFETY: `waitpid`, `poll` and `killpg` are async-signal-safe. Reaping
+        // the leader frees its pid, so the reap is not what keeps the SIGKILL on
+        // target. The live group is: Linux does not hand out a pgid while any
+        // member of that group lives, and an empty group makes `killpg` fail
+        // ESRCH. The window left is the one the SIGTERM above has: the group
+        // empties and a new group takes the number before the SIGKILL, which
+        // needs the pid space to wrap inside the wait.
         unsafe {
             wait_for_the_leader(pgid);
             libc::killpg(pgid, libc::SIGKILL);
