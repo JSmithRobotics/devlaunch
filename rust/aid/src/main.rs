@@ -446,6 +446,9 @@ Options:
     --effort <level>                 How hard the agent thinks, the same way:
                                      claude's --effort, codex's
                                      model_reasoning_effort. gemini has none
+    --claude-profile <name>          Passed through to dl: bind that Claude login
+                                     into the workspace. Per launch, so it is
+                                     given again on a recreate
     --devcontainer <variant|path>    Passed through to dl
     --rm                             Delete the workspace once the agent's session
                                      ends, the way docker run --rm does. Appendable:
