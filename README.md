@@ -378,6 +378,28 @@ the profile on disk. A bind lands only when the container is created, so switchi
 workspace that already exists needs a `recreate`; a plain `restart` keeps whichever profile the
 container was created with.
 
+### A memory cap each container can see
+
+`--memory <size>` holds a workspace's containers to a memory limit, swap included:
+
+```bash
+dl blooop/devlaunch --memory 16g
+```
+
+It defaults to **8G**, and `--memory none` leaves whatever limit the containers already have.
+Sizes are powers of 1024 as docker takes them, so `8g`, `512m`, `2GiB` and a bare byte count all
+work and all mean what they would mean to `docker run`.
+
+The point is not the ceiling but what a build reads off it. A cgroup limit is what Bazel sizes
+`--local_ram_resources` from, and what the JVM and Go's `GOMEMLIMIT` read: an uncapped container
+on a shared host sizes itself for the whole machine and is killed for the difference. What a cap
+does not do is bound one action, so a single link needing more than the cap is still killed, and
+by the cgroup rather than by the host, which is quieter. Raise it with this flag when that happens.
+
+Per launch, like `--claude-profile`: it is applied with `docker update` to the containers this
+launch brings up rather than stored with the workspace. That also means it reaches a workspace
+that is already running, so no recreate is needed to change one.
+
 `--claude-profile default` means the login you would get anyway, so a recalled line has a way to
 say "not the profile I used last time". It still binds: your host's own Claude configuration
 directory (`$CLAUDE_CONFIG_DIR`, or `~/.claude`) is mounted read-write into the container, the
