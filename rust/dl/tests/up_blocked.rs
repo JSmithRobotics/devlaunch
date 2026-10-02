@@ -147,12 +147,17 @@ impl World {
             .lines()
             .find(|line| line.starts_with("exec "))
             .expect("the delegate exec line");
+        // The `up` writes its pid before it blocks, and the `exec` keeps that pid
+        // for the `sleep`: the process dl spawned is the one that blocks.
+        let up_pid = root.join("up.pid");
+        let up_pid = up_pid.display();
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"up\" ]; then\n\
              \x20 echo '{BUILD_LINE}' >&2\n\
              \x20 echo '{DEVPOD_LINE}'\n\
              \x20 echo '{DEVPOD_LINE}'\n\
+             \x20 echo $$ > '{up_pid}'\n\
              \x20 exec sleep 30\n\
              fi\n\
              {delegate}\n"
@@ -522,6 +527,60 @@ fn a_launch_blocked_behind_an_orphan_clears_it_and_gets_past_the_up() {
         stderr.contains(PAST_THE_LOCK),
         "the blocked up never got past the lock:\n{stderr}"
     );
+}
+
+/// The orphan itself, prevented at the source: a `dl` that is SIGKILLed while its
+/// `devpod up` is blocked takes the `up` with it.
+///
+/// A SIGKILL runs no handler, so the interrupt drain that a Ctrl-C reaches never
+/// runs, and before `PR_SET_PDEATHSIG` the `up` was reparented to init still
+/// holding devpod's flock. That is the holder every test above has to sweep, and
+/// two of them were found on a host after four hours behind a dead `aid --boot-up`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_launch_that_is_sigkilled_mid_up_takes_its_devpod_up_with_it() {
+    let _serialized = one_at_a_time();
+    let world = World::blocked_up();
+    let root = world.root.display().to_string();
+    let up_pid = world.root.join("up.pid");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dl"))
+        .arg("blooop/devlaunch@cold")
+        .env_clear()
+        .keeping_coverage()
+        .env("PATH", format!("{root}/bin:/usr/bin:/bin"))
+        .env("HOME", format!("{root}/home"))
+        .env("XDG_CACHE_HOME", format!("{root}/cache"))
+        .env("XDG_CONFIG_HOME", format!("{root}/config"))
+        .env("DEVPOD_HOME", format!("{root}/devpod"))
+        .env("DEVPOD_SHIM_STATE", format!("{root}/shim-state.json"))
+        .env("DEVPOD_SHIM_LOG", format!("{root}/shim-log.jsonl"))
+        .env("DEVPOD_SHIM_CONFIG", format!("{root}/shim-config.json"))
+        .env("GIT_SSH_COMMAND", "false")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the dl binary runs");
+
+    let blocked = wait_for(|| read_pid(&up_pid).is_some_and(alive));
+    if !blocked {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert!(blocked, "the launch never reached its blocked up");
+    let up = read_pid(&up_pid).expect("the up's pid");
+
+    child.kill().expect("SIGKILL dl");
+    child.wait().expect("reap dl");
+
+    let gone = wait_for(|| !alive(up));
+    if !gone {
+        let _ = Command::new("kill").args(["-KILL", &up.to_string()]).output();
+    }
+    assert!(gone, "the devpod up {up} outlived the dl that was SIGKILLed");
 }
 
 /// The fixture's own promise, since nothing else checks it: an [`Orphan`] that
