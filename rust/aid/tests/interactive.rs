@@ -102,6 +102,29 @@ struct PtyAid {
 
 impl PtyAid {
     fn spawn(world: &World, args: &[&str], extra: &[(&str, &str)]) -> Self {
+        Self::spawn_behind(world, &[env!("CARGO_BIN_EXE_aid")], args, extra)
+    }
+
+    /// `aid` as a child of a shell that leads the pty's session and stays for a
+    /// minute after aid ends. Neither aid's death nor the shell's is then a
+    /// session leader's exit within that minute, so the kernel sends the
+    /// foreground group no SIGHUP, and only what aid itself arranged reaches its
+    /// children.
+    fn spawn_under_a_shell(world: &World, args: &[&str], extra: &[(&str, &str)]) -> Self {
+        Self::spawn_behind(
+            world,
+            &[
+                "sh",
+                "-c",
+                "\"$0\" \"$@\"; exec sleep 60",
+                env!("CARGO_BIN_EXE_aid"),
+            ],
+            args,
+            extra,
+        )
+    }
+
+    fn spawn_behind(world: &World, lead: &[&str], args: &[&str], extra: &[(&str, &str)]) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -111,7 +134,8 @@ impl PtyAid {
             })
             .expect("a pty");
         let root = world.root.display().to_string();
-        let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_aid"));
+        let mut command = CommandBuilder::new(lead[0]);
+        command.args(&lead[1..]);
         command.args(args);
         command.env_clear();
         // `KeepingCoverage` by hand: the trait extends `std::process::Command`,
@@ -759,6 +783,110 @@ fn a_ctrl_c_at_the_editor_tears_the_whole_boot_down() {
             .success()),
         "the orphaned devpod up (pid {up}) must have been killed"
     );
+}
+
+/// An aid that is SIGKILLed at the editor takes its boot with it, and the boot
+/// still unlinks its staged token.
+///
+/// A SIGKILL runs no handler, so aid never reaches the `cancel` a Ctrl-C does.
+/// The kernel's parent-death signal is what reaches the boot instead, and it is a
+/// SIGINT so the boot's own handler runs: it kills the `devpod up` and unlinks the
+/// token file, as the Ctrl-C above has it do.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_sigkilled_aid_takes_its_boot_down_and_the_token_with_it() {
+    let world = World::with(&["--gh"]);
+    let devpod = world.root.join("bin/devpod");
+    let original = std::fs::read_to_string(&devpod).expect("the scenario's devpod");
+    let delegate = original
+        .lines()
+        .find(|line| line.starts_with("exec "))
+        .expect("the delegate exec line");
+    let script = format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = \"up\" ]; then\n\
+         \x20 echo \"$$\" > \"$DL_UP_PID\"\n\
+         \x20 : > \"$DL_UP_STARTED\"\n\
+         \x20 exec sleep 120\n\
+         fi\n\
+         {delegate}\n"
+    );
+    std::fs::write(&devpod, script).expect("rewrite devpod");
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&devpod, std::fs::Permissions::from_mode(0o755))
+        .expect("keep devpod executable");
+    let tmpdir = world.root.join("tmp");
+    std::fs::create_dir_all(&tmpdir).expect("a scratch TMPDIR");
+    let up_pid = world.root.join("up.pid");
+    let up_started = world.root.join("up.started");
+
+    let session = PtyAid::spawn_under_a_shell(
+        &world,
+        &["blooop/devlaunch@cold"],
+        &[
+            ("TMPDIR", &tmpdir.display().to_string()),
+            ("DL_UP_PID", &up_pid.display().to_string()),
+            ("DL_UP_STARTED", &up_started.display().to_string()),
+        ],
+    );
+    session.reach_the_editor();
+    assert!(
+        wait_for(|| up_started.exists() && token_file(&tmpdir).is_some()),
+        "devpod up never blocked with a token staged"
+    );
+    let up = std::fs::read_to_string(&up_pid).expect("the up pid");
+    let up = up.trim().to_owned();
+    let only_child = |parent: &str| {
+        let children = Command::new("ps")
+            .args(["-o", "pid=", "--ppid", parent])
+            .output()
+            .expect("ps is installed");
+        String::from_utf8_lossy(&children.stdout)
+            .split_whitespace()
+            .next()
+            .expect("a child")
+            .to_owned()
+    };
+    let shell = session
+        .child
+        .process_id()
+        .expect("the shell's pid")
+        .to_string();
+    let aid = only_child(&shell);
+    let boot = only_child(&aid);
+    let alive = |pid: &str| {
+        Command::new("kill")
+            .args(["-0", pid])
+            .output()
+            .expect("kill is installed")
+            .status
+            .success()
+    };
+
+    assert!(
+        Command::new("kill")
+            .args(["-KILL", &aid])
+            .status()
+            .expect("kill is installed")
+            .success(),
+        "sending SIGKILL to aid"
+    );
+    let aid_gone = wait_for(|| !alive(&aid));
+
+    let boot_gone = wait_for(|| !alive(&boot));
+    let token_gone = wait_for(|| token_file(&tmpdir).is_none());
+    let up_gone = wait_for(|| !alive(&up));
+    for pid in [&boot, &up, &shell] {
+        let _ = Command::new("kill").args(["-KILL", pid]).output();
+    }
+    let _ = session.wait();
+    assert!(aid_gone, "aid (pid {aid}) outlived its SIGKILL");
+    assert!(
+        boot_gone,
+        "the boot (pid {boot}) outlived the SIGKILLed aid"
+    );
+    assert!(token_gone, "the boot left its token file behind");
+    assert!(up_gone, "the boot left its devpod up (pid {up}) behind");
 }
 
 /// The one staged GitHub-token file under `dir`, if any.
