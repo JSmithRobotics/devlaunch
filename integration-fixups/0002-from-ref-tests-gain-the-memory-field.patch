@@ -1,0 +1,36 @@
+From: integration
+Subject: --from's own tests gain the memory field --memory added to Command
+
+feat/from-ref adds `from` to Command::Select and Command::Workspace and
+constructs both in its tests. feat/memory-cap adds `memory` to the same two
+variants. Each is complete on its own branch; merged, from-ref's test
+initializers name every field but the one the other topic added, and a struct
+initializer has to name them all.
+
+Neither branch can carry this. from-ref cannot name a field that does not exist
+on upstream, and memory-cap cannot patch tests it has never seen. It is also
+not a conflict, so rerere never sees it: the two topics touch different lines
+of the same file and git merges them cleanly into something that does not
+compile.
+
+Remove this when either topic lands upstream and the other is rebased onto it.
+diff --git a/rust/dl/src/cli.rs b/rust/dl/src/cli.rs
+index 2e06a761..f368b532 100644
+--- a/rust/dl/src/cli.rs
++++ b/rust/dl/src/cli.rs
+@@ -2177,6 +2177,7 @@ mod tests {
+                 devcontainer: None,
+                 claude_profile: Some("../../etc".to_owned()),
+                 from: None,
++                memory: None,
+             })
+         );
+     }
+@@ -2215,6 +2216,7 @@ mod tests {
+                 devcontainer: None,
+                 claude_profile: None,
+                 from: Some("develop".to_owned()),
++                memory: None,
+             })
+         );
+         assert_eq!(
