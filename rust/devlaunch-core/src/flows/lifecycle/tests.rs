@@ -2241,6 +2241,36 @@ fn a_delete_whose_spared_holder_is_orphaned_later_reports_the_later_sweep() {
     );
 }
 
+/// Somebody else's `devpod up`, with a live `dl` behind it, is a build in flight.
+/// A delete that wants its lock waits for it, as a launch does, and says the
+/// sweep found it and signalled nothing.
+#[test]
+fn a_delete_blocked_behind_somebody_elses_live_build_signals_nothing() {
+    let blocked = delete_blocked_for_lines(&[A_LIVE_BUILD_HOLDING_MYWS], 1);
+
+    assert!(
+        blocked.signals.is_empty(),
+        "a live build must not be signalled by a delete that wants its lock: {:?}",
+        blocked.signals,
+    );
+    assert_eq!(blocked.tables_read, 1, "the sweep ran and spared the build");
+    let [
+        DeleteStalled::OnTheLock,
+        DeleteStalled::Swept(kill::Released::Swept(release)),
+    ] = blocked.said.as_slice()
+    else {
+        panic!("the block, then its sweep: {:?}", blocked.said);
+    };
+    assert!(
+        matches!(release.freed(), kill::Freed::Nothing { .. }),
+        "{release:?}"
+    );
+    assert!(
+        release.holding.any_attended(),
+        "the build is reported as the live holder it is: {release:?}",
+    );
+}
+
 /// The deadline firing is a devpod that *ran* — for a minute, and was then
 /// SIGKILLed by the runner — so it may have got far enough to unlink the
 /// workspace record before it went. The two lines that answer for that are
