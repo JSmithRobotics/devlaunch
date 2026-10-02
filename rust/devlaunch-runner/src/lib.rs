@@ -998,6 +998,12 @@ fn start(
                 Ok(())
             });
         }
+        // The child that leads its own group is the `devpod up`, and it is the one
+        // that holds devpod's workspace flock. SIGKILL rather than SIGTERM: the
+        // orphans this exists for are `devpod up`s that already had a SIGTERM
+        // from the interrupt handler and did not stop. See
+        // [`interrupt::ends_with_this_process`].
+        interrupt::ends_with_this_process(&mut command, libc::SIGKILL);
     }
     command
         .spawn()

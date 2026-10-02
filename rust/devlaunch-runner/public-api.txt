@@ -6,6 +6,7 @@ pub fn devlaunch_runner::interrupt::Registration::fmt(&self, &mut core::fmt::For
 impl core::ops::drop::Drop for devlaunch_runner::interrupt::Registration
 pub fn devlaunch_runner::interrupt::Registration::drop(&mut self)
 pub unsafe fn devlaunch_runner::interrupt::cleanup_and_exit(i32) -> never
+pub fn devlaunch_runner::interrupt::ends_with_this_process(&mut std::process::Command, i32)
 pub fn devlaunch_runner::interrupt::register_dir(&std::path::Path) -> core::option::Option<devlaunch_runner::interrupt::Registration>
 pub fn devlaunch_runner::interrupt::register_file(&std::path::Path) -> core::option::Option<devlaunch_runner::interrupt::Registration>
 pub fn devlaunch_runner::interrupt::register_pid(i32) -> core::option::Option<devlaunch_runner::interrupt::Registration>

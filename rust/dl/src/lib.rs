@@ -525,6 +525,21 @@ pub fn interrupt(pid: u32) {
     }
 }
 
+/// Have the child `command` spawns take a SIGINT when this process dies.
+///
+/// For `aid`'s background boot, which is `aid --boot-up` and runs a whole launch:
+/// an `aid` that is SIGKILLed, or that dies any other way that runs no handler,
+/// used to leave the boot running with nobody to cancel it, and the boot's
+/// `devpod up` behind it. SIGINT because it is what `cancel` already sends, so the
+/// boot's own handler kills its `devpod up` group and unlinks its staged token, as
+/// a cancelled boot does. A SIGKILL here would skip that handler and leave the
+/// token file on disk. See
+/// [`devlaunch_runner::interrupt::ends_with_this_process`], and its note on
+/// threads: `aid` spawns the boot from `main`.
+pub fn interrupted_with_this_process(command: &mut std::process::Command) {
+    devlaunch_runner::interrupt::ends_with_this_process(command, libc::SIGINT);
+}
+
 pub use render::ClaudeProfileOffer;
 
 /// The Claude logins this host can launch with, for `aid`'s account picker: the

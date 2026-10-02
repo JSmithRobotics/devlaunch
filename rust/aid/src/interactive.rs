@@ -77,13 +77,18 @@ impl BootChild {
                 return None;
             }
         };
-        let spawned = Command::new(me)
+        let mut command = Command::new(me);
+        command
             .arg(BOOT_WORD)
             .args(boot_args)
             .stdin(Stdio::null())
             .stdout(Stdio::from(out))
-            .stderr(Stdio::from(err))
-            .spawn();
+            .stderr(Stdio::from(err));
+        // The boot must not outlive this aid. An aid that is SIGKILLed never gets
+        // to `cancel`, and its boot then goes on holding devpod's workspace lock
+        // with nobody left to wait on it.
+        dl::interrupted_with_this_process(&mut command);
+        let spawned = command.spawn();
         let Ok(child) = spawned else {
             // The fallback path must not litter: the log was created for a boot
             // that never started.

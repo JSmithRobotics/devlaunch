@@ -179,6 +179,61 @@ fn register_in(slots: &'static [AtomicPtr<libc::c_char>], path: &Path) -> Option
     None
 }
 
+/// Have the child `command` spawns take `signal` when this process dies, however
+/// it dies.
+///
+/// The handler below is what tears a `devpod up` down when `dl` is *told* to stop,
+/// and it is not enough on its own. A SIGKILL runs no handler at all, and a
+/// `devpod up` that takes the handler's SIGTERM and does not act on it outlives
+/// the `_exit` behind it. Either way the child is reparented to init still holding
+/// devpod's workspace flock, and every later `dl <ws>`, `rm` and `devpod delete`
+/// waits on it. That was measured on a host: two such orphans of an `aid
+/// --boot-up` sat for four hours, and the kernel log showed no OOM kill. Linux's
+/// `PR_SET_PDEATHSIG` is the kernel's own answer, and it does not depend on this
+/// process getting to run anything.
+///
+/// **The race it leaves, and how it is closed.** The parent can die after the fork
+/// and before the `prctl`, and then the child is already init's and no death is
+/// left to signal it. So the pid is read here, before the fork, and the child
+/// compares its parent with it once the `prctl` is in: a mismatch means the parent
+/// is gone, and the child `_exit`s instead of `exec`ing.
+///
+/// **The kernel watches the parent *thread*, not the process.** The signal fires
+/// when the thread that forked exits, so a child spawned from a short-lived thread
+/// would be killed when that thread ends. Every child this is set on is spawned
+/// from `main` in both binaries: the launch's `devpod up` and `aid`'s boot child.
+/// A caller that spawns from another thread has to keep that thread alive for as
+/// long as the child should live.
+///
+/// A no-op off Linux, where there is no `PR_SET_PDEATHSIG`: the handler's group
+/// kill is all those hosts get.
+pub fn ends_with_this_process(command: &mut std::process::Command, signal: i32) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: `getpid` reads a value and touches nothing.
+        let parent = unsafe { libc::getpid() };
+        // SAFETY: `prctl`, `getppid` and `_exit` are bare syscalls, which is all a
+        // pre-exec hook may make: no allocation, no locks. The closure captures two
+        // integers by value.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, signal as libc::c_ulong, 0, 0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent {
+                    libc::_exit(1);
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (command, signal);
+    }
+}
+
 /// Record the process group of the foreground child now being waited on, so the
 /// interrupt handler can tear it down. Paired with [`clear_foreground_child`]
 /// once the child is reaped.
