@@ -40,6 +40,7 @@ TOPICS=(
     feat/claude-profile-mount           # PR #652
     feat/aid-claude-profiles            # to propose upstream
     feat/lxcfs-proc-view                # to propose upstream
+    feat/memory-cap                     # to propose upstream
     fork/public-api-toolchain           # not upstreamable: upstream pins a nightly instead
 )
 
