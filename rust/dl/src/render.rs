@@ -5355,6 +5355,35 @@ mod tests {
         }
     }
 
+    /// A delete whose sweep freed the lock is still sitting in its own `devpod
+    /// delete`, and that is the call that takes the lock next. Saying "this
+    /// launch's own devpod up" sends the reader looking for a launch that is not
+    /// there.
+    #[test]
+    fn a_delete_whose_sweep_freed_the_lock_is_told_its_own_delete_takes_it() {
+        for word in ["--rm", "rm"] {
+            let line = delete_swept(
+                "my-ws",
+                word,
+                &Released::Swept(Release {
+                    signalled: vec![Signalled {
+                        process: an_orphan(732_721),
+                        ending: Ending::Terminated,
+                    }],
+                    holding: Holding::Free,
+                }),
+            );
+
+            assert!(
+                line.contains(&format!(
+                    "This {word}'s own devpod delete takes the lock from here."
+                )),
+                "the {word} is told its own delete carries on: {line}"
+            );
+            assert!(!line.contains("launch"), "{line}");
+        }
+    }
+
     /// An orphan dl signalled and could not stop is almost always another user's,
     /// so `dl <ws> kill` is not the way out -- it would fail the same way, for the
     /// same reason. Saying who *can* end it is what stops the reader retrying the
