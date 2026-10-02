@@ -70,6 +70,7 @@ use crate::clients::devpod::{
     ProviderRegistration,
 };
 use crate::clients::devpod_home::{CreateRecord, DevpodHome, create_record};
+use crate::clients::docker;
 use crate::clients::gh::{self, GhEvent, StagedToken, Token, TokenLookup};
 use crate::clients::herdr;
 use crate::clients::ssh;
@@ -266,6 +267,17 @@ pub struct Host {
     pub(crate) cache_dir: PathBuf,
     /// devpod's own home, whose `config.yaml` mtime expires the options cache.
     pub(crate) devpod_home: Option<DevpodHome>,
+    /// How much memory this run holds its containers to.
+    ///
+    /// Defaulted rather than optional, unlike every other field here, because
+    /// "nothing said" has an answer: [`DEFAULT_MEMORY_CAP_BYTES`]. An
+    /// `Option<MemoryCap>` would make the default a thing each caller remembers.
+    ///
+    /// `Default` for `Host` therefore comes through [`MemoryCap::default`], which
+    /// is the capped arm rather than `Off`: a `Host::default()` in a test that
+    /// says nothing about memory should stand for the shipping configuration, not
+    /// for the one that opts out.
+    pub(crate) memory_cap: MemoryCap,
 }
 
 impl Host {
@@ -307,7 +319,22 @@ impl Host {
             claude_profiles_root: crate::domain::xdg::claude_profiles_root().ok(),
             cache_dir: cache_dir.into(),
             devpod_home: DevpodHome::locate(),
+            memory_cap: MemoryCap::Capped {
+                bytes: DEFAULT_MEMORY_CAP_BYTES,
+            },
         }
+    }
+
+    /// Hold this run's containers to a memory limit.
+    ///
+    /// A builder for [`Self::with_claude_profile`]'s reason, and per launch for the
+    /// same one: the cap is applied with `docker update` to whatever is running, so
+    /// it is a statement about this launch rather than a property stored with the
+    /// workspace.
+    #[must_use]
+    pub fn with_memory_cap(mut self, cap: MemoryCap) -> Self {
+        self.memory_cap = cap;
+        self
     }
 
     /// Name the Claude profile this run forwards, if one was typed.
@@ -449,6 +476,19 @@ pub enum LaunchNotice {
     /// `exist_ok` hit on a plain file, or something deleting it between the two
     /// calls. Narrow, and honestly so.
     PixiCacheNotADirectory { source: PathBuf },
+
+    // --- the per-container memory cap
+    //
+    // Set with `docker update` after the container is up, because devpod takes
+    // `--mount` and nothing that reaches docker's run arguments. Said once per
+    // launch, because a limit this launch imposed on the user's behalf decides
+    // what every build inside it will size itself for.
+    /// Every container of this workspace is now held to `bytes`, swap included.
+    MemoryCapped { bytes: u64, containers: usize },
+    /// The cap was asked for and could not be set. A warning and not a refusal:
+    /// the workspace is up and usable, and an uncapped container is exactly where
+    /// this host stood before the cap existed.
+    MemoryCapNotSet { bytes: u64, reason: String },
 
     // --- the launch lock (dl.py `workspace_up`)
     /// Another launch of this workspace holds the lock, and this one is about to
@@ -929,6 +969,129 @@ fn write_options_cache(cache_path: &Path, options: &BTreeMap<String, String>) {
 /// last one already fetched. One host directory bound into all of them makes the
 /// second container's sync an 18–28s unpack from disk (devlaunch#232).
 ///
+/// What a workspace's containers are held to when nothing on the line says.
+///
+/// 8 GiB, and it is a policy rather than a measurement: devlaunch cannot know
+/// the host it is installed on, and this number is right for a machine running
+/// a dozen workspaces and wrong for a laptop running one. `--memory` is how a
+/// host says otherwise, and `--memory none` is how it opts out entirely.
+pub const DEFAULT_MEMORY_CAP_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// The word that opts a launch out of the cap entirely.
+///
+/// Public because `dl` spells it too -- a pane shell attaching beside a running
+/// agent passes it so that the attach re-states no default over a `--memory` the
+/// original launch was given -- and one constant is what keeps the two from
+/// drifting into disagreeing about the spelling.
+pub const NO_MEMORY_CAP: &str = "none";
+
+/// How much memory this launch holds its containers to.
+///
+/// **A cap a container can see is a cap a build can respect.** A cgroup limit is
+/// not merely a ceiling to be killed at: Bazel reads it through the JVM
+/// (`LocalHostComputeResources`, whose own comment says the bean "is
+/// container-aware as of JDK 14") and sizes `--local_ram_resources` to it, and
+/// the JVM, Go's `GOMEMLIMIT` and anything reading cgroup files do the same. An
+/// uncapped container on a shared host is one that sizes itself for the whole
+/// machine and is killed for the difference -- which is the failure this exists
+/// to prevent, not the one it causes.
+///
+/// **What it does NOT do is bound a single action.** Sizing a build's scheduler
+/// to 8 GiB does not stop one C++ link needing 10, and that link is OOM-killed
+/// by the cgroup rather than by the host -- exit 137, with nothing in the
+/// journal naming the compiler, which is quieter than the host OOM killer an
+/// operator is used to reading. `--memory` is the lever when that happens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryCap {
+    /// Hold every container of this workspace to this many bytes, swap included.
+    Capped { bytes: u64 },
+    /// Leave whatever the container already has, which is the devcontainer's own
+    /// `runArgs` or docker's unlimited default.
+    Off,
+}
+
+/// A `--memory` value that is not a size.
+///
+/// Carries the word as typed, because the message has to quote it back: the
+/// mistake is almost always a suffix this does not take, and naming the ones it
+/// does is the whole of the fix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySizeRefused {
+    pub typed: String,
+}
+
+impl Default for MemoryCap {
+    /// The shipping configuration, so a `Host` built by `Default` is one that caps.
+    fn default() -> Self {
+        Self::Capped {
+            bytes: DEFAULT_MEMORY_CAP_BYTES,
+        }
+    }
+}
+
+impl MemoryCap {
+    /// Read the cap this launch asked for, or the default when it asked nothing.
+    ///
+    /// `none` and `off` are the opt-out and are spelled as words rather than as
+    /// `0`: a bare `0` is what a shell variable expands to when it is unset, and
+    /// a typo that silently disables the cap is the one mistake worth refusing.
+    /// `0` is therefore a refusal and not a synonym.
+    pub fn requested(named: Option<&str>) -> Result<Self, MemorySizeRefused> {
+        let Some(named) = named else {
+            return Ok(Self::Capped {
+                bytes: DEFAULT_MEMORY_CAP_BYTES,
+            });
+        };
+        if named.eq_ignore_ascii_case(NO_MEMORY_CAP) || named.eq_ignore_ascii_case("off") {
+            return Ok(Self::Off);
+        }
+        parse_memory_size(named)
+            .map(|bytes| Self::Capped { bytes })
+            .ok_or_else(|| MemorySizeRefused {
+                typed: named.to_owned(),
+            })
+    }
+}
+
+/// Bytes from a size as a person writes one: `8g`, `512M`, `2GiB`, or a bare
+/// count.
+///
+/// **Powers of 1024, which is what docker itself does.** `docker run --memory
+/// 8g` is 8 GiB and not 8 GB, so taking the suffix any other way would mean a
+/// number typed here and the same number typed at docker meaning two different
+/// limits -- and the smaller of the two silently.
+///
+/// `b`, `k`, `m`, `g`, `t`, each optionally spelled out as `kb`/`kib` and so on,
+/// because a person who writes `8GiB` has been precise rather than wrong. A bare
+/// number is bytes, matching docker again.
+///
+/// `None` for anything else, including a negative, a float, an empty string and
+/// a size of zero -- zero is not "unlimited" here, it is a value that would make
+/// the cgroup refuse, and the opt-out has a word of its own.
+fn parse_memory_size(typed: &str) -> Option<u64> {
+    let typed = typed.trim();
+    // An all-digit string has no non-digit to find, which is a bare byte count
+    // rather than a refusal -- the arm the first draft of this got wrong by
+    // letting `?` carry it straight out.
+    let split = typed
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(typed.len());
+    let (digits, suffix) = typed.split_at(split);
+    let count: u64 = digits.parse().ok()?;
+    if count == 0 {
+        return None;
+    }
+    let scale: u64 = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+        "t" | "tb" | "tib" => 1024_u64 * 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    count.checked_mul(scale)
+}
+
 /// A sum rather than an `Option<PathBuf>` beside a warning, because each way of
 /// failing names a different directory state and both have to be reportable: the
 /// launch survives either way, and a silent degradation here is permanent.
@@ -5255,7 +5418,15 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
         )
         .map_err(LaunchAborted::DevpodNotRun)?;
         let refused = match outcome {
-            UpOutcome::Started | UpOutcome::SkippedSiblingWon => None,
+            UpOutcome::Started | UpOutcome::SkippedSiblingWon => {
+                // Both arms, because both mean the container is up: a sibling
+                // that won the race brought up the same workspace, and
+                // `docker update` is idempotent, so re-stating the cap costs one
+                // round trip and keeps the rule "a launch leaves its containers
+                // capped" true however the launch got there.
+                self.apply_memory_cap(placement.workspace_id());
+                None
+            }
             UpOutcome::Refused { exit } => Some(LaunchRefusal::UpRefused { exit }),
         };
         // Asked here rather than by whoever renders the refusal, because *when* it is
@@ -5268,6 +5439,77 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
             self.forced_refresh();
         }
         Ok(refused)
+    }
+
+    /// Hold this workspace's containers to the launch's memory cap.
+    ///
+    /// **After the `up` and not as part of it**, because devpod offers no way to
+    /// pass docker a run argument -- `devpod up` takes `--mount` and nothing that
+    /// reaches `docker run` (devpod 0.26.1). The consolation is the better half
+    /// of the trade: a cap set this way lands on a container that is already
+    /// running, so it reaches the workspaces a host already has up rather than
+    /// only the ones created after it, and no recreate is needed to take one.
+    ///
+    /// Every failure here is a notice and never a refusal. The workspace is up
+    /// and usable; an uncapped container is where the host stood before this
+    /// existed, and failing a launch over it would trade a working session for a
+    /// limit.
+    fn apply_memory_cap(&mut self, workspace_id: &str) {
+        let MemoryCap::Capped { bytes } = self.host.memory_cap else {
+            return;
+        };
+        let runner = self.context.runner();
+        let found = match docker::running_for_workspace(runner, workspace_id) {
+            docker::Running::These(ids) => ids,
+            // A host with no docker has no container to cap, which is the one
+            // absence this module has always kept silent.
+            docker::Running::NotInstalled => return,
+            docker::Running::Refused { exit, stderr } => {
+                self.notices.say(LaunchNotice::MemoryCapNotSet {
+                    bytes,
+                    reason: format!("docker ps exited {exit:?}: {}", stderr.trim()),
+                });
+                return;
+            }
+            docker::Running::NotStarted(failure) => {
+                self.notices.say(LaunchNotice::MemoryCapNotSet {
+                    bytes,
+                    reason: format!("docker ps never answered ({failure:?})"),
+                });
+                return;
+            }
+        };
+        // Silent, like the no-docker arm above and for the same reason. devpod
+        // drives providers that are not docker at all -- ssh and kubernetes
+        // among them -- and a workspace opened through one has no local
+        // container to find. Saying "nothing was capped" there would put an
+        // alarming line on every launch about a machine that was never going to
+        // have one.
+        let Some(containers) = NonEmpty::of(found) else {
+            return;
+        };
+        let count = containers.len();
+        match docker::set_memory_cap(runner, &containers, bytes) {
+            docker::Answer::Ran { exit, .. } if exit.is_success() => {
+                self.notices.say(LaunchNotice::MemoryCapped {
+                    bytes,
+                    containers: count,
+                });
+            }
+            docker::Answer::Ran { exit, stderr } => {
+                self.notices.say(LaunchNotice::MemoryCapNotSet {
+                    bytes,
+                    reason: format!("docker update exited {exit:?}: {}", stderr.trim()),
+                });
+            }
+            docker::Answer::NotInstalled => {}
+            docker::Answer::NotStarted(failure) => {
+                self.notices.say(LaunchNotice::MemoryCapNotSet {
+                    bytes,
+                    reason: format!("docker update never answered ({failure:?})"),
+                });
+            }
+        }
     }
 
     /// Run the setup pass again when the last one over this container was cut
@@ -7190,6 +7432,84 @@ mod tests {
             "the symlink survived"
         );
         assert!(theirs.exists(), "the other user's socket was destroyed");
+    }
+
+    /// The suffixes are docker's, which is to say powers of 1024.
+    ///
+    /// Worth asserting rather than trusting, because the whole value of matching
+    /// docker is that a number typed at `--memory` and the same number typed at
+    /// `docker run` mean one limit. Read 1000-wise, `8g` would be 7.45 GiB: a cap
+    /// 7% tighter than the one asked for, and tighter silently.
+    #[test]
+    fn a_size_is_read_in_powers_of_1024_as_docker_reads_one() {
+        assert_eq!(parse_memory_size("8g"), Some(8 * 1024 * 1024 * 1024));
+        assert_eq!(parse_memory_size("8G"), Some(8 * 1024 * 1024 * 1024));
+        assert_eq!(parse_memory_size("8GiB"), Some(8 * 1024 * 1024 * 1024));
+        assert_eq!(parse_memory_size("8gb"), Some(8 * 1024 * 1024 * 1024));
+        assert_eq!(parse_memory_size("512m"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_memory_size("64k"), Some(64 * 1024));
+    }
+
+    /// A bare number is bytes, which is the arm the first draft got wrong.
+    ///
+    /// `str::find` returns `None` for an all-digit string -- there is no
+    /// non-digit to find -- and carrying that straight out with `?` made every
+    /// bare count a refusal.
+    #[test]
+    fn a_bare_number_is_a_count_of_bytes_and_not_a_refusal() {
+        assert_eq!(parse_memory_size("1024"), Some(1024));
+        assert_eq!(
+            parse_memory_size("8589934592"),
+            Some(8 * 1024 * 1024 * 1024)
+        );
+    }
+
+    /// Zero is refused rather than read as "unlimited".
+    ///
+    /// The opt-out is a word (`none`), and this is why: an empty shell variable
+    /// expands to nothing and a half-written one to `0`, so a `0` that meant
+    /// "no cap" would turn a typo into a silently uncapped container -- the exact
+    /// outcome the cap exists to prevent, reached by accident.
+    #[test]
+    fn zero_is_not_a_spelling_of_unlimited() {
+        assert_eq!(parse_memory_size("0"), None);
+        assert_eq!(parse_memory_size("0g"), None);
+    }
+
+    #[test]
+    fn a_size_that_is_not_one_is_refused_with_the_word_as_typed() {
+        for typed in ["8 gigs", "lots", "", "-8g", "8.5g", "8pb"] {
+            assert_eq!(
+                MemoryCap::requested(Some(typed)),
+                Err(MemorySizeRefused {
+                    typed: typed.to_owned()
+                }),
+                "{typed:?}"
+            );
+        }
+    }
+
+    /// Nothing typed is the default cap, not the absence of one.
+    #[test]
+    fn a_line_that_says_nothing_about_memory_still_caps() {
+        assert_eq!(
+            MemoryCap::requested(None),
+            Ok(MemoryCap::Capped {
+                bytes: DEFAULT_MEMORY_CAP_BYTES
+            })
+        );
+        assert_eq!(MemoryCap::default(), MemoryCap::requested(None).unwrap());
+    }
+
+    #[test]
+    fn the_opt_out_is_a_word_and_takes_either_case() {
+        for typed in ["none", "NONE", "None", "off", "OFF"] {
+            assert_eq!(
+                MemoryCap::requested(Some(typed)),
+                Ok(MemoryCap::Off),
+                "{typed:?}"
+            );
+        }
     }
 
     /// A path too long to hold a socket is refused before anything at it is

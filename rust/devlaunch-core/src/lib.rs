@@ -177,6 +177,14 @@ pub mod api {
     pub use crate::flows::launch::{
         Cold, ColdMachinery, ColdPath, ColdRefused, Host, LaunchNotice, Provision, ToolProvisioning,
     };
+    // What `Host::with_memory_cap` takes, and the two constants a caller needs to
+    // say anything about it: the default it would otherwise get, and the word that
+    // opts out. Exported for the reason the launcher's own parameter types are --
+    // a `pub` builder taking a `pub(crate)` type is a method nobody outside can
+    // call.
+    pub use crate::flows::launch::{
+        DEFAULT_MEMORY_CAP_BYTES, MemoryCap, MemorySizeRefused, NO_MEMORY_CAP,
+    };
     // What `Host::with_agent_resume` takes: how the agent a launch starts is
     // started again after herdr restarts.
     pub use crate::clients::AgentResume;

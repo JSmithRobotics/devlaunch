@@ -37,11 +37,11 @@ use devlaunch_core::clients::AgentResume;
 use devlaunch_core::domain::spec::DevcontainerPath;
 use devlaunch_core::domain::workspace_id::WorkspaceId;
 use devlaunch_core::flows::completion_cache;
-use devlaunch_core::flows::launch::RemoteCommand;
 use devlaunch_core::flows::launch::{
     self, ColdPath, Host, Launch, LaunchAborted, LaunchRefusal, LaunchVerb, Launched, Plan,
     Session, ToolProvisioning,
 };
+use devlaunch_core::flows::launch::{MemoryCap, RemoteCommand};
 use devlaunch_core::flows::lifecycle::Refresh;
 use devlaunch_core::flows::listing::CommandContext;
 
@@ -139,6 +139,7 @@ pub(crate) fn render_launch<'r>(
     verb: &LaunchVerb,
     devcontainer: Option<&DevcontainerPath>,
     claude_profile: Option<&str>,
+    memory_cap: MemoryCap,
     recognised: Option<WorkspaceId>,
     resume: Option<AgentResume>,
 ) -> Ran {
@@ -167,8 +168,13 @@ pub(crate) fn render_launch<'r>(
     // stored with the workspace, unlike `--devcontainer`, so no workspace can
     // silently forward an account chosen weeks ago. The name is carried as typed;
     // `clients::claude` owns the check and the refusal.
+    // Per launch for `--claude-profile`'s reason and applied the same way: with
+    // `docker update` against whatever this launch brings up, rather than stored
+    // with the workspace. The default is the cap, not the absence of one -- see
+    // `MemoryCap::default`.
     let host = Host::from_process(cache)
         .with_claude_profile(claude_profile.map(str::to_owned))
+        .with_memory_cap(memory_cap)
         .with_agent_resume(resume);
     // The pass's events stream through a sink of their own, and it is the same
     // printer as the launch's notices: one line on stderr at the moment core makes
