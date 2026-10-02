@@ -85,6 +85,8 @@ pub devlaunch_core::api::LaunchNotice::DotfilesForwarded::script: core::option::
 pub devlaunch_core::api::LaunchNotice::DotfilesForwarded::url: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::DotfilesNotConfigured
 pub devlaunch_core::api::LaunchNotice::HerdrTab(devlaunch_core::flows::launch::HerdrTabRename)
+pub devlaunch_core::api::LaunchNotice::HostProcViewBound
+pub devlaunch_core::api::LaunchNotice::HostProcViewBound::entries: usize
 pub devlaunch_core::api::LaunchNotice::LaunchLockUnavailable
 pub devlaunch_core::api::LaunchNotice::LaunchLockUnavailable::reason: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::LaunchLockUnavailable::workspace_id: alloc::string::String
@@ -667,6 +669,8 @@ pub devlaunch_core::flows::launch::LaunchNotice::DotfilesForwarded::script: core
 pub devlaunch_core::flows::launch::LaunchNotice::DotfilesForwarded::url: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::DotfilesNotConfigured
 pub devlaunch_core::flows::launch::LaunchNotice::HerdrTab(devlaunch_core::flows::launch::HerdrTabRename)
+pub devlaunch_core::flows::launch::LaunchNotice::HostProcViewBound
+pub devlaunch_core::flows::launch::LaunchNotice::HostProcViewBound::entries: usize
 pub devlaunch_core::flows::launch::LaunchNotice::LaunchLockUnavailable
 pub devlaunch_core::flows::launch::LaunchNotice::LaunchLockUnavailable::reason: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::LaunchLockUnavailable::workspace_id: alloc::string::String
