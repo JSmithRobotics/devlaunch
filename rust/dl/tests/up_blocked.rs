@@ -147,12 +147,17 @@ impl World {
             .lines()
             .find(|line| line.starts_with("exec "))
             .expect("the delegate exec line");
+        // The `up` writes its pid before it blocks, and the `exec` keeps that pid
+        // for the `sleep`: the process dl spawned is the one that blocks.
+        let up_pid = root.join("up.pid");
+        let up_pid = up_pid.display();
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"up\" ]; then\n\
              \x20 echo '{BUILD_LINE}' >&2\n\
              \x20 echo '{DEVPOD_LINE}'\n\
              \x20 echo '{DEVPOD_LINE}'\n\
+             \x20 echo $$ > '{up_pid}'\n\
              \x20 exec sleep 30\n\
              fi\n\
              {delegate}\n"
@@ -196,6 +201,73 @@ impl World {
              \x20   sleep 1\n\
              \x20 done\n\
              \x20 echo '{PAST_THE_LOCK}' >&2\n\
+             fi\n\
+             {delegate}\n"
+        );
+        std::fs::write(&devpod, script).expect("rewrite devpod");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&devpod, std::fs::Permissions::from_mode(0o755))
+            .expect("keep devpod executable");
+        world
+    }
+}
+
+impl World {
+    /// The blocked world, with an `up` that ignores SIGTERM and has a child that
+    /// ignores it too, the way a `devpod up` and its own children can. The child's
+    /// pid goes to `up-child.pid`.
+    fn blocked_up_deaf_to_sigterm() -> Self {
+        let world = Self::blocked_up();
+        let devpod = world.root.join("bin/devpod");
+        let original = std::fs::read_to_string(&devpod).expect("the scenario's devpod");
+        let delegate = original
+            .lines()
+            .find(|line| line.starts_with("exec "))
+            .expect("the delegate exec line");
+        let child_pid = world.root.join("up-child.pid");
+        let child_pid = child_pid.display();
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"up\" ]; then\n\
+             \x20 trap '' TERM\n\
+             \x20 echo '{DEVPOD_LINE}'\n\
+             \x20 sleep 30 &\n\
+             \x20 echo $! > '{child_pid}'\n\
+             \x20 wait\n\
+             fi\n\
+             {delegate}\n"
+        );
+        std::fs::write(&devpod, script).expect("rewrite devpod");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&devpod, std::fs::Permissions::from_mode(0o755))
+            .expect("keep devpod executable");
+        world
+    }
+
+    /// The blocked world, with an `up` that takes half a second to unwind on
+    /// SIGTERM, the way devpod removes its busy marker before it exits. The
+    /// marker it writes once that unwind is done is `unwound`, and its pid goes to
+    /// `up.pid` once the trap is set.
+    fn blocked_up_slow_to_unwind() -> Self {
+        let world = Self::blocked_up();
+        let devpod = world.root.join("bin/devpod");
+        let original = std::fs::read_to_string(&devpod).expect("the scenario's devpod");
+        let delegate = original
+            .lines()
+            .find(|line| line.starts_with("exec "))
+            .expect("the delegate exec line");
+        let up_pid = world.root.join("up.pid");
+        let up_pid = up_pid.display();
+        let unwound = world.root.join("unwound");
+        let unwound = unwound.display();
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"up\" ]; then\n\
+             \x20 trap 'sleep 0.5; echo done > \"{unwound}\"; exit 0' TERM\n\
+             \x20 echo '{DEVPOD_LINE}'\n\
+             \x20 echo $$ > '{up_pid}'\n\
+             \x20 sleep 30 &\n\
+             \x20 wait\n\
              fi\n\
              {delegate}\n"
         );
@@ -521,6 +593,198 @@ fn a_launch_blocked_behind_an_orphan_clears_it_and_gets_past_the_up() {
     assert!(
         stderr.contains(PAST_THE_LOCK),
         "the blocked up never got past the lock:\n{stderr}"
+    );
+}
+
+/// The orphan itself, prevented at the source: a `dl` that is SIGKILLed while its
+/// `devpod up` is blocked takes the `up` with it.
+///
+/// A SIGKILL runs no handler, so the interrupt drain that a Ctrl-C reaches never
+/// runs, and before `PR_SET_PDEATHSIG` the `up` was reparented to init still
+/// holding devpod's flock. That is the holder every test above has to sweep, and
+/// two of them were found on a host after four hours behind a dead `aid --boot-up`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_launch_that_is_sigkilled_mid_up_takes_its_devpod_up_with_it() {
+    let _serialized = one_at_a_time();
+    let world = World::blocked_up();
+    let root = world.root.display().to_string();
+    let up_pid = world.root.join("up.pid");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_dl"))
+        .arg("blooop/devlaunch@cold")
+        .env_clear()
+        .keeping_coverage()
+        .env("PATH", format!("{root}/bin:/usr/bin:/bin"))
+        .env("HOME", format!("{root}/home"))
+        .env("XDG_CACHE_HOME", format!("{root}/cache"))
+        .env("XDG_CONFIG_HOME", format!("{root}/config"))
+        .env("DEVPOD_HOME", format!("{root}/devpod"))
+        .env("DEVPOD_SHIM_STATE", format!("{root}/shim-state.json"))
+        .env("DEVPOD_SHIM_LOG", format!("{root}/shim-log.jsonl"))
+        .env("DEVPOD_SHIM_CONFIG", format!("{root}/shim-config.json"))
+        .env("GIT_SSH_COMMAND", "false")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the dl binary runs");
+
+    let blocked = wait_for(|| read_pid(&up_pid).is_some_and(alive));
+    if !blocked {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert!(blocked, "the launch never reached its blocked up");
+    let up = read_pid(&up_pid).expect("the up's pid");
+
+    child.kill().expect("SIGKILL dl");
+    child.wait().expect("reap dl");
+
+    let gone = wait_for(|| !alive(up));
+    if !gone {
+        let _ = Command::new("kill")
+            .args(["-KILL", &up.to_string()])
+            .output();
+    }
+    assert!(
+        gone,
+        "the devpod up {up} outlived the dl that was SIGKILLed"
+    );
+}
+
+/// A Ctrl-C does not leave behind a `devpod up` group that ignores SIGTERM.
+///
+/// The interrupt drain used to SIGTERM the group and `_exit` at once. A leader
+/// that ignored it was reparented to init holding devpod's flock, and so was any
+/// child of it that ignored it too. The drain now waits briefly for the leader and
+/// then SIGKILLs the group, so the child here goes as well as the leader.
+#[test]
+fn a_ctrl_c_mid_up_kills_a_group_that_ignores_sigterm() {
+    let _serialized = one_at_a_time();
+    let world = World::blocked_up_deaf_to_sigterm();
+    let root = world.root.display().to_string();
+    let child_pid = world.root.join("up-child.pid");
+
+    let mut dl = Command::new(env!("CARGO_BIN_EXE_dl"))
+        .arg("blooop/devlaunch@cold")
+        .env_clear()
+        .keeping_coverage()
+        .env("PATH", format!("{root}/bin:/usr/bin:/bin"))
+        .env("HOME", format!("{root}/home"))
+        .env("XDG_CACHE_HOME", format!("{root}/cache"))
+        .env("XDG_CONFIG_HOME", format!("{root}/config"))
+        .env("DEVPOD_HOME", format!("{root}/devpod"))
+        .env("DEVPOD_SHIM_STATE", format!("{root}/shim-state.json"))
+        .env("DEVPOD_SHIM_LOG", format!("{root}/shim-log.jsonl"))
+        .env("DEVPOD_SHIM_CONFIG", format!("{root}/shim-config.json"))
+        .env("GIT_SSH_COMMAND", "false")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the dl binary runs");
+
+    let blocked = wait_for(|| read_pid(&child_pid).is_some_and(alive));
+    if !blocked {
+        let _ = dl.kill();
+        let _ = dl.wait();
+    }
+    assert!(blocked, "the launch never reached its blocked up");
+    let child = read_pid(&child_pid).expect("the up's child's pid");
+
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &dl.id().to_string()])
+            .status()
+            .expect("kill is installed")
+            .success(),
+        "sending SIGINT to dl"
+    );
+    let status = dl.wait().expect("dl exits");
+    assert_eq!(status.code(), Some(130), "a Ctrl-C mid-up drains at 130");
+
+    let gone = wait_for(|| !alive(child));
+    if !gone {
+        let _ = Command::new("kill")
+            .args(["-KILL", &child.to_string()])
+            .output();
+    }
+    assert!(
+        gone,
+        "the up's child {child} ignored SIGTERM and outlived the Ctrl-C"
+    );
+}
+
+/// A Ctrl-C mid-up gives the `devpod up` time to finish unwinding before the
+/// SIGKILL.
+///
+/// devpod removes its busy marker as it unwinds from SIGTERM. A drain that
+/// SIGKILLed the group straight after the SIGTERM, or `_exit`ed into the
+/// kernel's parent-death SIGKILL, would cut that unwind off and leave the marker
+/// behind for the next launch to trip on.
+#[test]
+fn a_ctrl_c_mid_up_lets_the_up_finish_unwinding_from_sigterm() {
+    let _serialized = one_at_a_time();
+    let world = World::blocked_up_slow_to_unwind();
+    let root = world.root.display().to_string();
+    let up_pid = world.root.join("up.pid");
+    let unwound = world.root.join("unwound");
+
+    let mut dl = Command::new(env!("CARGO_BIN_EXE_dl"))
+        .arg("blooop/devlaunch@cold")
+        .env_clear()
+        .keeping_coverage()
+        .env("PATH", format!("{root}/bin:/usr/bin:/bin"))
+        .env("HOME", format!("{root}/home"))
+        .env("XDG_CACHE_HOME", format!("{root}/cache"))
+        .env("XDG_CONFIG_HOME", format!("{root}/config"))
+        .env("DEVPOD_HOME", format!("{root}/devpod"))
+        .env("DEVPOD_SHIM_STATE", format!("{root}/shim-state.json"))
+        .env("DEVPOD_SHIM_LOG", format!("{root}/shim-log.jsonl"))
+        .env("DEVPOD_SHIM_CONFIG", format!("{root}/shim-config.json"))
+        .env("GIT_SSH_COMMAND", "false")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the dl binary runs");
+
+    let blocked = wait_for(|| read_pid(&up_pid).is_some_and(alive));
+    if !blocked {
+        let _ = dl.kill();
+        let _ = dl.wait();
+    }
+    assert!(blocked, "the launch never reached its blocked up");
+    let up = read_pid(&up_pid).expect("the up's pid");
+
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &dl.id().to_string()])
+            .status()
+            .expect("kill is installed")
+            .success(),
+        "sending SIGINT to dl"
+    );
+    let status = dl.wait().expect("dl exits");
+    assert_eq!(status.code(), Some(130), "a Ctrl-C mid-up drains at 130");
+
+    let finished = wait_for(|| unwound.exists() || !alive(up));
+    if alive(up) {
+        let _ = Command::new("kill")
+            .args(["-KILL", &up.to_string()])
+            .output();
+    }
+    assert!(finished, "the up {up} was still running after the Ctrl-C");
+    assert!(
+        unwound.exists(),
+        "the up was killed before it finished unwinding from SIGTERM"
     );
 }
 

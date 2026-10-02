@@ -1422,9 +1422,13 @@ fn a_kill_names_the_work_it_is_about_to_destroy_and_destroys_it() {
 /// it waits on with no deadline, logging the same line every five seconds. There
 /// is no exit to inspect and no timeout on `rm`'s delete, so dl said nothing at
 /// all and the run had to be Ctrl-C'd. Now the line is read as it arrives and
-/// answered while the command is still blocked.
+/// answered while the command is still blocked, by the sweep a launch runs.
+///
+/// Nothing on this host holds the workspace, so the sweep finds nothing, says so,
+/// and names no `kill`: the line used to send the reader to another terminal to do
+/// what dl now does itself.
 #[test]
-fn an_rm_devpod_cannot_get_the_lock_for_names_the_kill_that_clears_it() {
+fn an_rm_devpod_cannot_get_the_lock_for_sweeps_it_and_says_what_it_found() {
     let world = World::base();
     world.devpod_answers(
         &["delete"],
@@ -1436,7 +1440,7 @@ fn an_rm_devpod_cannot_get_the_lock_for_names_the_kill_that_clears_it() {
     let run = world.dl(&["devlaunch-main-legacy", "rm"]);
 
     // devpod's own line is still forwarded verbatim: reading it must not consume
-    // it, or the reader loses the evidence the advice is about.
+    // it, or the reader loses the evidence the notice is about.
     assert!(
         run.err.contains("info Trying to lock workspace"),
         "devpod's line was swallowed: {}",
@@ -1445,10 +1449,21 @@ fn an_rm_devpod_cannot_get_the_lock_for_names_the_kill_that_clears_it() {
     assert!(
         run.err.contains(
             "dl: devpod is waiting for another process to let go of devlaunch-main-legacy"
-        ) && run
-            .err
-            .contains("'dl devlaunch-main-legacy kill' clears whatever is holding it"),
-        "the blocked delete offered no way out: {}",
+        ),
+        "the blocked delete said nothing: {}",
+        run.err
+    );
+    assert!(
+        run.err.contains(
+            "dl: nothing on this host is holding devlaunch-main-legacy, so whatever devpod is \
+             waiting on is out of dl's reach. This rm is still waiting."
+        ),
+        "the blocked delete never reported its sweep: {}",
+        run.err
+    );
+    assert!(
+        !run.err.contains("another terminal"),
+        "dl still tells the reader to run kill by hand: {}",
         run.err
     );
 }

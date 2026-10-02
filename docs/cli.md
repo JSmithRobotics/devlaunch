@@ -388,10 +388,10 @@ removal (a signal handler may not allocate or lock, and this one `_exit`s):
 
 What all three *do* run is the cleanup the removal is not: the staged plaintext
 `GH_TOKEN` file is unlinked and the `devpod up` child is killed, so none of these three
-leaves a credential on disk or a build running behind you. The one exception is a run
-whose SIGTERM was disarmed before it started. The drain fells the build with a
-`killpg(…, SIGTERM)`, so disarming that signal disarms its own reach into the child too.
-Ctrl-\ (SIGQUIT) is not one of them and still does mean "die now and dump core", where
+leaves a credential on disk or a build running behind you. The drain sends the build's
+process group a SIGTERM, gives the `devpod up` up to two seconds to unwind, and then sends
+the group a SIGKILL. So a run whose SIGTERM was disarmed before it started, and whose child
+inherits that, still loses the build, two seconds later. Ctrl-\ (SIGQUIT) is not one of them and still does mean "die now and dump core", where
 tidying up first is not what it asks for. The workspace is what stays, still there
 under its name, and `dl <ws> rm` is how it goes.
 
@@ -930,9 +930,19 @@ waits for as long as whatever holds the lock lives. The usual holder is a `devpo
 up` that outlived the `dl` that started it: reparented to init, sleeping, no
 children, and nothing on the machine is ever going to reap it.
 
-dl watches for that line. An `rm` behind the lock says so while it waits and names
-the `kill` that clears it; the terminal it is printed in is busy holding the command
-the advice is about, so the advice names another one on purpose.
+On Linux dl makes that orphan hard to create. Each `devpod up` it starts is set to
+take a SIGKILL from the kernel when its `dl` dies (`PR_SET_PDEATHSIG`), so a `dl`
+that is SIGKILLed, or whose interrupt handler signals an `up` that does not stop,
+takes the `up` with it. `aid`'s background boot gets a SIGINT the same way, so an
+`aid` that dies cancels its boot as a Ctrl-C would. A holder started some other way,
+or on another host, can still wedge the workspace, and the sweep below is for that.
+
+dl watches for that line. **An `rm`, `rme` or `--rm` behind the lock does not wait
+for you either.** It says devpod is waiting, then runs the same sweep a launch runs,
+described next, and the delete goes on once the holder lets go. A holder that
+somebody is still waiting on is spared. When that is a live build, which `kill`
+spares too, the line says to stop it in its own terminal, and the delete goes on
+once it lets go.
 
 **A launch behind the lock does not wait for you.** It says devpod is waiting and
 that the wait has no deadline, and then it clears the lock itself: the same sweep
@@ -942,7 +952,10 @@ restarted and not abandoned. devpod's acquire polls behind that five second line
 the `up` that was blocked takes the freed flock itself and goes on to build, about
 a second later, measured. Every verb that brings a workspace up is covered, `dl
 <ws>` itself, `up`, `restart`, `recreate`, `reset`, `code` and `dotfiles`, because
-they all run the same `devpod up`.
+they all run the same `devpod up`. The sweep runs on devpod's first lock line and
+again once a minute for as long as the wait goes on, because a holder that a live
+`dl` was behind can lose that `dl` later. A repeat sweep prints a line only when it
+signalled something.
 
 Three things it will not do, and they are the reason a launch may do this at all.
 It never signals a holder somebody is waiting on: a `devpod up` with a live `dl`
@@ -1064,10 +1077,13 @@ on screen above it.
 A `dl <ws> rm` that devpod cannot get the lock for is the harder half, because it
 never refuses: devpod waits on that lock with no deadline, logging the five second
 line at the top of this section for as long as the holder lives, so there is no
-exit code for anything downstream to read. dl reads devpod's stderr as it arrives
-instead, and answers the first of those lines while the command is still blocked,
-naming the `dl <ws> kill` to run in another terminal. It says it once, however many
-times devpod says it.
+exit code for anything downstream to read. dl reads devpod's output as it arrives
+instead, and answers the first of those lines while the command is still blocked:
+it prints the launch's notice, the one that ends "Looking for what is holding
+it...", and runs the sweep described above. It sweeps again on every twelfth line
+after that, about once a minute, and prints a repeat sweep only when it signalled
+something. `dl <ws> kill` ends in this same delete, so a holder that arrives after
+its own sweep is swept here too.
 
 
 ## When devpod is missing or will not answer

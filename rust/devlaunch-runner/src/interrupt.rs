@@ -15,8 +15,9 @@
 //!
 //! This module is the missing `finally`, expressed as the only things a handler
 //! is allowed to do about a file and a child: `unlink(2)`/`rmdir(2)` a path, and
-//! `killpg(2)`/`kill(2)` a process group or a single detached child. All four are
-//! on POSIX's async-signal-safe list.
+//! `killpg(2)`/`kill(2)` a process group or a single detached child, with
+//! `waitpid(2)` and `poll(2)` to give the group's leader a moment to act on its
+//! SIGTERM before the SIGKILL. All of them are on POSIX's async-signal-safe list.
 //!
 //! # The registry is lock-free by construction
 //!
@@ -179,6 +180,61 @@ fn register_in(slots: &'static [AtomicPtr<libc::c_char>], path: &Path) -> Option
     None
 }
 
+/// Have the child `command` spawns take `signal` when this process dies, however
+/// it dies.
+///
+/// The handler below is what tears a `devpod up` down when `dl` is *told* to stop,
+/// and it is not enough on its own. A SIGKILL runs no handler at all, and a
+/// `devpod up` that takes the handler's SIGTERM and does not act on it outlives
+/// the `_exit` behind it. Either way the child is reparented to init still holding
+/// devpod's workspace flock, and every later `dl <ws>`, `rm` and `devpod delete`
+/// waits on it. That was measured on a host: two such orphans of an `aid
+/// --boot-up` sat for four hours, and the kernel log showed no OOM kill. Linux's
+/// `PR_SET_PDEATHSIG` is the kernel's own answer, and it does not depend on this
+/// process getting to run anything.
+///
+/// **The race it leaves, and how it is closed.** The parent can die after the fork
+/// and before the `prctl`, and then the child is already init's and no death is
+/// left to signal it. So the pid is read here, before the fork, and the child
+/// compares its parent with it once the `prctl` is in: a mismatch means the parent
+/// is gone, and the child `_exit`s instead of `exec`ing.
+///
+/// **The kernel watches the parent *thread*, not the process.** The signal fires
+/// when the thread that forked exits, so a child spawned from a short-lived thread
+/// would be killed when that thread ends. Every child this is set on is spawned
+/// from `main` in both binaries: the launch's `devpod up` and `aid`'s boot child.
+/// A caller that spawns from another thread has to keep that thread alive for as
+/// long as the child should live.
+///
+/// A no-op off Linux, where there is no `PR_SET_PDEATHSIG`: the handler's group
+/// kill is all those hosts get.
+pub fn ends_with_this_process(command: &mut std::process::Command, signal: i32) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: `getpid` reads a value and touches nothing.
+        let parent = unsafe { libc::getpid() };
+        // SAFETY: `prctl`, `getppid` and `_exit` are bare syscalls, which is all a
+        // pre-exec hook may make: no allocation, no locks. The closure captures two
+        // integers by value.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, signal as libc::c_ulong, 0, 0, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent {
+                    libc::_exit(1);
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (command, signal);
+    }
+}
+
 /// Record the process group of the foreground child now being waited on, so the
 /// interrupt handler can tear it down. Paired with [`clear_foreground_child`]
 /// once the child is reaped.
@@ -196,9 +252,10 @@ pub(crate) fn clear_foreground_child() {
 ///
 /// # Safety
 ///
-/// Async-signal-safe, and only that: it calls `killpg`, `unlink`, `rmdir` and
-/// `_exit`, all on POSIX's async-signal-safe list, and reads only lock-free
-/// atomics. It must be called **only** from a signal handler (it never
+/// Async-signal-safe, and only that: it calls `killpg`, `waitpid`, `poll`,
+/// `unlink`, `rmdir` and `_exit`, all on POSIX's async-signal-safe list, and reads
+/// only lock-free atomics. It can take up to two seconds, while a foreground
+/// child that took its SIGTERM unwinds. It must be called **only** from a signal handler (it never
 /// returns). Calling it from ordinary code would end the process without
 /// flushing anything.
 pub unsafe fn cleanup_and_exit(code: i32) -> ! {
@@ -223,9 +280,9 @@ unsafe fn drain() {
     // `isatty`, `write`, and no allocation.
     //
     // Its position among the three is arbitrary and deliberately not argued for:
-    // the child below is signalled, not waited for, so it can still be writing
-    // whatever it likes to this terminal after `_exit` either way. Repairing
-    // after the kill would not close that, and nothing here can.
+    // the child below is waited for only briefly, and what is left of its group
+    // can still be writing to this terminal as it dies. Repairing after the kill
+    // would not close that, and nothing here can.
     crate::terminal::restore();
     // The child next: killing the `devpod up` group before unlinking means the
     // build is already on its way down by the time the token it was handed is
@@ -247,6 +304,28 @@ unsafe fn drain() {
         // reap rather than the sender.
         unsafe {
             libc::killpg(pgid, libc::SIGTERM);
+        }
+        // Then a short wait for the group's leader, and SIGKILL for whatever is
+        // left. Two reasons, and both are about the `devpod up` that holds the
+        // workspace's flock. On Linux that child also takes a SIGKILL from the
+        // kernel the moment this process exits ([`ends_with_this_process`]), so
+        // an `_exit` straight after the SIGTERM would give devpod no time to
+        // unwind at all, and an unwind is what takes its busy marker with it. And
+        // a child that ignores SIGTERM, which is how the orphans this was written
+        // for came about, is stopped here rather than left for the kernel or for
+        // nobody, off Linux. The rest of the group goes with it: devpod's own
+        // children are in it.
+        //
+        // SAFETY: `waitpid`, `poll` and `killpg` are async-signal-safe. Reaping
+        // the leader frees its pid, so the reap is not what keeps the SIGKILL on
+        // target. The live group is: Linux does not hand out a pgid while any
+        // member of that group lives, and an empty group makes `killpg` fail
+        // ESRCH. The window left is the one the SIGTERM above has: the group
+        // empties and a new group takes the number before the SIGKILL, which
+        // needs the pid space to wrap inside the wait.
+        unsafe {
+            wait_for_the_leader(pgid);
+            libc::killpg(pgid, libc::SIGKILL);
         }
     }
     // The detached children next, for the same reason the foreground child is
@@ -276,6 +355,41 @@ unsafe fn drain() {
             unsafe {
                 libc::rmdir(path);
             }
+        }
+    }
+}
+
+/// How long the drain gives the foreground child to act on its SIGTERM before it
+/// is SIGKILLed: two seconds, `kill`'s own SIGTERM grace for the same `devpod
+/// up`, in steps of [`UNWIND_STEP_MS`].
+const UNWIND_STEPS: u32 = 40;
+
+/// One step of [`UNWIND_STEPS`], in milliseconds.
+const UNWIND_STEP_MS: libc::c_int = 50;
+
+/// Wait, for [`UNWIND_STEPS`] at most, for the foreground child that leads group
+/// `pgid` to exit, and reap it.
+///
+/// The leader and not the group, because the leader is the one this process can
+/// wait for: a reaped zombie is how its exit is seen here, and a group whose
+/// leader is a zombie still answers `killpg(pgid, 0)`. The rest of the group is
+/// SIGKILLed after this returns either way. `ECHILD` is the main thread reaping it
+/// first, which is the same answer.
+///
+/// # Safety
+///
+/// Same contract as [`drain`]: `waitpid` and `poll` are async-signal-safe.
+unsafe fn wait_for_the_leader(pgid: i32) {
+    for _ in 0..UNWIND_STEPS {
+        let mut status: libc::c_int = 0;
+        // SAFETY: async-signal-safe; see the function contract.
+        let reaped = unsafe { libc::waitpid(pgid, &mut status, libc::WNOHANG) };
+        if reaped != 0 {
+            return;
+        }
+        // SAFETY: a `poll` of no descriptors is a sleep, and async-signal-safe.
+        unsafe {
+            libc::poll(ptr::null_mut(), 0, UNWIND_STEP_MS);
         }
     }
 }

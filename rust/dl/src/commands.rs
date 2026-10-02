@@ -1161,7 +1161,12 @@ fn remove_addressed<'r>(
         // Printed from inside the call rather than said through the sink beside it,
         // because the whole value of the sentence is its timing: the delete it is
         // about has not returned and, until somebody acts on this, is not going to.
-        &mut |DeleteStalled::OnTheLock| eprintln!("{}", render::delete_blocked(workspace_id, word)),
+        &mut |stalled| match stalled {
+            DeleteStalled::OnTheLock => eprintln!("{}", render::delete_blocked(workspace_id)),
+            DeleteStalled::Swept(released) => {
+                eprintln!("{}", render::delete_swept(workspace_id, word, &released));
+            }
+        },
         &mut notices,
     );
     match removed {

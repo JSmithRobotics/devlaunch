@@ -59,8 +59,8 @@ impl World {
             String::from_utf8_lossy(&built.stderr)
         );
 
-        // Replace the fake `devpod`: `up` records its own pid and then blocks,
-        // every other subcommand delegates to the shim the scenario installed.
+        // Replace the fake `devpod`: `up` records its own pid, forks a child that
+        // records its pid, and blocks on it; every other subcommand delegates to the shim the scenario installed.
         // The original is `#!/bin/sh` + one `exec <python> <shim> "$@"` line, and
         // the delegate reuses that exact line so `status`/`list`/`ssh` behave as
         // before.
@@ -74,8 +74,10 @@ impl World {
             "#!/bin/sh\n\
              if [ \"$1\" = \"up\" ]; then\n\
              \x20 echo \"$$\" > \"$DL_UP_PID\"\n\
+             \x20 sleep 30 &\n\
+             \x20 echo \"$!\" > \"$DL_UP_CHILD_PID\"\n\
              \x20 : > \"$DL_UP_STARTED\"\n\
-             \x20 exec sleep 30\n\
+             \x20 wait\n\
              fi\n\
              {delegate}\n"
         );
@@ -147,7 +149,9 @@ struct Aftermath {
     code: Option<i32>,
     /// Whether the plaintext GitHub-token file is still on disk.
     token_left: bool,
-    /// Whether the `devpod up` child outlived the `dl` that started it.
+    /// Whether the `devpod up` child, or the child it forked, outlived the `dl`
+    /// that started it. The forked one is what pins the drain's group-wide
+    /// SIGKILL: unlike the `up`, it does not die with `dl` by pdeathsig.
     up_alive: bool,
 }
 
@@ -159,6 +163,7 @@ struct MidUp {
     child: std::process::Child,
     tmpdir: PathBuf,
     up: String,
+    up_child: String,
 }
 
 impl MidUp {
@@ -195,6 +200,7 @@ impl MidUp {
         let tmpdir = world.path("tmp");
         let up_pid = world.path("up.pid");
         let up_started = world.path("up.started");
+        let up_child_pid = world.path("up-child.pid");
 
         let child = command
             .env_clear()
@@ -213,6 +219,7 @@ impl MidUp {
             .env("TMPDIR", tmpdir.display().to_string())
             .env("DL_UP_PID", up_pid.display().to_string())
             .env("DL_UP_STARTED", up_started.display().to_string())
+            .env("DL_UP_CHILD_PID", up_child_pid.display().to_string())
             .env("GIT_SSH_COMMAND", "false")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -231,11 +238,13 @@ impl MidUp {
             "the token is on disk before the signal"
         );
         let up = std::fs::read_to_string(&up_pid).expect("the up pid");
+        let up_child = std::fs::read_to_string(&up_child_pid).expect("the up's child's pid");
         MidUp {
             _world: world,
             child,
             tmpdir,
             up: up.trim().to_string(),
+            up_child: up_child.trim().to_string(),
         }
     }
 
@@ -267,7 +276,7 @@ impl MidUp {
         Aftermath {
             code: status.code(),
             token_left: token_file(&self.tmpdir).is_some(),
-            up_alive: !is_dead(&self.up),
+            up_alive: !is_dead(&self.up) || !is_dead(&self.up_child),
         }
     }
 }
@@ -308,9 +317,8 @@ enum Ignored {
     /// The inherited ignore loses: the signal drains anyway, exiting this code.
     StillDrains(i32),
     /// The inherited ignore wins: the signal ends nothing, and the run is left for
-    /// a Ctrl-C to finish — which drains at 130 and reaches the `devpod up` child,
-    /// unless `up_survives` says the disarming reached the child too.
-    Honoured { up_survives: bool },
+    /// a Ctrl-C to finish — which drains at 130 and reaches the `devpod up` child.
+    Honoured,
 }
 
 /// The inherited-ignore rule stated as data, one row per signal `dl` handles —
@@ -326,14 +334,13 @@ enum Ignored {
 /// while the set stays put is caught by nothing but review.
 const INHERITED_IGNORE: [(&str, Ignored); 3] = [
     ("INT", Ignored::StillDrains(130)),
-    // The one row whose child outlives the Ctrl-C, and not because of anything
-    // `dl` decides: `trap '' TERM` is inherited by everything `dl` spawns, and the
-    // drain fells the build with a `killpg(…, SIGTERM)`. Disarming SIGTERM for the
-    // run therefore disarms the drain's own reach into the child — inherent to
-    // killing a group with the signal the caller switched off, and true of any
-    // program that tears its children down that way.
-    ("TERM", Ignored::Honoured { up_survives: true }),
-    ("HUP", Ignored::Honoured { up_survives: false }),
+    // `trap '' TERM` is inherited by everything `dl` spawns, so the drain's
+    // SIGTERM does not reach the build here. This row's child used to outlive the
+    // Ctrl-C for that reason. The drain now SIGKILLs the group after a short wait,
+    // so the build goes either way. The `up`'s forked child is what proves it:
+    // pdeathsig ends the `up` itself when `dl` exits, but not a child it forked.
+    ("TERM", Ignored::Honoured),
+    ("HUP", Ignored::Honoured),
 ];
 
 #[test]
@@ -355,7 +362,7 @@ fn an_inherited_ignore_wins_for_the_two_signals_that_mean_it_and_loses_for_ctrl_
             // For the two signals this branch adds, an inherited ignore is a
             // statement: `nohup dl …` disarms SIGHUP precisely so the run outlives
             // the terminal, and draining on it would take that away.
-            Ignored::Honoured { up_survives } => {
+            Ignored::Honoured => {
                 run.send(signal);
                 assert!(
                     run.survives(Duration::from_millis(500)),
@@ -368,7 +375,7 @@ fn an_inherited_ignore_wins_for_the_two_signals_that_mean_it_and_loses_for_ctrl_
                     Aftermath {
                         code: Some(130),
                         token_left: false,
-                        up_alive: up_survives,
+                        up_alive: false,
                     },
                     "after SIG{signal} was disarmed the run must still answer Ctrl-C"
                 );

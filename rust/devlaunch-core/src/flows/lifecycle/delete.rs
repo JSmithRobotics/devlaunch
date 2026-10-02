@@ -15,6 +15,7 @@ use crate::clients::docker;
 use crate::domain::metadata::MetadataStorage;
 use crate::domain::workspace_state::NonEmpty;
 use crate::flows::kept_copies::{self, KeptCopies};
+use crate::flows::kill;
 use crate::flows::listing::CommandContext;
 use crate::flows::workspace_clone::{RemoveWorkspaceError, Removed, WorkspaceCloneManager};
 use crate::notices::Notices;
@@ -273,14 +274,31 @@ pub(crate) fn workspace_delete(
     // names live. Named afterwards, this would find nothing every time and look
     // like a working cleanup.
     let named = devcontainer_volumes(devpod_home, workspace_id);
-    let mut said = false;
+    // The lock line is answered the way a launch answers it (devlaunch#602): said,
+    // and then *cleared*, by the same sweep `up` runs. It used to be said and
+    // nothing more, with advice to run `kill` in another terminal, which left an
+    // `rm` behind an orphaned `devpod up` waiting until somebody did. The sweep
+    // takes only orphans, so a holder somebody is still waiting on is spared here
+    // as it is there, and this delete's own `devpod delete` is this process's
+    // child and is never one of them. Swept again on [`devpod::LockWait`]'s count,
+    // for the launch's reason: a holder spared once can lose its parent later.
+    let runner = context.runner();
+    let mut lock_wait = devpod::LockWait::default();
     let exit = match devpod::run_watching(
-        context.runner(),
+        runner,
         &delete_call(workspace_id, insistence, persistence),
         &mut |line| {
-            if !said && devpod::says_it_is_blocked(line) {
-                said = true;
+            let first = match lock_wait.read(line) {
+                devpod::LockLine::Nothing => return,
+                devpod::LockLine::First => true,
+                devpod::LockLine::SweepAgain => false,
+            };
+            if first {
                 stalled(DeleteStalled::OnTheLock);
+            }
+            let released = kill::release_the_lock(runner, workspace_id, &mut std::thread::sleep);
+            if first || released.signalled_any() {
+                stalled(DeleteStalled::Swept(released));
             }
         },
     ) {
@@ -471,14 +489,19 @@ pub(super) const WEDGED_DELETE: Duration = Duration::from_secs(60);
 /// so a delete that hits this returns when the holder dies and not before. By the
 /// time a `Result` could carry the fact, the fact is hours stale.
 ///
-/// Reported once per call however many times devpod says it. The line repeats
-/// every five seconds for as long as the holder lives, and advice repeated on that
-/// timer buries itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// [`OnTheLock`](Self::OnTheLock) is reported once per call however many times
+/// devpod says it. The line repeats every five seconds for as long as the holder
+/// lives, and a notice repeated on that timer buries itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeleteStalled {
     /// Something else holds this workspace's lock, and devpod is waiting on it
     /// with no deadline.
     OnTheLock,
+    /// What this delete's own sweep of that lock came to, which is the launch's
+    /// [`kill::release_the_lock`] verbatim. Said straight after
+    /// [`OnTheLock`](Self::OnTheLock), and again only when a later sweep of the
+    /// same wait signalled something.
+    Swept(kill::Released),
 }
 
 /// How hard devpod is pushed to let go of the workspace.

@@ -1861,9 +1861,14 @@ fn up_under_stage(
     // holder letting go, measured on the host in devlaunch#602. Nothing here waits
     // for that: the sweep returns and the `up` this is watching goes on to build.
     //
-    // Once per launch, which is the guard `said` was already keeping: the sweep
-    // reads the process table and spends the escalation's grace, and devpod's line
-    // arrives every five seconds for as long as anything is still held.
+    // Said once per launch, and swept on the first line and then again every
+    // [`devpod::SWEEP_AGAIN_EVERY`] lines, which is [`devpod::LockWait`]'s count.
+    // Not on every line: the sweep reads the process table and spends the
+    // escalation's grace, and devpod's line arrives every five seconds for as
+    // long as anything is still held. But not only once either: a holder the
+    // first sweep spared, because a live `dl` was behind it, is an orphan the
+    // moment that `dl` dies, and a launch that never looks again waits on it
+    // forever. A later sweep speaks only when it signalled something.
     //
     // The runner is lifted out of `context` first because the closure needs it too
     // — `runner()` hands back a borrow of the command's lifetime rather than of
@@ -1877,7 +1882,7 @@ fn up_under_stage(
         .identity()
         .unwrap_or(request.source)
         .to_owned();
-    let mut said = false;
+    let mut lock_wait = devpod::LockWait::default();
     let exit = devpod::run_watching(
         runner,
         &Call::new(args)
@@ -1897,22 +1902,27 @@ fn up_under_stage(
                 notices.say(LaunchNotice::MountSourceEmpty);
                 return;
             }
-            if said || !devpod::says_it_is_blocked(line) {
-                return;
+            let first = match lock_wait.read(line) {
+                devpod::LockLine::Nothing => return,
+                devpod::LockLine::First => true,
+                devpod::LockLine::SweepAgain => false,
+            };
+            if first {
+                notices.say(LaunchNotice::UpBlockedOnTheLock {
+                    workspace_id: blocked_on.clone(),
+                });
             }
-            said = true;
-            notices.say(LaunchNotice::UpBlockedOnTheLock {
-                workspace_id: blocked_on.clone(),
-            });
             // The grace period, really spent, as the binary spends it for `kill`:
             // this call site is core's own, and there is no launch-side clock to
             // thread through eight parameters for the sake of two seconds that
             // only elapse when an orphan actually has to be signalled.
             let released = kill::release_the_lock(runner, &blocked_on, &mut std::thread::sleep);
-            notices.say(LaunchNotice::SweptTheLockHolders {
-                workspace_id: blocked_on.clone(),
-                released,
-            });
+            if first || released.signalled_any() {
+                notices.say(LaunchNotice::SweptTheLockHolders {
+                    workspace_id: blocked_on.clone(),
+                    released,
+                });
+            }
         },
     )?;
     // `up` creates and starts workspaces, so any snapshot of `devpod list` taken
@@ -6561,15 +6571,24 @@ mod tests {
     /// One `up` of `myws` that devpod parks on its workspace lock, against a host
     /// whose process table is `table`.
     fn up_blocked_against(table: &str) -> Blocked {
+        up_blocked_for_lines(table, 1)
+    }
+
+    /// The same, with devpod saying its lock line `lines` times before it gets
+    /// the lock.
+    fn up_blocked_for_lines(table: &str, lines: usize) -> Blocked {
+        up_blocked_through(&[table], lines)
+    }
+
+    /// The same, against a host whose process table reads `tables` in turn.
+    fn up_blocked_through(tables: &[&str], lines: usize) -> Blocked {
         let scene = Scene::new();
         scene.runner.script(
             ["devpod", "up"],
-            Response::exited(0).and_stdout(BLOCKED_ON_THE_LOCK),
+            Response::exited(0).and_stdout(BLOCKED_ON_THE_LOCK.repeat(lines)),
         );
-        scene
-            .runner
-            .script(["ps"], Response::stdout(table.to_owned()));
-        let mut context = CommandContext::new(&scene.runner);
+        let runner = TablesInTurn::new(&scene.runner, tables);
+        let mut context = CommandContext::new(&runner);
         let token = HostToken::new();
         let request = UpRequest::new(
             "owner/repo",
@@ -6594,7 +6613,61 @@ mod tests {
         Blocked {
             notices,
             signals: scene.runner.args_to("kill"),
-            tables_read: scene.runner.calls_to("ps").len(),
+            tables_read: runner.tables_read(),
+        }
+    }
+
+    /// A runner that answers `ps` with `tables` in turn, the last one for every
+    /// read after it, and hands every other spawn to `rest`.
+    struct TablesInTurn<'a> {
+        rest: &'a FakeRunner,
+        tables: Vec<FakeRunner>,
+        read: Mutex<usize>,
+    }
+
+    impl<'a> TablesInTurn<'a> {
+        fn new(rest: &'a FakeRunner, tables: &[&str]) -> Self {
+            assert!(!tables.is_empty(), "at least one table to answer with");
+            Self {
+                rest,
+                tables: tables
+                    .iter()
+                    .map(|table| FakeRunner::new().with_script(["ps"], Response::stdout(*table)))
+                    .collect(),
+                read: Mutex::new(0),
+            }
+        }
+
+        fn tables_read(&self) -> usize {
+            *self.read.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+    }
+
+    impl Runner for TablesInTurn<'_> {
+        fn capture(&self, spec: &SpawnSpec) -> Outcome<CapturedText> {
+            if spec.program() != "ps" {
+                return self.rest.capture(spec);
+            }
+            let mut read = self.read.lock().unwrap_or_else(PoisonError::into_inner);
+            let table = &self.tables[(*read).min(self.tables.len() - 1)];
+            *read += 1;
+            table.capture(spec)
+        }
+
+        fn passthrough(&self, spec: &SpawnSpec) -> Outcome {
+            self.rest.passthrough(spec)
+        }
+
+        fn session(&self, spec: &SpawnSpec, on_stderr_line: &mut dyn FnMut(&str)) -> Outcome {
+            self.rest.session(spec, on_stderr_line)
+        }
+
+        fn watched(&self, spec: &SpawnSpec, on_line: &mut dyn FnMut(&str)) -> Outcome {
+            self.rest.watched(spec, on_line)
+        }
+
+        fn detach(&self, what: &Invocation) -> DetachOutcome {
+            self.rest.detach(what)
         }
     }
 
@@ -6705,6 +6778,75 @@ mod tests {
         );
     }
 
+    /// A wait that goes on is swept again, once a minute of devpod's lines. A
+    /// holder the first sweep spared because a live `dl` was behind it becomes an
+    /// orphan the moment that `dl` dies, and a launch that swept only once would
+    /// then wait on it for good. The repeat says nothing when it took nothing: the
+    /// first sweep's finding has already been said.
+    #[test]
+    fn an_up_that_stays_blocked_sweeps_again_and_repeats_no_finding() {
+        let lines = 1 + usize::try_from(devpod::SWEEP_AGAIN_EVERY).expect("a small count");
+        let blocked = up_blocked_for_lines(
+            "    1       0 /sbin/init\n 5000       1 dl myws\n 5001    5000 devpod up myws\n",
+            lines,
+        );
+
+        assert_eq!(
+            blocked.tables_read, 2,
+            "the launch swept on the first lock line and once more a minute later",
+        );
+        assert!(blocked.signals.is_empty(), "{:?}", blocked.signals);
+        assert_eq!(
+            blocked_notices(&blocked.notices),
+            1,
+            "{:?}",
+            blocked.notices
+        );
+        assert_eq!(
+            releases(&blocked.notices).len(),
+            1,
+            "a repeat that took nothing is not said: {:?}",
+            blocked.notices,
+        );
+    }
+
+    /// A holder the first sweep spared, because a live `dl` was behind it, is an
+    /// orphan once that `dl` dies. The later sweep that takes it is said, because
+    /// this time the sweep did something.
+    #[test]
+    fn an_up_whose_spared_holder_is_orphaned_later_reports_the_later_sweep() {
+        let lines = 1 + usize::try_from(devpod::SWEEP_AGAIN_EVERY).expect("a small count");
+
+        let blocked = up_blocked_through(
+            &[
+                "    1       0 /sbin/init\n 5000       1 dl myws\n 5001    5000 devpod up myws\n",
+                "    1       0 /sbin/init\n 5001       1 devpod up myws\n",
+                "    1       0 /sbin/init\n",
+            ],
+            lines,
+        );
+
+        assert_eq!(
+            blocked.signals.first().map(Vec::as_slice),
+            Some(["-TERM".to_owned(), "5001".to_owned()].as_slice()),
+            "the second sweep signalled the holder its `dl` left behind: {:?}",
+            blocked.signals,
+        );
+        let reported = releases(&blocked.notices);
+        let [kill::Released::Swept(spared), kill::Released::Swept(taken)] = reported.as_slice()
+        else {
+            panic!(
+                "the first sweep, then the sweep that took something: {:?}",
+                blocked.notices
+            );
+        };
+        assert!(spared.signalled.is_empty(), "{spared:?}");
+        assert!(
+            matches!(taken.freed(), kill::Freed::Entirely { .. }),
+            "{taken:?}"
+        );
+    }
+
     /// The launch's own `devpod up` is not something holding the workspace: it is
     /// the process *waiting* for it. It names the workspace in its own argv and
     /// its parent is this live `dl`, so the sweep's own reading finds it, calls it
@@ -6748,10 +6890,11 @@ mod tests {
         );
     }
 
-    /// Once per launch, however long devpod goes on repeating its line. The sweep
-    /// reads the process table and spends the escalation's grace, so a sweep on
-    /// devpod's five-second timer would spend the whole of a long wait signalling
-    /// things it had already signalled.
+    /// Not on every line devpod repeats. The sweep reads the process table and
+    /// spends the escalation's grace, so a sweep on devpod's five-second timer
+    /// would spend the whole of a long wait signalling things it had already
+    /// signalled. Three lines is well inside one [`devpod::SWEEP_AGAIN_EVERY`],
+    /// so they get one sweep.
     #[test]
     fn an_up_that_stays_blocked_sweeps_once() {
         let scene = Scene::new();

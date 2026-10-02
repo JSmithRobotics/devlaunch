@@ -12,6 +12,7 @@ pub fn devlaunch_core::flows::launch::ColdRefused::fmt(&self, &mut core::fmt::Fo
 impl core::marker::StructuralPartialEq for devlaunch_core::flows::launch::ColdRefused
 pub enum devlaunch_core::api::DeleteStalled
 pub devlaunch_core::api::DeleteStalled::OnTheLock
+pub devlaunch_core::api::DeleteStalled::Swept(devlaunch_core::flows::kill::Released)
 impl core::clone::Clone for devlaunch_core::flows::lifecycle::DeleteStalled
 pub fn devlaunch_core::flows::lifecycle::DeleteStalled::clone(&self) -> devlaunch_core::flows::lifecycle::DeleteStalled
 impl core::cmp::Eq for devlaunch_core::flows::lifecycle::DeleteStalled
@@ -19,7 +20,6 @@ impl core::cmp::PartialEq for devlaunch_core::flows::lifecycle::DeleteStalled
 pub fn devlaunch_core::flows::lifecycle::DeleteStalled::eq(&self, &devlaunch_core::flows::lifecycle::DeleteStalled) -> bool
 impl core::fmt::Debug for devlaunch_core::flows::lifecycle::DeleteStalled
 pub fn devlaunch_core::flows::lifecycle::DeleteStalled::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for devlaunch_core::flows::lifecycle::DeleteStalled
 impl core::marker::StructuralPartialEq for devlaunch_core::flows::lifecycle::DeleteStalled
 pub enum devlaunch_core::api::Insistence
 pub devlaunch_core::api::Insistence::Insisted
@@ -749,6 +749,7 @@ pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude(&s
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::stage_missing_for_this_launch(&self, &str) -> bool
 pub enum devlaunch_core::flows::lifecycle::DeleteStalled
 pub devlaunch_core::flows::lifecycle::DeleteStalled::OnTheLock
+pub devlaunch_core::flows::lifecycle::DeleteStalled::Swept(devlaunch_core::flows::kill::Released)
 impl core::clone::Clone for devlaunch_core::flows::lifecycle::DeleteStalled
 pub fn devlaunch_core::flows::lifecycle::DeleteStalled::clone(&self) -> devlaunch_core::flows::lifecycle::DeleteStalled
 impl core::cmp::Eq for devlaunch_core::flows::lifecycle::DeleteStalled
@@ -756,7 +757,6 @@ impl core::cmp::PartialEq for devlaunch_core::flows::lifecycle::DeleteStalled
 pub fn devlaunch_core::flows::lifecycle::DeleteStalled::eq(&self, &devlaunch_core::flows::lifecycle::DeleteStalled) -> bool
 impl core::fmt::Debug for devlaunch_core::flows::lifecycle::DeleteStalled
 pub fn devlaunch_core::flows::lifecycle::DeleteStalled::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for devlaunch_core::flows::lifecycle::DeleteStalled
 impl core::marker::StructuralPartialEq for devlaunch_core::flows::lifecycle::DeleteStalled
 pub enum devlaunch_core::flows::lifecycle::Insistence
 pub devlaunch_core::flows::lifecycle::Insistence::Insisted

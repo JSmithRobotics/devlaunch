@@ -32,9 +32,11 @@
 //!
 //! Why the orphan exists at all. Something killed a `dl` and left its child
 //! running, which is either a path outside #304's SIGTERM drain or a signal that
-//! drain cannot catch. That is a different question with a different fix, and a
-//! verb that treats the symptom does not stop being worth having while it is
-//! open.
+//! drain cannot catch. Its fix is in `devlaunch-runner`: on Linux the launch's
+//! `devpod up` takes `PR_SET_PDEATHSIG`
+//! (`devlaunch_runner::interrupt::ends_with_this_process`), so it dies with its
+//! `dl`. This verb still covers what that does not: an orphan left by a `dl` that
+//! predates it, a host that is not Linux, and a holder that `dl` did not start.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -586,6 +588,18 @@ pub enum Released {
     /// Nothing was swept, because this host cannot answer what the sweep is built
     /// on. [`Killed::Unavailable`]'s distinction, for the same reason.
     Unavailable(HostCannot),
+}
+
+impl Released {
+    /// Whether this sweep signalled anything at all.
+    ///
+    /// What decides whether a *repeated* sweep is worth a line. The first sweep of
+    /// a wait is always reported, because its finding is news; a later one that
+    /// found the same thing would only repeat it once a minute, so it speaks only
+    /// when it acted.
+    pub(crate) fn signalled_any(&self) -> bool {
+        matches!(self, Released::Swept(release) if !release.signalled.is_empty())
+    }
 }
 
 /// What one launch's sweep found and what it did about it.
