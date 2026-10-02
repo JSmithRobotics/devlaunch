@@ -32,9 +32,11 @@
 //!
 //! Why the orphan exists at all. Something killed a `dl` and left its child
 //! running, which is either a path outside #304's SIGTERM drain or a signal that
-//! drain cannot catch. That is a different question with a different fix, and a
-//! verb that treats the symptom does not stop being worth having while it is
-//! open.
+//! drain cannot catch. Its fix is in `devlaunch-runner`: on Linux the launch's
+//! `devpod up` takes `PR_SET_PDEATHSIG`
+//! (`devlaunch_runner::interrupt::ends_with_this_process`), so it dies with its
+//! `dl`. This verb still covers what that does not: an orphan left by a `dl` that
+//! predates it, a host that is not Linux, and a holder that `dl` did not start.
 
 use std::path::PathBuf;
 use std::time::Duration;
