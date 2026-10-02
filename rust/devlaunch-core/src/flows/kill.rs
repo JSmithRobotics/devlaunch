@@ -588,6 +588,18 @@ pub enum Released {
     Unavailable(HostCannot),
 }
 
+impl Released {
+    /// Whether this sweep signalled anything at all.
+    ///
+    /// What decides whether a *repeated* sweep is worth a line. The first sweep of
+    /// a wait is always reported, because its finding is news; a later one that
+    /// found the same thing would only repeat it once a minute, so it speaks only
+    /// when it acted.
+    pub(crate) fn signalled_any(&self) -> bool {
+        matches!(self, Released::Swept(release) if !release.signalled.is_empty())
+    }
+}
+
 /// What one launch's sweep found and what it did about it.
 ///
 /// [`Sweep`] minus the two halves a launch has no business in. The pair is kept

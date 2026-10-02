@@ -632,21 +632,25 @@ pub(crate) fn devpod_not_run(call: &str, refused: &NotRun) -> String {
 ///
 /// Printed while the command is still running, which is the only time it is worth
 /// anything: this is the one failure with no downstream to report it, because
-/// devpod's acquire returns when the holder dies and not before. Somebody watching
-/// the five-second line repeat has two choices, wait or intervene, and until now
-/// dl said nothing about either.
+/// devpod's acquire returns when the holder dies and not before.
 ///
-/// **It names another terminal**, because this one is busy holding the command the
-/// advice is about, and Ctrl-C is the alternative it saves people from finding on
-/// their own. `word` is the verb that was typed, so a `--rm` firing at the end of a
-/// session offers the same `kill` the `rm` verb does rather than a word that is not
-/// on the line.
-pub(crate) fn delete_blocked(workspace_id: &str, word: &str) -> String {
-    format!(
-        "dl: devpod is waiting for another process to let go of {workspace_id}, and it will wait \
-         for as long as that takes. In another terminal, 'dl {workspace_id} kill' clears whatever \
-         is holding it and deletes it. (This {word} is still waiting.)"
-    )
+/// **The launch's own sentence**, because the delete now does what the launch does
+/// about it (devlaunch#602): it sweeps the lock, and [`delete_swept`] says how that
+/// went. The line used to tell the reader to run `'dl <ws> kill'` in another
+/// terminal, which is advice to do by hand what dl is about to do unasked, and
+/// `kill` was the only way out of an `rm` behind an orphaned `devpod up`.
+pub(crate) fn delete_blocked(workspace_id: &str) -> String {
+    launch_notice(&LaunchNotice::UpBlockedOnTheLock {
+        workspace_id: workspace_id.to_owned(),
+    })
+    .unwrap_or_default()
+}
+
+/// How a blocked delete's own sweep of devpod's lock ended: the launch's report,
+/// [`swept_the_lock`], ending with where *this delete* stands. `word` is the verb
+/// that was typed, so a `--rm` at the end of a session is not called an `rm`.
+pub(crate) fn delete_swept(workspace_id: &str, word: &str, released: &Released) -> String {
+    swept_the_lock(workspace_id, released, Waiter::Delete(word))
 }
 
 /// The delete that was still running when its deadline ran out.
@@ -1928,7 +1932,8 @@ pub(crate) fn kill_delete_withheld(workspace_id: &str) -> String {
     )
 }
 
-/// How a blocked launch's own sweep of devpod's lock ended (devlaunch#602).
+/// How a blocked launch's or delete's own sweep of devpod's lock ended
+/// (devlaunch#602).
 ///
 /// One line, because a notice is one line, and the whole of the report `dl <ws>
 /// kill` spreads over several has to fit in it. What survives the compression is
@@ -1937,9 +1942,9 @@ pub(crate) fn kill_delete_withheld(workspace_id: &str) -> String {
 /// something on their behalf, and "cleared 1 process" asks them to go and work
 /// out what it was, from a process that no longer exists.
 ///
-/// **Every arm ends by saying where the launch now stands**, which is the one
+/// **Every arm ends by saying where the [`Waiter`] now stands**, which is the one
 /// thing the reader cannot see for themselves: the terminal is still sitting in
-/// the same `devpod up`, and whether that is about to finish or about to wait
+/// the same `devpod up` or `devpod delete`, and whether that is about to finish or about to wait
 /// forever is exactly what this is for.
 ///
 /// The match is over [`Freed`] rather than over the two halves of [`Release`]
@@ -1948,28 +1953,32 @@ pub(crate) fn kill_delete_withheld(workspace_id: &str) -> String {
 /// kill a second said the lock was free and dropped the survivor from the
 /// report. `Freed` answers both questions at once, and its arms are the four
 /// sentences.
-fn swept_the_lock(workspace_id: &str, released: &Released) -> String {
+fn swept_the_lock(workspace_id: &str, released: &Released, waiter: Waiter<'_>) -> String {
+    let (noun, call) = match waiter {
+        Waiter::Launch => ("launch", "devpod up"),
+        Waiter::Delete(word) => (word, "devpod delete"),
+    };
     let release = match released {
         // The sweep never ran. The reason is `kill`'s own, shared through
         // `cannot_sweep` so the two verbs cannot describe one broken host
-        // differently; the frame round it is this launch's, because this launch
-        // has not failed and is about to go on waiting in its own `up`.
+        // differently; the frame round it is the waiter's, because it has not
+        // failed and is about to go on waiting in its own devpod call.
         Released::Unavailable(cannot) => {
             return format!(
-                "dl: {}, so nothing was cleared and this launch is still waiting.",
+                "dl: {}, so nothing was cleared and this {noun} is still waiting.",
                 cannot_sweep(cannot)
             );
         }
         Released::Swept(release) => release,
     };
     match release.freed() {
-        // The good ending, and the one the whole ticket is for. It says the `up`
-        // carries on rather than telling anybody to launch again, because the
-        // blocked `up` is still running and takes the flock itself: devpod's
+        // The good ending, and the one the whole ticket is for. It says the call
+        // carries on rather than telling anybody to run it again, because the
+        // blocked call is still running and takes the flock itself: devpod's
         // acquire is a poll behind that five-second line.
         Freed::Entirely { cleared } => format!(
             "dl: cleared what was holding {workspace_id}, and nothing was waiting on it — {}. \
-             This launch's own devpod up takes the lock from here.",
+             This {noun}'s own {call} takes the lock from here.",
             named(cleared.iter().copied().map(cleared_line))
         ),
         // Half of it. Both halves are said and neither is allowed to imply the
@@ -1979,7 +1988,7 @@ fn swept_the_lock(workspace_id: &str, released: &Released) -> String {
             cleared,
             still_held,
         } => format!(
-            "dl: cleared {} from {workspace_id}, and {}, so this launch is still waiting.{}",
+            "dl: cleared {} from {workspace_id}, and {}, so this {noun} is still waiting.{}",
             named(cleared.iter().copied().map(cleared_line)),
             what_is_left(&still_held),
             what_is_left_to_do(workspace_id, &still_held),
@@ -1989,7 +1998,7 @@ fn swept_the_lock(workspace_id: &str, released: &Released) -> String {
         // build beside an unstoppable orphan is both findings, and asking
         // `any_attended` reported it as only the first.
         Freed::Nothing { still_held } => format!(
-            "dl: {workspace_id} {}. This launch is still waiting.{}",
+            "dl: {workspace_id} {}. This {noun} is still waiting.{}",
             what_is_left(&still_held),
             what_is_left_to_do(workspace_id, &still_held),
         ),
@@ -1997,9 +2006,19 @@ fn swept_the_lock(workspace_id: &str, released: &Released) -> String {
         // and the one that says the wait is not an orphan and not dl's to clear.
         Freed::NothingHeldIt => format!(
             "dl: nothing on this host is holding {workspace_id}, so whatever devpod is waiting \
-             on is out of dl's reach. This launch is still waiting."
+             on is out of dl's reach. This {noun} is still waiting."
         ),
     }
+}
+
+/// Who is waiting behind the lock a sweep was run for: what the sweep's report
+/// ends by saying is still waiting, and which devpod call takes the lock next.
+#[derive(Clone, Copy)]
+enum Waiter<'a> {
+    /// A launch, in its `devpod up`.
+    Launch,
+    /// A delete, in its `devpod delete`, named by the verb that was typed.
+    Delete(&'a str),
 }
 
 /// What a release left holding the workspace, as one clause.
@@ -3237,7 +3256,7 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
         LaunchNotice::SweptTheLockHolders {
             workspace_id,
             released,
-        } => swept_the_lock(workspace_id, released),
+        } => swept_the_lock(workspace_id, released, Waiter::Launch),
 
         // --- the terminal title (no level at all: not a sentence)
         //

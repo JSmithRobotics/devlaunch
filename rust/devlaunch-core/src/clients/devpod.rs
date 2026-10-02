@@ -279,6 +279,49 @@ pub(crate) fn says_it_is_blocked(line: &str) -> bool {
     line.contains("Trying to lock workspace")
 }
 
+/// How many of devpod's lock lines pass between one sweep of the lock and the
+/// next: twelve, which is a minute at devpod's five-second timer.
+///
+/// A sweep that ran once could find nothing to take and then never look again,
+/// while the holder it spared lost its parent a minute later. An attended `devpod
+/// up` whose `dl` dies mid-wait is exactly that holder. Not every line, because a
+/// sweep reads the process table and spends a grace period whenever it signals.
+pub(crate) const SWEEP_AGAIN_EVERY: u32 = 12;
+
+/// What one of devpod's lines means to a call that is watching for its lock wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LockLine {
+    /// The first lock line: say the call is blocked, and sweep.
+    First,
+    /// Another [`SWEEP_AGAIN_EVERY`] lines have passed: sweep again.
+    SweepAgain,
+    /// A lock line between sweeps, or any other line: nothing to do.
+    Nothing,
+}
+
+/// The count of devpod's lock lines one call has seen, which decides when the
+/// call sweeps the lock. One per `devpod up` or `devpod delete`.
+#[derive(Debug, Default)]
+pub(crate) struct LockWait {
+    seen: u32,
+}
+
+impl LockWait {
+    pub(crate) fn read(&mut self, line: &str) -> LockLine {
+        if !says_it_is_blocked(line) {
+            return LockLine::Nothing;
+        }
+        self.seen = self.seen.saturating_add(1);
+        if self.seen == 1 {
+            LockLine::First
+        } else if (self.seen - 1).is_multiple_of(SWEEP_AGAIN_EVERY) {
+            LockLine::SweepAgain
+        } else {
+            LockLine::Nothing
+        }
+    }
+}
+
 /// The host path a devcontainer asked for and this machine does not have, if that
 /// is what this line is about.
 ///
@@ -2724,5 +2767,25 @@ mod tests {
             status(&fake, "myws", Patience::AsLongAsItTakes).expect_err("devpod is absent"),
             StatusUnreadable::NotRun(NotRun::NotInstalled)
         );
+    }
+
+    /// The first lock line sweeps, and then every [`SWEEP_AGAIN_EVERY`]th line
+    /// after it, for as long as devpod goes on waiting. Other lines never count.
+    #[test]
+    fn a_lock_wait_sweeps_first_and_then_once_a_minute() {
+        let lock = "info Trying to lock workspace, seems like another process is running \
+                    machine_client.go:311";
+        let mut wait = LockWait::default();
+        assert_eq!(wait.read("info creating devcontainer"), LockLine::Nothing);
+        assert_eq!(wait.read(lock), LockLine::First);
+        let every = usize::try_from(SWEEP_AGAIN_EVERY).expect("a small count");
+        let mut sweeps = Vec::new();
+        for line in 2..=(1 + 2 * every) {
+            assert_eq!(wait.read("info another build line"), LockLine::Nothing);
+            if wait.read(lock) == LockLine::SweepAgain {
+                sweeps.push(line);
+            }
+        }
+        assert_eq!(sweeps, vec![1 + every, 1 + 2 * every]);
     }
 }

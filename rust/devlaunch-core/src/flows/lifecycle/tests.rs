@@ -61,6 +61,7 @@ use crate::domain::workspace_state::{self, NonEmpty};
 use crate::flows::agent_worktrees::{self, Standing, Verdict};
 use crate::flows::completion_cache;
 use crate::flows::kept_copies::KeptCopies;
+use crate::flows::kill;
 use crate::flows::launch_locks::LaunchLocks;
 use crate::flows::listing::CommandContext;
 use crate::flows::repo_manager::tests::{refusing_reads, refusing_writes, run_git};
@@ -265,8 +266,12 @@ impl Devpod {
 /// `docker` is on the list for the reason `devpod` is: a delete spawns it now,
 /// and a unit test that reached the developer's own docker daemon would be
 /// removing real volumes named after a fixture.
+///
+/// `ps` and `kill` for the same reason: a delete blocked on devpod's lock sweeps
+/// the lock now, as a launch does, and a unit test that read the host's process
+/// table could signal a real process that happens to name a fixture's workspace.
 fn faked(program: &str) -> bool {
-    program == devpod::PROGRAM || program == docker::PROGRAM
+    [devpod::PROGRAM, docker::PROGRAM, "ps", "kill"].contains(&program)
 }
 
 impl Runner for Devpod {
@@ -1900,7 +1905,11 @@ fn a_delete_blocked_on_the_workspace_lock_says_so_while_it_is_blocked() {
         "myws",
         Insistence::NotInsisted,
         Persistence::Ordinary,
-        &mut |DeleteStalled::OnTheLock| stalls += 1,
+        &mut |stalled| {
+            if stalled == DeleteStalled::OnTheLock {
+                stalls += 1;
+            }
+        },
         &mut ignoring(),
     )
     .expect("devpod ran");
@@ -1940,7 +1949,11 @@ fn a_delete_blocked_on_the_workspace_lock_sees_the_line_on_stdout() {
         "myws",
         Insistence::NotInsisted,
         Persistence::Ordinary,
-        &mut |DeleteStalled::OnTheLock| stalls += 1,
+        &mut |stalled| {
+            if stalled == DeleteStalled::OnTheLock {
+                stalls += 1;
+            }
+        },
         &mut ignoring(),
     )
     .expect("devpod ran");
@@ -1977,12 +1990,76 @@ fn a_delete_that_stays_blocked_says_it_once() {
         "myws",
         Insistence::NotInsisted,
         Persistence::Ordinary,
-        &mut |DeleteStalled::OnTheLock| stalls += 1,
+        &mut |stalled| {
+            if stalled == DeleteStalled::OnTheLock {
+                stalls += 1;
+            }
+        },
         &mut ignoring(),
     )
     .expect("devpod ran");
 
     assert_eq!(stalls, 1);
+}
+
+/// A delete parked behind an orphan **clears it**, as a launch does
+/// (devlaunch#602). Before this the delete said the right thing and told the
+/// reader to run `kill` in another terminal, then waited for as long as the
+/// orphan lived, which for an init-reparented `devpod up` is until the machine
+/// reboots. Two of them held a host for four hours that way.
+#[test]
+fn a_delete_blocked_behind_an_orphan_sweeps_it_and_reports_the_sweep() {
+    let world = a_stopping_world();
+    world.devpod.fake.script(
+        ["devpod", "delete"],
+        Response::exited(0).and_stdout(
+            "info Trying to lock workspace, seems like another process is running that \
+             blocks this workspace machine_client.go:311\n",
+        ),
+    );
+    world.devpod.fake.script(
+        ["ps"],
+        Response::stdout(
+            "    1       0 /sbin/init\n732721       1 devpod up myws --ide none\n".to_owned(),
+        ),
+    );
+    let mut world_cache = World::empty();
+    let clones = clones_for(&world_cache.repos_dir, &world_cache.devpod);
+    let mut context = CommandContext::new(&world.devpod);
+    let mut refresh = Refresh::new(&world.updater, &world.cache_path);
+    let mut said = Vec::new();
+
+    let copies = world_cache.copies();
+    workspace_delete(
+        &mut context,
+        &mut refresh,
+        &clones,
+        &mut world_cache.storage,
+        None,
+        &copies,
+        "myws",
+        Insistence::NotInsisted,
+        Persistence::Ordinary,
+        &mut |stalled| said.push(stalled),
+        &mut ignoring(),
+    )
+    .expect("devpod ran");
+
+    assert_eq!(
+        world.devpod.fake.args_to("kill").first().map(Vec::as_slice),
+        Some(["-TERM".to_owned(), "732721".to_owned()].as_slice()),
+        "the delete signalled the orphan holding its workspace",
+    );
+    assert!(
+        matches!(
+            said.as_slice(),
+            [
+                DeleteStalled::OnTheLock,
+                DeleteStalled::Swept(kill::Released::Swept(_))
+            ]
+        ),
+        "the block is said, then its sweep: {said:?}",
+    );
 }
 
 /// The deadline firing is a devpod that *ran* — for a minute, and was then

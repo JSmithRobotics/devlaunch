@@ -379,7 +379,7 @@ impl Machine {
             &KeptCopies::under(&self.cache),
             WORKSPACE,
             removal,
-            &mut |DeleteStalled::OnTheLock| {},
+            &mut |_: DeleteStalled| {},
             said,
         )
         .expect("devpod ran")

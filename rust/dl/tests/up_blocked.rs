@@ -578,9 +578,14 @@ fn a_launch_that_is_sigkilled_mid_up_takes_its_devpod_up_with_it() {
 
     let gone = wait_for(|| !alive(up));
     if !gone {
-        let _ = Command::new("kill").args(["-KILL", &up.to_string()]).output();
+        let _ = Command::new("kill")
+            .args(["-KILL", &up.to_string()])
+            .output();
     }
-    assert!(gone, "the devpod up {up} outlived the dl that was SIGKILLed");
+    assert!(
+        gone,
+        "the devpod up {up} outlived the dl that was SIGKILLed"
+    );
 }
 
 /// The fixture's own promise, since nothing else checks it: an [`Orphan`] that

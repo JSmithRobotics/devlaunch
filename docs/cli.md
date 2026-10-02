@@ -930,9 +930,17 @@ waits for as long as whatever holds the lock lives. The usual holder is a `devpo
 up` that outlived the `dl` that started it: reparented to init, sleeping, no
 children, and nothing on the machine is ever going to reap it.
 
-dl watches for that line. An `rm` behind the lock says so while it waits and names
-the `kill` that clears it; the terminal it is printed in is busy holding the command
-the advice is about, so the advice names another one on purpose.
+On Linux dl makes that orphan hard to create. Each `devpod up` it starts is set to
+take a SIGKILL from the kernel when its `dl` dies (`PR_SET_PDEATHSIG`), so a `dl`
+that is SIGKILLed, or whose interrupt handler signals an `up` that does not stop,
+takes the `up` with it. `aid`'s background boot gets a SIGINT the same way, so an
+`aid` that dies cancels its boot as a Ctrl-C would. A holder started some other way,
+or on another host, can still wedge the workspace, and the sweep below is for that.
+
+dl watches for that line. **An `rm`, `rme` or `--rm` behind the lock does not wait
+for you either.** It says devpod is waiting, then runs the same sweep a launch runs,
+described next, and the delete goes on once the holder lets go. A holder that
+somebody is still waiting on is spared, and the line names the `kill` that ends it.
 
 **A launch behind the lock does not wait for you.** It says devpod is waiting and
 that the wait has no deadline, and then it clears the lock itself: the same sweep
@@ -942,7 +950,10 @@ restarted and not abandoned. devpod's acquire polls behind that five second line
 the `up` that was blocked takes the freed flock itself and goes on to build, about
 a second later, measured. Every verb that brings a workspace up is covered, `dl
 <ws>` itself, `up`, `restart`, `recreate`, `reset`, `code` and `dotfiles`, because
-they all run the same `devpod up`.
+they all run the same `devpod up`. The sweep runs on devpod's first lock line and
+again once a minute for as long as the wait goes on, because a holder that a live
+`dl` was behind can lose that `dl` later. A repeat sweep prints a line only when it
+signalled something.
 
 Three things it will not do, and they are the reason a launch may do this at all.
 It never signals a holder somebody is waiting on: a `devpod up` with a live `dl`
