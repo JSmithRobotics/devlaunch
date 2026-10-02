@@ -2271,6 +2271,39 @@ fn a_delete_blocked_behind_somebody_elses_live_build_signals_nothing() {
     );
 }
 
+/// The delete's own `devpod delete` is the process waiting for the lock, not
+/// one holding it. It names the workspace in its own argv and its parent is
+/// this live `dl`, so the sweep's own reading finds it unless the sweep leaves
+/// out this process's children, as a launch leaves out its own `devpod up`.
+#[test]
+fn a_delete_does_not_count_its_own_blocked_delete_among_the_holders() {
+    let table = format!(
+        "    1       0 /sbin/init\n{:>7} {:>7} devpod delete myws\n",
+        4711,
+        std::process::id(),
+    );
+
+    let blocked = delete_blocked_for_lines(&[&table], 1);
+
+    assert!(
+        blocked.signals.is_empty(),
+        "a delete must never signal its own devpod delete: {:?}",
+        blocked.signals,
+    );
+    let [
+        DeleteStalled::OnTheLock,
+        DeleteStalled::Swept(kill::Released::Swept(release)),
+    ] = blocked.said.as_slice()
+    else {
+        panic!("the block, then its sweep: {:?}", blocked.said);
+    };
+    assert_eq!(
+        release.holding,
+        kill::Holding::Free,
+        "the delete's own devpod delete was reported as holding the workspace it waits for",
+    );
+}
+
 /// The deadline firing is a devpod that *ran* — for a minute, and was then
 /// SIGKILLed by the runner — so it may have got far enough to unlink the
 /// workspace record before it went. The two lines that answer for that are
