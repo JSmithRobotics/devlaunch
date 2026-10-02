@@ -308,9 +308,8 @@ enum Ignored {
     /// The inherited ignore loses: the signal drains anyway, exiting this code.
     StillDrains(i32),
     /// The inherited ignore wins: the signal ends nothing, and the run is left for
-    /// a Ctrl-C to finish — which drains at 130 and reaches the `devpod up` child,
-    /// unless `up_survives` says the disarming reached the child too.
-    Honoured { up_survives: bool },
+    /// a Ctrl-C to finish — which drains at 130 and reaches the `devpod up` child.
+    Honoured,
 }
 
 /// The inherited-ignore rule stated as data, one row per signal `dl` handles —
@@ -326,14 +325,12 @@ enum Ignored {
 /// while the set stays put is caught by nothing but review.
 const INHERITED_IGNORE: [(&str, Ignored); 3] = [
     ("INT", Ignored::StillDrains(130)),
-    // The one row whose child outlives the Ctrl-C, and not because of anything
-    // `dl` decides: `trap '' TERM` is inherited by everything `dl` spawns, and the
-    // drain fells the build with a `killpg(…, SIGTERM)`. Disarming SIGTERM for the
-    // run therefore disarms the drain's own reach into the child — inherent to
-    // killing a group with the signal the caller switched off, and true of any
-    // program that tears its children down that way.
-    ("TERM", Ignored::Honoured { up_survives: true }),
-    ("HUP", Ignored::Honoured { up_survives: false }),
+    // `trap '' TERM` is inherited by everything `dl` spawns, so the drain's
+    // SIGTERM does not reach the build here. This row's child used to outlive the
+    // Ctrl-C for that reason. The drain now SIGKILLs the group after a short wait,
+    // so the build goes either way.
+    ("TERM", Ignored::Honoured),
+    ("HUP", Ignored::Honoured),
 ];
 
 #[test]
@@ -355,7 +352,7 @@ fn an_inherited_ignore_wins_for_the_two_signals_that_mean_it_and_loses_for_ctrl_
             // For the two signals this branch adds, an inherited ignore is a
             // statement: `nohup dl …` disarms SIGHUP precisely so the run outlives
             // the terminal, and draining on it would take that away.
-            Ignored::Honoured { up_survives } => {
+            Ignored::Honoured => {
                 run.send(signal);
                 assert!(
                     run.survives(Duration::from_millis(500)),
@@ -368,7 +365,7 @@ fn an_inherited_ignore_wins_for_the_two_signals_that_mean_it_and_loses_for_ctrl_
                     Aftermath {
                         code: Some(130),
                         token_left: false,
-                        up_alive: up_survives,
+                        up_alive: false,
                     },
                     "after SIG{signal} was disarmed the run must still answer Ctrl-C"
                 );
