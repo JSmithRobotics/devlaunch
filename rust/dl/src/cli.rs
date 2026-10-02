@@ -434,6 +434,10 @@ pub(crate) enum Command {
         verb: Verb,
         devcontainer: Option<DevcontainerPath>,
         claude_profile: Option<String>,
+        /// `--memory` as typed, or `None` for the default cap. Carried beside
+        /// `claude_profile` and for its reason: both are per launch, and neither
+        /// is stored with the workspace.
+        memory: Option<String>,
     },
     /// A workspace, and what to do with it.
     Workspace {
@@ -441,6 +445,8 @@ pub(crate) enum Command {
         verb: Verb,
         devcontainer: Option<DevcontainerPath>,
         claude_profile: Option<String>,
+        /// As on [`Command::Select`].
+        memory: Option<String>,
     },
 }
 
@@ -700,6 +706,14 @@ pub(crate) struct Cli {
     /// with the workspace, so a workspace never forwards an account chosen weeks ago.
     #[arg(long = "claude-profile", value_name = "NAME")]
     claude_profile: Option<String>,
+    /// Hold this workspace's containers to a memory limit, swap included, so a
+    /// build inside sizes itself for the container rather than for the machine.
+    /// Sizes are powers of 1024 as docker takes them: `8g`, `512m`, `2GiB`, or a
+    /// bare byte count. `none` leaves whatever limit the container already has.
+    /// Defaults to 8G. Per launch, like `--claude-profile`: it is applied to the
+    /// running containers rather than stored with the workspace.
+    #[arg(long, value_name = "SIZE|none")]
+    memory: Option<String>,
     /// Delete the workspace once the session ends, like `docker run --rm`. Only
     /// for the two forms that hand one over: `dl <ws>` and `dl <ws> -- <command>`.
     /// Stops at work that is nowhere else, exactly as the `rm` verb does.
@@ -1099,6 +1113,10 @@ fn workspace_command(cli: Cli, argv: &[String]) -> Result<Command, GrammarError>
     // directory component, and owns the refusal, so the grammar does not get a
     // second opinion about what a profile name may be.
     let claude_profile = cli.claude_profile.clone();
+    // Carried as typed for the same reason: `flows::launch::MemoryCap` owns what
+    // a size may be and owns the refusal, so the grammar does not get a second
+    // opinion about it.
+    let memory = cli.memory.clone();
     if cli.yes {
         return Err(GrammarError::ModifierNotAllowed {
             modifier: "--yes",
@@ -1146,6 +1164,7 @@ fn workspace_command(cli: Cli, argv: &[String]) -> Result<Command, GrammarError>
                     },
                     devcontainer,
                     claude_profile,
+                    memory,
                 });
             }
             ForcePlace::VerbSlot { target } => {
@@ -1241,12 +1260,14 @@ fn workspace_command(cli: Cli, argv: &[String]) -> Result<Command, GrammarError>
             verb,
             devcontainer,
             claude_profile,
+            memory,
         },
         Some(target) => Command::Workspace {
             target,
             verb,
             devcontainer,
             claude_profile,
+            memory,
         },
     })
 }
@@ -1274,7 +1295,12 @@ fn devcontainer_of(cli: &Cli) -> Result<Option<DevcontainerPath>, GrammarError> 
 /// A second copy of a fact about [`Cli`], and `the_value_flags_are_the_ones_clap_takes_values_for`
 /// is the test that diffs it against clap's own parser rather than leaving it to be
 /// kept true by hand.
-const VALUE_FLAGS: [&str; 3] = ["--devcontainer", "--claude-profile", "--herdr-workspace"];
+const VALUE_FLAGS: [&str; 4] = [
+    "--devcontainer",
+    "--claude-profile",
+    "--herdr-workspace",
+    "--memory",
+];
 
 /// The argv `wants_startup_cache_refresh` is asked about.
 ///
@@ -1404,6 +1430,7 @@ mod tests {
             verb,
             devcontainer: None,
             claude_profile: None,
+            memory: None,
         }
     }
 
@@ -1421,6 +1448,7 @@ mod tests {
                     verb: Verb::Stop,
                     devcontainer: None,
                     claude_profile: None,
+                    memory: None,
                 },
             ),
             (&["stop", "ws"], workspace("ws", Verb::Stop)),
@@ -1510,6 +1538,7 @@ mod tests {
                 verb: remove_and_exit(false),
                 devcontainer: None,
                 claude_profile: None,
+                memory: None,
             })
         );
         assert!(remove_and_exit(false).several_at_once());
@@ -1726,6 +1755,7 @@ mod tests {
                 verb: attach(),
                 devcontainer: None,
                 claude_profile: None,
+                memory: None,
             })
         );
     }
@@ -1945,6 +1975,7 @@ mod tests {
                 verb: Verb::Stop,
                 devcontainer: None,
                 claude_profile: None,
+                memory: None,
             })
         );
     }
@@ -2039,6 +2070,7 @@ mod tests {
                 verb: attach(),
                 devcontainer: None,
                 claude_profile: Some("work".to_owned()),
+                memory: None,
             })
         );
         assert_eq!(
@@ -2047,6 +2079,7 @@ mod tests {
                 verb: attach(),
                 devcontainer: None,
                 claude_profile: Some("work".to_owned()),
+                memory: None,
             })
         );
     }
@@ -2064,6 +2097,7 @@ mod tests {
                 verb: attach(),
                 devcontainer: None,
                 claude_profile: Some("../../etc".to_owned()),
+                memory: None,
             })
         );
     }
@@ -2261,6 +2295,7 @@ mod tests {
                 verb: Verb::Attach { rm: RmOnExit::Yes },
                 devcontainer: None,
                 claude_profile: None,
+                memory: None,
             })
         );
     }

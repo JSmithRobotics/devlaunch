@@ -21,7 +21,7 @@ use devlaunch_core::flows::completion::{self, FileState, InstallError, Installed
 use devlaunch_core::flows::completion_cache::{self, Refreshed};
 use devlaunch_core::flows::kept_copies::KeptCopies;
 use devlaunch_core::flows::kill;
-use devlaunch_core::flows::launch::{ColdPath, LaunchNotice};
+use devlaunch_core::flows::launch::{ColdPath, LaunchNotice, MemoryCap, NO_MEMORY_CAP};
 use devlaunch_core::flows::launch_locks::LaunchLocks;
 use devlaunch_core::flows::lifecycle::{
     self, ChildWork, DeleteStalled, Insisted, Insistence, LifecycleNotice, PruneError,
@@ -165,6 +165,12 @@ pub(crate) fn dispatch(
                         // agent authenticated as a different account than the agent,
                         // which is the one way this feature could mislead quietly.
                         claude_profile: profile.or(claude_profile),
+                        // A pane shell opens beside a running agent and caps
+                        // nothing: the containers it attaches to are already up
+                        // and already capped by the launch that made them, and
+                        // re-stating a default here would override a `--memory`
+                        // that launch was given.
+                        memory: Some(NO_MEMORY_CAP.to_owned()),
                     },
                     None,
                 );
@@ -184,7 +190,16 @@ pub(crate) fn dispatch(
             verb,
             devcontainer,
             claude_profile,
+            memory,
         } => {
+            // Resolved here and not deeper, so a size that is not one is refused
+            // at the grammar's edge rather than after a workspace has been
+            // picked. `MemoryCap` is `Copy`, so what travels on is a value and
+            // not a string every layer re-reads.
+            let memory_cap = match memory_cap_of(memory.as_deref()) {
+                Ok(cap) => cap,
+                Err(ending) => return ending,
+            };
             let after = verb.after_removal();
             let ending = render_select(
                 runner,
@@ -194,6 +209,7 @@ pub(crate) fn dispatch(
                 verb,
                 devcontainer.as_ref(),
                 claude_profile.as_deref(),
+                memory_cap,
             );
             hangup::after_the_command(after, ending)
         }
@@ -202,7 +218,12 @@ pub(crate) fn dispatch(
             verb,
             devcontainer,
             claude_profile,
+            memory,
         } => {
+            let memory_cap = match memory_cap_of(memory.as_deref()) {
+                Ok(cap) => cap,
+                Err(ending) => return ending,
+            };
             // The one place a typed target exists before anything has read it,
             // which is why the pull request rewrite happens here and nowhere
             // else. `dl <spec> --rm` resolves its target twice, on the way in and
@@ -227,6 +248,7 @@ pub(crate) fn dispatch(
                 verb,
                 devcontainer.as_ref(),
                 claude_profile.as_deref(),
+                memory_cap,
                 // A target named on the command line is resolved by the launch
                 // itself; only the picker arrives knowing more than it says.
                 None,
@@ -755,6 +777,24 @@ fn install_failure(error: &InstallError) -> String {
 /// into core, and both have to be able to open dl's records without either of them
 /// opening a second copy.
 #[allow(clippy::too_many_arguments)]
+/// The cap this command asked for, or the refusal printed for a size that is not
+/// one.
+///
+/// The message names the spellings rather than the grammar, because the mistake
+/// is nearly always a suffix: a person who typed `8gb` guessed right and one who
+/// typed `8 gigs` needs to be told what to type instead.
+fn memory_cap_of(typed: Option<&str>) -> Result<MemoryCap, Ending> {
+    MemoryCap::requested(typed).map_err(|refused| {
+        eprintln!(
+            "--memory {} is not a size. Write it as docker does -- 8g, 512m, 2GiB or a byte \
+             count -- or {NO_MEMORY_CAP} to leave the containers as they are.",
+            render::python_repr(&refused.typed)
+        );
+        Ending::Refused
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_workspace<'r>(
     runner: &'r dyn Runner,
     context: &mut CommandContext<'r>,
@@ -764,6 +804,7 @@ fn render_workspace<'r>(
     verb: Verb,
     devcontainer: Option<&DevcontainerPath>,
     claude_profile: Option<&str>,
+    memory_cap: MemoryCap,
     recognised: Option<WorkspaceId>,
     resume: Option<AgentResume>,
 ) -> Ending {
@@ -814,6 +855,7 @@ fn render_workspace<'r>(
                 &launched,
                 devcontainer,
                 claude_profile,
+                memory_cap,
                 recognised,
                 resume,
             );
@@ -1618,6 +1660,7 @@ fn render_reconcile(
 ///
 /// A pick that never came is Python's ending exactly: the help on stdout and exit 1
 /// (`dl.py` 4457-4462). The help is clap's (**row 3**).
+#[allow(clippy::too_many_arguments)]
 fn render_select<'r>(
     runner: &'r dyn Runner,
     context: &mut CommandContext<'r>,
@@ -1626,6 +1669,7 @@ fn render_select<'r>(
     verb: Verb,
     devcontainer: Option<&DevcontainerPath>,
     claude_profile: Option<&str>,
+    memory_cap: MemoryCap,
 ) -> Ending {
     let workspaces = match context.workspaces() {
         Err(refused) => return refuse_listing(&refused),
@@ -1664,6 +1708,7 @@ fn render_select<'r>(
                     verb.clone(),
                     devcontainer,
                     claude_profile,
+                    memory_cap,
                     // The picker knows what it drew: this row's clone said it is
                     // this triple, and the launch it is about to start knows only
                     // the id. See `Launch::recognised_as`.

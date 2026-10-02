@@ -329,7 +329,7 @@ const REMOTE_CONTROL_NO: &[&str] = &["0", "false", "off", "no"];
 /// `aid --claude-profile work` still lists its session under whichever account the
 /// container is signed in to. Two credentials, and this one is the token forwarded
 /// into the session.
-const DL_VALUE_OPTIONS: &[&str] = &["--devcontainer", "--claude-profile"];
+const DL_VALUE_OPTIONS: &[&str] = &["--devcontainer", "--claude-profile", "--memory"];
 
 /// The modifier the suffix options take, peeled only in their company.
 ///

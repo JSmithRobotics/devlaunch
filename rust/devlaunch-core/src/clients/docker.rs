@@ -1,6 +1,6 @@
 //! Everything devlaunch asks `docker`, and everything it reads back.
 //!
-//! Three calls, and between them they cover two commands. `dl <ws> rm` removes
+//! Five calls, and between them they cover four commands. `dl <ws> rm` removes
 //! the named volumes a workspace's devcontainer created, once the workspace
 //! itself is gone (devlaunch#325). `dl <ws> kill` asks which containers a wedged
 //! workspace's compose project still has up, and kills them (devlaunch#484) —
@@ -45,6 +45,15 @@ const LIST_ONE_PROJECT: Duration = Duration::from_secs(5);
 /// What killing them may cost. Longer than the listing, because this is a signal
 /// per container and the daemon does the work, where the listing is a read.
 const KILL_THEM: Duration = Duration::from_secs(10);
+
+/// What capping them may cost.
+///
+/// The listing's bound rather than the kill's: `docker update` writes a cgroup
+/// file per container and returns, where a kill waits on a signal being taken.
+/// Bounded at all for [`running_for_project`]'s reason -- this runs on the
+/// launch path, after the workspace is already up, so a daemon that never
+/// answers must cost a notice and not the session.
+const CAP_THEM: Duration = Duration::from_secs(5);
 
 /// What asking docker something came to.
 ///
@@ -129,7 +138,110 @@ pub(crate) fn running_for_project(runner: &dyn Runner, project: &str) -> Running
         &format!("label=com.docker.compose.project={project}"),
     ]))
     .with_timeout(LIST_ONE_PROJECT);
-    match ran(runner.capture(&spec)) {
+    listed(runner.capture(&spec))
+}
+
+/// Kill these containers now, in one call.
+///
+/// `kill` rather than `stop`, and that is the verb the whole command is named
+/// for: a container whose build was SIGKILLed has nothing left to shut down in an
+/// orderly way, and `stop` would spend its ten-second grace period on each one
+/// before sending the same signal.
+pub(crate) fn kill_containers(runner: &dyn Runner, ids: &NonEmpty<String>) -> Answer {
+    let mut args = vec!["kill".to_owned()];
+    args.extend(ids.iter().cloned());
+    let spec = SpawnSpec::from(Invocation::new(PROGRAM).with_args(args)).with_timeout(KILL_THEM);
+    answer(runner.capture(&spec))
+}
+
+/// Every container docker has up whose name ends with this workspace id.
+///
+/// **Matched on the name, where [`running_for_project`] matches on the compose
+/// label, and the difference is the point.** The compose label finds the
+/// services of a multi-container devcontainer and finds *nothing* for a
+/// single-container one, which is in no compose project at all -- an honest
+/// limit for `kill`, where the flock is what blocks a launch, and a hole here,
+/// where the container is exactly the thing being capped. A name filter covers
+/// both, because devpod ends every container name it creates with the id.
+///
+/// **The name is matched, never built.** `--filter name=` is a substring match,
+/// and the prefix in front of the id belongs to the devcontainer rather than to
+/// devlaunch: `kinisi_jazzy_<id>` and `kinisi_unreal_runtime_1.5.0_<id>` are two
+/// services of one workspace, measured on this host. Constructing the name would
+/// mean knowing the service names, which is the devcontainer author's business.
+///
+/// The substring is an id devpod generated with a random suffix, so a container
+/// of some other workspace's cannot contain it by accident.
+pub(crate) fn running_for_workspace(runner: &dyn Runner, id: &str) -> Running {
+    let spec = SpawnSpec::from(Invocation::new(PROGRAM).with_args([
+        "ps",
+        "--quiet",
+        "--no-trunc",
+        "--filter",
+        &format!("name={id}"),
+    ]))
+    .with_timeout(LIST_ONE_PROJECT);
+    listed(runner.capture(&spec))
+}
+
+/// Hold these containers to `bytes` of memory, swap included.
+///
+/// `docker update` rather than a flag on the create, because **devpod has no way
+/// to pass one**: `devpod up` takes `--mount` and nothing that reaches docker's
+/// run arguments (measured against devpod 0.26.1). That turns out to be the
+/// better half of the trade rather than a workaround -- a limit set this way
+/// lands on a container that is already running, so a cap applies to the
+/// workspaces already up on a host instead of only to the ones created after it,
+/// and nothing has to be recreated to take it.
+///
+/// **`--memory-swap` is set equal to `--memory`, which is what makes the number
+/// mean what it says.** Left alone, docker defaults swap to twice memory, so a
+/// cap of 8G would really be 8G of RAM and 8G of swap: a container could exceed
+/// its stated limit by spilling onto a disk every other container on the host
+/// shares. Equal values switch the container's swap off, so the cap binds, and
+/// it binds at the number the JVM and the cgroup both report -- which is what a
+/// build sizing itself from its own limits reads.
+///
+/// The cost of that is stated rather than hidden: a process that would have
+/// survived by swapping is OOM-killed instead, and a cgroup OOM is quieter than
+/// the host's -- exit 137 with nothing in the journal naming the compiler.
+///
+/// One call carrying every container, as [`remove_volumes`] does, and for the
+/// same reason: the daemon takes them together and a loop would buy only round
+/// trips and a partial-failure state to model.
+pub(crate) fn set_memory_cap(
+    runner: &dyn Runner,
+    containers: &NonEmpty<String>,
+    bytes: u64,
+) -> Answer {
+    let mut args = vec![
+        "update".to_owned(),
+        "--memory".to_owned(),
+        bytes.to_string(),
+        "--memory-swap".to_owned(),
+        bytes.to_string(),
+    ];
+    args.extend(containers.iter().cloned());
+    let spec = SpawnSpec::from(Invocation::new(PROGRAM).with_args(args)).with_timeout(CAP_THEM);
+    answer(runner.capture(&spec))
+}
+
+/// A docker spawn that produced nothing to read, in the two shapes both answers
+/// in this module report it as.
+enum NoAnswer {
+    NotInstalled,
+    NotStarted(OsFailure),
+}
+
+/// The one reading of a `docker ps` every listing in this module shares.
+///
+/// Factored out when [`running_for_workspace`] joined [`running_for_project`]:
+/// the two differ only in the filter they pass, and a second copy of this match
+/// is a second chance to lose the distinction between an empty listing and a
+/// docker that would not answer -- which is the distinction [`Running`] exists
+/// to carry.
+fn listed(outcome: Outcome<CapturedText>) -> Running {
+    match ran(outcome) {
         Ok((exit, CapturedText { stdout, stderr })) => {
             if exit.is_success() {
                 Running::These(
@@ -147,19 +259,6 @@ pub(crate) fn running_for_project(runner: &dyn Runner, project: &str) -> Running
         Err(NoAnswer::NotInstalled) => Running::NotInstalled,
         Err(NoAnswer::NotStarted(failure)) => Running::NotStarted(failure),
     }
-}
-
-/// Kill these containers now, in one call.
-///
-/// `kill` rather than `stop`, and that is the verb the whole command is named
-/// for: a container whose build was SIGKILLed has nothing left to shut down in an
-/// orderly way, and `stop` would spend its ten-second grace period on each one
-/// before sending the same signal.
-pub(crate) fn kill_containers(runner: &dyn Runner, ids: &NonEmpty<String>) -> Answer {
-    let mut args = vec!["kill".to_owned()];
-    args.extend(ids.iter().cloned());
-    let spec = SpawnSpec::from(Invocation::new(PROGRAM).with_args(args)).with_timeout(KILL_THEM);
-    answer(runner.capture(&spec))
 }
 
 /// What asking docker for every container may cost before it is abandoned.
@@ -240,13 +339,6 @@ fn read(runner: &dyn Runner, args: &[&str], timeout: Duration) -> Result<String,
     }
 }
 
-/// A docker spawn that produced nothing to read, in the two shapes both answers
-/// in this module report it as.
-enum NoAnswer {
-    NotInstalled,
-    NotStarted(OsFailure),
-}
-
 /// The one reading of a docker spawn every call in this module shares.
 ///
 /// `Ok` is a docker that ran, whatever it exited: what its status and its streams
@@ -291,6 +383,77 @@ mod tests {
     use devlaunch_test_support::{FakeRunner, Response};
 
     use super::*;
+
+    /// Asked for by NAME, which is the whole difference from the call above.
+    ///
+    /// The compose label finds nothing for a single-container devcontainer,
+    /// which is in no compose project; a name filter finds it, because devpod
+    /// ends every container name with the workspace id.
+    #[test]
+    fn a_workspaces_containers_are_asked_for_by_name() {
+        let fake = FakeRunner::new();
+
+        let _ = running_for_workspace(&fake, "my-ws-3w80");
+
+        assert_eq!(
+            fake.argvs(),
+            [[
+                "docker",
+                "ps",
+                "--quiet",
+                "--no-trunc",
+                "--filter",
+                "name=my-ws-3w80"
+            ]]
+        );
+    }
+
+    /// One `docker update` for every container, with swap pinned to memory.
+    ///
+    /// The equal `--memory-swap` is the assertion worth having: without it
+    /// docker defaults swap to twice memory, and an 8G cap silently becomes 8G
+    /// of RAM plus 8G of disk. The number is in bytes so nothing has to agree
+    /// with docker about what a suffix means.
+    #[test]
+    fn capping_sets_swap_equal_to_memory_for_every_container() {
+        let fake = FakeRunner::new();
+
+        set_memory_cap(
+            &fake,
+            &names(&["kinisi_jazzy_ws", "kinisi_unreal_ws"]),
+            8 * 1024 * 1024 * 1024,
+        );
+
+        assert_eq!(
+            fake.argvs(),
+            [[
+                "docker",
+                "update",
+                "--memory",
+                "8589934592",
+                "--memory-swap",
+                "8589934592",
+                "kinisi_jazzy_ws",
+                "kinisi_unreal_ws"
+            ]]
+        );
+    }
+
+    /// A host with no docker is the silent arm here too.
+    ///
+    /// Same reasoning as the removals: a machine with no docker has no
+    /// container to cap, and reporting that as a failure would be a sentence
+    /// about a machine with nothing to do.
+    #[test]
+    fn a_cap_on_a_host_with_no_docker_is_not_installed_rather_than_a_refusal() {
+        let fake = FakeRunner::new();
+        fake.script_missing("docker");
+
+        assert_eq!(
+            set_memory_cap(&fake, &names(&["ws"]), 1),
+            Answer::NotInstalled
+        );
+    }
 
     #[test]
     fn a_compose_projects_containers_are_asked_for_by_label() {
