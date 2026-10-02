@@ -212,6 +212,39 @@ impl World {
     }
 }
 
+impl World {
+    /// The blocked world, with an `up` that ignores SIGTERM and has a child that
+    /// ignores it too, the way a `devpod up` and its own children can. The child's
+    /// pid goes to `up-child.pid`.
+    fn blocked_up_deaf_to_sigterm() -> Self {
+        let world = Self::blocked_up();
+        let devpod = world.root.join("bin/devpod");
+        let original = std::fs::read_to_string(&devpod).expect("the scenario's devpod");
+        let delegate = original
+            .lines()
+            .find(|line| line.starts_with("exec "))
+            .expect("the delegate exec line");
+        let child_pid = world.root.join("up-child.pid");
+        let child_pid = child_pid.display();
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"up\" ]; then\n\
+             \x20 trap '' TERM\n\
+             \x20 echo '{DEVPOD_LINE}'\n\
+             \x20 sleep 30 &\n\
+             \x20 echo $! > '{child_pid}'\n\
+             \x20 wait\n\
+             fi\n\
+             {delegate}\n"
+        );
+        std::fs::write(&devpod, script).expect("rewrite devpod");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&devpod, std::fs::Permissions::from_mode(0o755))
+            .expect("keep devpod executable");
+        world
+    }
+}
+
 /// A process that looks to `ps` exactly like the orphan devlaunch#602 was opened
 /// about, owned so that it cannot outlive the test that started it.
 ///
@@ -585,6 +618,71 @@ fn a_launch_that_is_sigkilled_mid_up_takes_its_devpod_up_with_it() {
     assert!(
         gone,
         "the devpod up {up} outlived the dl that was SIGKILLed"
+    );
+}
+
+/// A Ctrl-C does not leave behind a `devpod up` group that ignores SIGTERM.
+///
+/// The interrupt drain used to SIGTERM the group and `_exit` at once. A leader
+/// that ignored it was reparented to init holding devpod's flock, and so was any
+/// child of it that ignored it too. The drain now waits briefly for the leader and
+/// then SIGKILLs the group, so the child here goes as well as the leader.
+#[test]
+fn a_ctrl_c_mid_up_kills_a_group_that_ignores_sigterm() {
+    let _serialized = one_at_a_time();
+    let world = World::blocked_up_deaf_to_sigterm();
+    let root = world.root.display().to_string();
+    let child_pid = world.root.join("up-child.pid");
+
+    let mut dl = Command::new(env!("CARGO_BIN_EXE_dl"))
+        .arg("blooop/devlaunch@cold")
+        .env_clear()
+        .keeping_coverage()
+        .env("PATH", format!("{root}/bin:/usr/bin:/bin"))
+        .env("HOME", format!("{root}/home"))
+        .env("XDG_CACHE_HOME", format!("{root}/cache"))
+        .env("XDG_CONFIG_HOME", format!("{root}/config"))
+        .env("DEVPOD_HOME", format!("{root}/devpod"))
+        .env("DEVPOD_SHIM_STATE", format!("{root}/shim-state.json"))
+        .env("DEVPOD_SHIM_LOG", format!("{root}/shim-log.jsonl"))
+        .env("DEVPOD_SHIM_CONFIG", format!("{root}/shim-config.json"))
+        .env("GIT_SSH_COMMAND", "false")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the dl binary runs");
+
+    let blocked = wait_for(|| read_pid(&child_pid).is_some_and(alive));
+    if !blocked {
+        let _ = dl.kill();
+        let _ = dl.wait();
+    }
+    assert!(blocked, "the launch never reached its blocked up");
+    let child = read_pid(&child_pid).expect("the up's child's pid");
+
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &dl.id().to_string()])
+            .status()
+            .expect("kill is installed")
+            .success(),
+        "sending SIGINT to dl"
+    );
+    let status = dl.wait().expect("dl exits");
+    assert_eq!(status.code(), Some(130), "a Ctrl-C mid-up drains at 130");
+
+    let gone = wait_for(|| !alive(child));
+    if !gone {
+        let _ = Command::new("kill")
+            .args(["-KILL", &child.to_string()])
+            .output();
+    }
+    assert!(
+        gone,
+        "the up's child {child} ignored SIGTERM and outlived the Ctrl-C"
     );
 }
 

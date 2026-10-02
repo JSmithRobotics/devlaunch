@@ -388,10 +388,10 @@ removal (a signal handler may not allocate or lock, and this one `_exit`s):
 
 What all three *do* run is the cleanup the removal is not: the staged plaintext
 `GH_TOKEN` file is unlinked and the `devpod up` child is killed, so none of these three
-leaves a credential on disk or a build running behind you. The one exception is a run
-whose SIGTERM was disarmed before it started. The drain fells the build with a
-`killpg(…, SIGTERM)`, so disarming that signal disarms its own reach into the child too.
-Ctrl-\ (SIGQUIT) is not one of them and still does mean "die now and dump core", where
+leaves a credential on disk or a build running behind you. The drain sends the build's
+process group a SIGTERM, gives the `devpod up` up to two seconds to unwind, and then sends
+the group a SIGKILL. So a run whose SIGTERM was disarmed before it started, and whose child
+inherits that, still loses the build, two seconds later. Ctrl-\ (SIGQUIT) is not one of them and still does mean "die now and dump core", where
 tidying up first is not what it asks for. The workspace is what stays, still there
 under its name, and `dl <ws> rm` is how it goes.
 
