@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `devpod up` no longer outlives the `dl` or `aid` that started it.** Two `devpod up`
+  processes were found on a host reparented to init after their `aid --boot-up` parent died,
+  holding devpod's workspace lock for four hours, and every later `dl <ws>`, `rm` and
+  `devpod delete` waited on them with no end. On Linux each `devpod up` now takes a SIGKILL
+  from the kernel when its `dl` dies, however it dies (`PR_SET_PDEATHSIG`), and `aid`'s
+  background boot takes a SIGINT when `aid` dies, so it cancels as a Ctrl-C would. The
+  interrupt handler also gives the `devpod up` group two seconds to act on its SIGTERM and
+  then SIGKILLs it, where it used to send the SIGTERM and exit at once.
+- **`rm`, `rme` and `--rm` clear an orphan holding devpod's lock, as a launch does.** A
+  delete blocked on the lock used to print advice to run `dl <ws> kill` in another
+  terminal and then wait. It now runs the launch's sweep: orphans holding the workspace are
+  signalled, a holder somebody is still waiting on is spared, and the line says what was
+  found. Both a launch and a delete also sweep again about once a minute while the wait
+  goes on, because a holder spared once can lose its parent later.
+
 ## [0.59.2] - 2026-10-01
 
 ### Fixed
