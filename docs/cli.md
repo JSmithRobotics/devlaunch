@@ -1075,10 +1075,13 @@ on screen above it.
 A `dl <ws> rm` that devpod cannot get the lock for is the harder half, because it
 never refuses: devpod waits on that lock with no deadline, logging the five second
 line at the top of this section for as long as the holder lives, so there is no
-exit code for anything downstream to read. dl reads devpod's stderr as it arrives
-instead, and answers the first of those lines while the command is still blocked,
-naming the `dl <ws> kill` to run in another terminal. It says it once, however many
-times devpod says it.
+exit code for anything downstream to read. dl reads devpod's output as it arrives
+instead, and answers the first of those lines while the command is still blocked:
+it prints the launch's notice, the one that ends "Looking for what is holding
+it...", and runs the sweep described above. It sweeps again on every twelfth line
+after that, about once a minute, and prints a repeat sweep only when it signalled
+something. `dl <ws> kill` ends in this same delete, so a holder that arrives after
+its own sweep is swept here too.
 
 
 ## When devpod is missing or will not answer
