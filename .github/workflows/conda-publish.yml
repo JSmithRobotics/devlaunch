@@ -84,10 +84,24 @@ jobs:
           fi
 
   build:
-    name: Build conda package
+    name: Build conda package (${{ matrix.arch }})
     needs: check
     if: needs.check.outputs.should_publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One architecture's failure is no reason to withhold the other's
+      # package -- same reasoning as devcontainer-prebuild.yml's matrix.
+      fail-fast: false
+      matrix:
+        include:
+          # `ubuntu-24.04-arm` is a GitHub-hosted arm64 runner, generally
+          # available and free on public repositories, so this builds natively
+          # rather than cross-compiling or emulating -- same precedent as
+          # devcontainer-prebuild.yml.
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
         with:
@@ -115,6 +129,16 @@ jobs:
 
       - name: Build conda package
         uses: prefix-dev/rattler-build-action@v0.2.39
+        env:
+          # The other half of the recipe's `repo_url` context var: unset, the
+          # recipe defaults to upstream, which is the defect this fixes -- a
+          # fork's build silently fetching and publishing upstream's source
+          # under the fork's name. `github.repository` is automatically correct
+          # for any fork with zero configuration (and resolves to
+          # `blooop/devlaunch` on upstream itself, i.e. unchanged behaviour),
+          # which is why this is a workflow expression and not a repository
+          # variable somebody has to remember to set.
+          DEVLAUNCH_SOURCE_REPO: https://github.com/${{ github.repository }}
         with:
           recipe-path: conda.recipe/recipe.yaml
           # `--experimental` is what enables the recipe's `load_from_file`, which
@@ -127,12 +151,22 @@ jobs:
           # added: the toolchain is a build dependency resolved from the channels
           # like any other, which is what makes the build reproducible from the
           # recipe alone.
+          #
+          # `--channel https://prefix.dev/blooop` here is deliberately unrelated
+          # to DEVLAUNCH_SOURCE_REPO above: it resolves build DEPENDENCIES
+          # (the compilers) from where they are maintained, which is a
+          # different thing from where this run's source comes from or where
+          # its output gets published (settled by 96d27f2; do not change this
+          # to a fork's own channel).
           build-args: --experimental --channel conda-forge --channel https://prefix.dev/blooop --no-include-recipe
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: conda-packages
+          # Per-arch name: the two legs build different packages, and a shared
+          # name would have the second upload overwrite the first rather than
+          # add to it, leaving the publish job exactly one architecture again.
+          name: conda-packages-${{ matrix.arch }}
           path: output/
           if-no-files-found: error
 
@@ -144,7 +178,18 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
-          name: conda-packages
+          # No `name:` -- pulls every `conda-packages-*` artifact the matrix
+          # produced rather than one architecture's, which is what leaves the
+          # channel silently missing a platform while both jobs go green.
+          #
+          # `merge-multiple` so they land flat in `output/` instead of one
+          # subdirectory per artifact. The upload loop below would find them
+          # either way, because its `find output -type f` recurses -- but then
+          # the layout would be load-bearing without saying so, and a later
+          # `find -maxdepth 1` would break the publish for the architecture
+          # nobody was looking at.
+          pattern: conda-packages-*
+          merge-multiple: true
           path: output/
 
       - name: Setup pixi
@@ -155,15 +200,37 @@ jobs:
       - name: Upload to prefix.dev
         env:
           PIXI_TOKEN: ${{ secrets.PIXI_TOKEN }}
+          # Where this repository publishes, as a repository *variable* rather
+          # than a line of code. A fork configures `CONDA_CHANNEL` in its own
+          # settings and needs no diff here; unset, it is upstream's channel, so
+          # upstream behaves exactly as before.
+          #
+          # A variable and not a secret: a channel name is not one, and a secret
+          # would be invisible in the log of a job whose whole subject is where
+          # the package went.
+          CONDA_CHANNEL: ${{ vars.CONDA_CHANNEL || 'blooop' }}
         run: |
           for pkg in $(find output -type f \( -name "*.conda" -o -name "*.tar.bz2" \)); do
             echo "Uploading ${pkg}"
-            if pixi exec rattler-build upload prefix \
-              -c blooop \
+            # Captured rather than streamed, because the reason a failure is
+            # tolerable has to be read before it is tolerated.
+            if out=$(pixi exec rattler-build upload prefix \
+              -c "${CONDA_CHANNEL}" \
               --api-key "$PIXI_TOKEN" \
-              "${pkg}"; then
+              "${pkg}" 2>&1); then
               echo "Successfully uploaded ${pkg}"
+            elif printf '%s' "$out" | grep -qiE "already exist"; then
+              # The one tolerable failure: a re-run after a half-finished release
+              # re-uploads what is already there, and that is not an error.
+              echo "${pkg} is already in the channel"
             else
-              echo "Failed to upload ${pkg} (may already exist)"
+              # Everything else is a release that published nothing. This used to
+              # print "may already exist" for any failure and exit 0, so a wrong
+              # channel name, a bad token or an expired one all produced a green
+              # build and an empty channel -- discovered later, by an install that
+              # could not resolve.
+              echo "$out" >&2
+              echo "::error::upload of ${pkg} failed and not because it exists" >&2
+              exit 1
             fi
           done
