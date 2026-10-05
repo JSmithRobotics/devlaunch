@@ -499,7 +499,10 @@ the process is gone:
 
 Two things this cannot see. A writer outside the running containers your docker
 lists that shares the path (a VM that mounts your home at the same path, an NFS
-home, another machine) is in no process table here, so its lock reads as stale.
+home, another machine) is in no process table here. When the worktree is on a
+network or shared filesystem (NFS, SMB, 9p, FUSE, Ceph and the like) the lock
+is "could not tell". Only that side is seen: from the host that exports your
+home to a VM, the VM's lock still reads as stale.
 A gVisor or kata container your docker runs is asked through `docker exec` like
 any other. And a writer in another time
 namespace would show a shifted start time; docker's containers do not use one.

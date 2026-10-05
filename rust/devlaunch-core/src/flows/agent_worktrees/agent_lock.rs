@@ -58,11 +58,15 @@
 //! **What this cannot see.** A writer outside every running container this
 //! docker lists that shares the path: a VM that mounts the same home at the
 //! same path, an NFS home shared between machines, another machine. Its
-//! processes are in no table here, so its lock reads as stale. A gVisor or kata
-//! container that this docker runs is not one of them: it is asked through
-//! `docker exec` like any other. And it assumes the reader and the writer share a time
-//! namespace, as docker's containers do: under another one, the start time
-//! would read shifted and a live agent as a reused pid.
+//! processes are in no table here. When the site is on a network or shared
+//! filesystem (NFS, SMB, 9p, FUSE, Ceph and the like), that is seen, and the
+//! answer is "could not tell". Seen from the side that exports it (a host whose
+//! home a VM mounts), the filesystem is a local one, and the VM's lock reads as
+//! stale. A gVisor or kata container that this docker runs is not one of
+//! them: it is asked through `docker exec` like any other. And it assumes the
+//! reader and the writer share a time namespace, as docker's containers do:
+//! under another one, the start time would read shifted and a live agent as a
+//! reused pid.
 //!
 //! The lock file is never touched here. `dl <ws> rm` removes the whole clone,
 //! and a site whose lock is proved stale still has to pass every other question
@@ -131,6 +135,9 @@ pub(crate) enum Owner {
 /// no procfs at all, or one that hides other users' processes.
 const CONTROL_PID: u32 = 1;
 
+/// Reads the `statfs` magic of the filesystem a path is on.
+type Filesystem = fn(&Path) -> Result<u32, String>;
+
 /// Asks where a lock's agent could be running, and whether it is.
 ///
 /// One per clone's weighing, so the container listing is read at most once for
@@ -139,6 +146,9 @@ pub(crate) struct Owners<'r> {
     runner: &'r dyn Runner,
     /// The host's procfs. Not configurable outside tests.
     proc_root: PathBuf,
+    /// The filesystem the site is on, as `statfs` names it. Not configurable
+    /// outside tests.
+    filesystem: Filesystem,
     containers: OnceCell<Result<Vec<Container>, String>>,
 }
 
@@ -151,8 +161,14 @@ impl<'r> Owners<'r> {
         Self {
             runner,
             proc_root,
+            filesystem: filesystem_of,
             containers: OnceCell::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn on(self, filesystem: Filesystem) -> Self {
+        Self { filesystem, ..self }
     }
 
     /// Whether the agent that wrote `lock` on the worktree at `site` (on this
@@ -211,9 +227,29 @@ impl<'r> Owners<'r> {
                 }
                 match unsure {
                     Some(why) => Owner::CouldNotTell(why),
-                    None => Owner::Gone,
+                    None => match self.shared(site) {
+                        Some(why) => Owner::CouldNotTell(why),
+                        None => Owner::Gone,
+                    },
                 }
             }
+        }
+    }
+
+    /// Why the site may have a writer on another kernel, whose processes are
+    /// in no table here: it is on a filesystem other machines mount too.
+    fn shared(&self, site: &Path) -> Option<String> {
+        match (self.filesystem)(site) {
+            Err(why) => Some(why),
+            Ok(magic) => SHARED_FILESYSTEMS
+                .iter()
+                .find(|(it, _)| *it == magic)
+                .map(|(_, name)| {
+                    format!(
+                        "it is on {name}, which another machine may share, and an agent there \
+                         is in no process table here"
+                    )
+                }),
         }
     }
 
@@ -354,6 +390,37 @@ fn proc_root() -> PathBuf {
     TEST_PROC_ROOT
         .with(|root| root.borrow().clone())
         .unwrap_or_else(|| PathBuf::from("/proc"))
+}
+
+/// Filesystems another kernel may write to as well, by their `statfs` magic.
+/// FUSE covers sshfs, GlusterFS and virtiofs, which the kernel mounts as FUSE.
+const SHARED_FILESYSTEMS: &[(u32, &str)] = &[
+    (0x6969, "NFS"),
+    (0xFF53_4D42, "CIFS"),
+    (0xFE53_4D42, "SMB2"),
+    (0x517B, "SMB"),
+    (0x0102_1997, "9p"),
+    (0x6573_5546, "FUSE"),
+    (0x6A65_6A63, "virtiofs"),
+    (0x00C3_6400, "Ceph"),
+    (0x5346_414F, "AFS"),
+    (0x6B41_4653, "AFS"),
+    (0x0BD0_0BD0, "Lustre"),
+    (0x4750_4653, "GPFS"),
+    (0x7461_636F, "OCFS2"),
+    (0x0116_1970, "GFS2"),
+];
+
+/// The site's filesystem type, the `f_type` magic `statfs` reports.
+fn filesystem_of(site: &Path) -> Result<u32, String> {
+    rustix::fs::statfs(site)
+        .map(|it| it.f_type as u32)
+        .map_err(|error| {
+            format!(
+                "could not read the filesystem of {}: {error}",
+                site.display()
+            )
+        })
 }
 
 /// A namespace a lock could have been written in.

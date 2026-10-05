@@ -855,3 +855,58 @@ fn a_listing_of_the_procfs_that_fails_partway_could_not_be_told() {
 
     assert!(table_of(&root, listing).is_err());
 }
+
+const NFS: u32 = 0x6969;
+
+#[test]
+fn a_lock_on_an_nfs_site_could_not_be_told_gone() {
+    // An NFS home: the agent may be running on another client, in no
+    // process table here.
+    let machine = Machine::new();
+    machine.containers(&[]);
+    let recorded = machine.site().display().to_string();
+
+    let owner = Owners::reading(&machine.docker, machine.proc_root())
+        .on(|_| Ok(NFS))
+        .owner(&machine.site(), Path::new(&recorded), &incident());
+
+    let Owner::CouldNotTell(why) = owner else {
+        panic!("a lock on NFS must not read as gone: {owner:?}");
+    };
+    assert!(why.contains("NFS"), "{why}");
+}
+
+#[test]
+fn a_lock_on_a_local_filesystem_can_still_be_gone() {
+    let locals: [(&str, Filesystem); 5] = [
+        ("ext4", |_| Ok(0xEF53)),
+        ("btrfs", |_| Ok(0x9123_683E)),
+        ("xfs", |_| Ok(0x5846_5342)),
+        ("tmpfs", |_| Ok(0x0102_1994)),
+        ("overlay", |_| Ok(0x794C_7630)),
+    ];
+    for (name, filesystem) in locals {
+        let machine = Machine::new();
+        machine.containers(&[]);
+        let recorded = machine.site().display().to_string();
+
+        let owner = Owners::reading(&machine.docker, machine.proc_root())
+            .on(filesystem)
+            .owner(&machine.site(), Path::new(&recorded), &incident());
+
+        assert_eq!(owner, Owner::Gone, "{name}");
+    }
+}
+
+#[test]
+fn a_site_whose_filesystem_will_not_read_could_not_be_told() {
+    let machine = Machine::new();
+    machine.containers(&[]);
+    let recorded = machine.site().display().to_string();
+
+    let owner = Owners::reading(&machine.docker, machine.proc_root())
+        .on(|_| Err("statfs refused".to_owned()))
+        .owner(&machine.site(), Path::new(&recorded), &incident());
+
+    assert!(matches!(owner, Owner::CouldNotTell(_)), "{owner:?}");
+}

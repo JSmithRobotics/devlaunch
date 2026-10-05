@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   process table does too. A stopped container counts as gone. `dl` run inside a pid
   namespace of its own cannot read that table and proves nothing gone. Every other lock, a live agent, and every failure to tell (no docker, a
   timeout, a line that does not parse) still refuse, and now say why. `--prune`'s worktree
-  sweep keeps every lock a claim.
+  sweep keeps every lock a claim. A worktree on NFS, SMB, 9p, FUSE or another shared
+  filesystem is "could not tell", because its agent may run on another machine.
 - **`?? .claude/worktrees/` no longer counts as an uncommitted change by itself.** When
   every entry under it is an agent worktree the clone weighs, each worktree answers for
   itself, so a clone whose only "change" was that line reads as nothing to lose.
