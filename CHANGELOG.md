@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An agent worktree's line in `rm` and `--ls --json` applies the clone line's rules** (#669).
+  A worktree line counted every commit under its HEAD that no remote ref reached, so a pure
+  merge of two pushed branches was counted in each of 6 worktree lines while the clone line
+  cleared it by the merge rule (#653), and a worktree with only that merge refused `rm`. A
+  worktree line now takes out every commit the merge, copy, squash and revert rules clear
+  from the clone line, so the lines agree about each commit. A commit the clone line still
+  counts stays in each worktree line that reaches it.
+
 ## [0.59.3] - 2026-10-02
 
 ### Fixed
