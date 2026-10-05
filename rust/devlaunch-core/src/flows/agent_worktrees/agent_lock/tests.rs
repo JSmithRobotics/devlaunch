@@ -653,6 +653,17 @@ fn a_lock_written_on_this_machine_is_asked_of_this_machines_procfs() {
 }
 
 #[test]
+fn a_lock_written_on_this_machine_with_no_docker_could_not_be_told() {
+    // This machine's table says gone, but a container docker would have
+    // listed may mount the same path, so no docker is no answer.
+    let machine = Machine::new();
+    machine.docker.script_missing("docker");
+    let recorded = machine.site().display().to_string();
+
+    assert!(matches!(machine.owner(&recorded), Owner::CouldNotTell(_)));
+}
+
+#[test]
 fn a_machine_with_no_procfs_could_not_be_told() {
     let machine = Machine::new();
     machine.containers(&[]);
