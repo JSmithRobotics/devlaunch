@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.59.4] - 2026-10-05
+
 ### Fixed
 
-- **`rm` and `--ls --json` can tell that a dead Claude agent's worktree lock is stale.** A
+- **`rm` and `--ls --json` can tell that a dead Claude agent's worktree lock is stale** (#670). A
   workspace refused `rm` on 2026-10-05 with "git is holding it locked (claude agent ... (pid
   8621 start 329153))", although the agent's pid was in no process table and the worktree
   was clean and pushed. Claude Code's own agent lock names the process that holds it. The
@@ -21,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout, a line that does not parse) still refuse, and now say why. `--prune`'s worktree
   sweep keeps every lock a claim. A worktree on NFS, SMB, 9p, FUSE or another shared
   filesystem is "could not tell", because its agent may run on another machine.
-- **`?? .claude/worktrees/` no longer counts as an uncommitted change by itself.** When
+- **`?? .claude/worktrees/` no longer counts as an uncommitted change by itself** (#670). When
   every entry under it is an agent worktree the clone weighs, each worktree answers for
   itself, so a clone whose only "change" was that line reads as nothing to lose.
 - **An agent worktree's line in `rm` and `--ls --json` applies the clone line's rules** (#669).
