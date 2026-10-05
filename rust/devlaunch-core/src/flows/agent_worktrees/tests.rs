@@ -2238,6 +2238,23 @@ fn a_whole_machine(world: &Clone) -> PathBuf {
 }
 
 fn verdict_with(world: &Clone, docker: &devlaunch_test_support::FakeRunner) -> Verdict {
+    on_a_whole_machine(world, docker, |git| {
+        clone_verdict(git, &world.clone, BareCache::At(&world.bare))
+    })
+}
+
+/// What `dl --ls --json` reads for the clone, on the same machine.
+fn account_with(world: &Clone, docker: &devlaunch_test_support::FakeRunner) -> CloneAccount {
+    on_a_whole_machine(world, docker, |git| {
+        account_of(git, &world.clone, BareCache::At(&world.bare))
+    })
+}
+
+fn on_a_whole_machine<T>(
+    world: &Clone,
+    docker: &devlaunch_test_support::FakeRunner,
+    read: impl FnOnce(&Git<'_>) -> T,
+) -> T {
     let runner = DockerScripted {
         real: ProcessRunner::new(),
         docker,
@@ -2245,9 +2262,9 @@ fn verdict_with(world: &Clone, docker: &devlaunch_test_support::FakeRunner) -> V
     let git = Git::new(&runner);
     let root = a_whole_machine(world);
     agent_lock::TEST_PROC_ROOT.with(|it| *it.borrow_mut() = Some(root));
-    let verdict = clone_verdict(&git, &world.clone, BareCache::At(&world.bare));
+    let answer = read(&git);
     agent_lock::TEST_PROC_ROOT.with(|it| *it.borrow_mut() = None);
-    verdict
+    answer
 }
 
 #[test]
@@ -2287,6 +2304,24 @@ fn the_incidents_clone_with_its_agent_running_stands_and_says_where() {
         standing.would_lose().is_none(),
         "a lock is never a loss, and the worktrees line is the site's to answer: {said}"
     );
+}
+
+#[test]
+fn the_listing_reads_the_incidents_clone_as_its_agent_left_it() {
+    // `dl --ls --json` reads the clone through `account_of`, not
+    // `clone_verdict`, so it answers the same question on its own path.
+    let world = the_incident();
+    let gone = a_running_container(&world, &[(1, 10), (77, 500)]);
+    assert_eq!(
+        account_with(&world, &gone).holds.unsaved_json(),
+        serde_json::json!({ "nothingToLose": true })
+    );
+
+    let running = a_running_container(&world, &[(1, 10), (8621, 329_153)]);
+    let json = account_with(&world, &running).holds.unsaved_json();
+    let could_not_tell = json["couldNotTell"].as_str().expect("a couldNotTell key");
+    assert!(could_not_tell.contains(AGENT_LOCK), "{json}");
+    assert!(json["nothingToLose"].is_null(), "{json}");
 }
 
 #[test]
