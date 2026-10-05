@@ -2217,13 +2217,37 @@ fn a_running_container(
     docker
 }
 
+/// A procfs for the whole machine: init and one kernel thread, and no agent.
+/// The real one is a pid namespace's when the suite runs in a container.
+fn a_whole_machine(world: &Clone) -> PathBuf {
+    let root = world.tmp().join("proc");
+    for (pid, flags) in [(1_u32, 4_194_560_u64), (2, 2_129_984)] {
+        let at = root.join(pid.to_string());
+        std::fs::create_dir_all(&at).expect("a process directory");
+        std::fs::write(
+            at.join("stat"),
+            format!(
+                "{pid} (init) S 0 {pid} {pid} 0 -1 {flags} 100 0 0 0 1 2 0 0 20 0 1 0 5 1000 10 \
+                 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0\n"
+            ),
+        )
+        .expect("its stat");
+        std::fs::write(at.join("status"), format!("NSpid:\t{pid}\n")).expect("its status");
+    }
+    root
+}
+
 fn verdict_with(world: &Clone, docker: &devlaunch_test_support::FakeRunner) -> Verdict {
     let runner = DockerScripted {
         real: ProcessRunner::new(),
         docker,
     };
     let git = Git::new(&runner);
-    clone_verdict(&git, &world.clone, BareCache::At(&world.bare))
+    let root = a_whole_machine(world);
+    agent_lock::TEST_PROC_ROOT.with(|it| *it.borrow_mut() = Some(root));
+    let verdict = clone_verdict(&git, &world.clone, BareCache::At(&world.bare));
+    agent_lock::TEST_PROC_ROOT.with(|it| *it.borrow_mut() = None);
+    verdict
 }
 
 #[test]

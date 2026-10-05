@@ -33,18 +33,28 @@
 //!   entries, which is how a process in a nested container is matched. No such
 //!   process is gone. A pid `N` with another start time is a reused pid, and is
 //!   gone too.
-//! - **The whole machine, first, when this pass can see it.** A procfs that
-//!   lists a kernel thread is the initial pid namespace's, and lists every
-//!   process on the machine with its `NSpid`. When this pass has one, the same
-//!   test runs over all of it before anything else, so an agent in a namespace
-//!   the mounts did not map (another docker, a renamed clone's old path) still
-//!   stands the site. It only ever adds a refusal.
+//! - **The whole machine, first, and always.** A procfs that lists a kernel
+//!   thread is the initial pid namespace's, and lists every process on the
+//!   machine with its `NSpid`. The same test runs over all of it before
+//!   anything else, so an agent in a namespace the mounts did not map (another
+//!   docker, podman, a renamed clone's old path) still stands the site. A pass
+//!   that cannot read that table proves nothing gone: `dl` in a pid namespace of
+//!   its own (a sandbox, a container), `hidepid`, or an entry that will not
+//!   read. The namespaces above are still asked after it, because they are what
+//!   says the lock was written on this machine at all.
 //! - **Everything else is "could not tell".** A reason in any other shape, a
 //!   docker that is missing, refuses or times out, a mount source this machine
 //!   cannot read, a process table that does not list pid 1 (no procfs, or one
 //!   mounted with `hidepid`), a host-side lock read from inside a pid namespace,
 //!   a line that does not parse, a process with start time `T` whose `NSpid`
 //!   could not be read, and a container that is paused or restarting.
+//!
+//! **What this cannot see.** A writer on another kernel that shares the path: a
+//! VM that mounts the same home at the same path, an NFS home shared between
+//! machines, a gVisor sandbox. Its processes are in no table here, so its lock
+//! reads as stale. And it assumes the reader and the writer share a time
+//! namespace, as docker's containers do: under another one, the start time
+//! would read shifted and a live agent as a reused pid.
 //!
 //! The lock file is never touched here. `dl <ws> rm` removes the whole clone,
 //! and a site whose lock is proved stale still has to pass every other question
@@ -126,7 +136,7 @@ pub(crate) struct Owners<'r> {
 
 impl<'r> Owners<'r> {
     pub(crate) fn new(runner: &'r dyn Runner) -> Self {
-        Self::reading(runner, PathBuf::from("/proc"))
+        Self::reading(runner, proc_root())
     }
 
     pub(crate) fn reading(runner: &'r dyn Runner, proc_root: PathBuf) -> Self {
@@ -140,24 +150,32 @@ impl<'r> Owners<'r> {
     /// Whether the agent that wrote `lock` on the worktree at `site` (on this
     /// machine) is still running. `recorded` is the path git recorded for it.
     pub(crate) fn owner(&self, site: &Path, recorded: &Path, lock: &AgentLock) -> Owner {
-        // First the whole machine, when this pass can see all of it. It finds
-        // an agent in any namespace, the ones the mounts below do not map
-        // included, and it can only add a refusal.
-        let whole_machine = host_table(&self.proc_root)
-            .ok()
-            .filter(|table| the_whole_machine(table));
-        if let Some(table) = &whole_machine {
-            match decide(table, lock) {
-                InOne::Gone => {}
-                InOne::Running => {
-                    return Owner::StillRunning(format!(
-                        "on this machine (pid {} here, start {})",
-                        running_as(table, lock).unwrap_or(lock.pid),
-                        lock.start
-                    ));
-                }
-                InOne::CouldNotTell(why) => return Owner::CouldNotTell(why),
+        // First the whole machine. It lists every process on this kernel, the
+        // ones in namespaces the mounts below do not map included, so it is
+        // the one table whose silence means something. A pass that cannot read
+        // it (a pid namespace of its own, `hidepid`, an entry that will not
+        // read) proves nothing gone.
+        let table = match host_table(&self.proc_root) {
+            Ok(table) if the_whole_machine(&table) => table,
+            Ok(_) => {
+                return Owner::CouldNotTell(
+                    "this pass cannot see the whole machine's processes (it runs in a pid \
+                     namespace of its own, or /proc hides them)"
+                        .to_owned(),
+                );
             }
+            Err(why) => return Owner::CouldNotTell(why),
+        };
+        match decide(&table, lock) {
+            InOne::Gone => {}
+            InOne::Running => {
+                return Owner::StillRunning(format!(
+                    "on this machine (pid {} here, start {})",
+                    running_as(&table, lock).unwrap_or(lock.pid),
+                    lock.start
+                ));
+            }
+            InOne::CouldNotTell(why) => return Owner::CouldNotTell(why),
         }
         // The whole machine saying gone is not enough on its own: the
         // namespaces below are what says the lock was written on this machine
@@ -305,6 +323,27 @@ impl<'r> Owners<'r> {
             },
         }
     }
+}
+
+/// The host's procfs. A test points it at a fake one for its own thread,
+/// because a suite run inside a container sees a pid namespace's procfs, which
+/// is never the whole machine's.
+#[cfg(not(test))]
+fn proc_root() -> PathBuf {
+    PathBuf::from("/proc")
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_PROC_ROOT: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn proc_root() -> PathBuf {
+    TEST_PROC_ROOT
+        .with(|root| root.borrow().clone())
+        .unwrap_or_else(|| PathBuf::from("/proc"))
 }
 
 /// A namespace a lock could have been written in.
@@ -577,6 +616,12 @@ fn nspid_entries(line: &str) -> Option<Vec<u32>> {
     pids.filter(|pids| !pids.is_empty())
 }
 
+/// Whether a read of `/proc/<pid>/…` failed because the process ended between
+/// the listing and the read: the file is gone, or the kernel says ESRCH.
+fn vanished(error: &std::io::Error) -> bool {
+    error.kind() == ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
+}
+
 /// The host's process table, read straight out of `proc_root`.
 fn host_table(proc_root: &Path) -> Result<Vec<Process>, String> {
     let entries = std::fs::read_dir(proc_root)
@@ -590,7 +635,7 @@ fn host_table(proc_root: &Path) -> Result<Vec<Process>, String> {
         let stat = match std::fs::read_to_string(entry.path().join("stat")) {
             Ok(stat) => stat,
             // Ended between the listing and the read.
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) if vanished(&error) => continue,
             Err(error) => return Err(format!("could not read /proc/{name}/stat: {error}")),
         };
         let StatFields {

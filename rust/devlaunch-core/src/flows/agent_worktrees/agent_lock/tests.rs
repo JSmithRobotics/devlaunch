@@ -195,7 +195,13 @@ impl Machine {
         std::fs::create_dir_all(machine.site()).expect("the site");
         std::fs::create_dir_all(machine.proc_root()).expect("a procfs");
         machine.host_process(1, 10, &[1]);
+        machine.whole_machine();
         machine
+    }
+
+    /// Make this machine's procfs a pid namespace's own: no kernel thread.
+    fn only_a_namespace(&self) {
+        std::fs::remove_dir_all(self.proc_root().join("2")).expect("the kernel thread going");
     }
 
     fn clone(&self) -> PathBuf {
@@ -560,7 +566,6 @@ fn the_container_is_read_as_root() {
 #[test]
 fn a_lock_written_on_this_machine_is_asked_of_this_machines_procfs() {
     let machine = Machine::new();
-    machine.whole_machine();
     machine.containers(&[]);
     let recorded = machine.site().display().to_string();
 
@@ -707,6 +712,7 @@ fn a_lock_on_this_machine_needs_the_whole_machines_table() {
     // a procfs with a pid 1 and none of the processes outside it. A host-side
     // agent would read as gone there.
     let machine = Machine::new();
+    machine.only_a_namespace();
     machine.containers(&[]);
     let recorded = machine.site().display().to_string();
 
@@ -723,7 +729,6 @@ fn an_agent_the_mounts_missed_is_found_in_the_whole_machines_table() {
     // clone's old path. Seen from the initial namespace, every process on the
     // machine is listed with its innermost pid.
     let machine = Machine::new();
-    machine.whole_machine();
     machine.host_process(53_000, 329_153, &[53_000, 8621]);
     machine.containers(&[container("ws", "exited", &[(&machine.clone(), MOUNTED_AT)])]);
 
@@ -736,8 +741,57 @@ fn an_agent_the_mounts_missed_is_found_in_the_whole_machines_table() {
 #[test]
 fn the_whole_machines_table_saying_gone_still_needs_a_namespace_that_sees_the_site() {
     let machine = Machine::new();
-    machine.whole_machine();
     machine.containers(&[]);
 
     assert!(matches!(machine.owner(RECORDED), Owner::CouldNotTell(_)));
+}
+
+#[test]
+fn a_whole_machines_table_that_will_not_read_could_not_be_told() {
+    // Review finding: an unreadable entry used to drop the whole-machine veto
+    // silently, and a mapped container saying gone was then enough.
+    let machine = Machine::new();
+    machine.host_process(53_000, 329_153, &[53_000, 8621]);
+    std::fs::create_dir_all(machine.proc_root().join("777/stat"))
+        .expect("an entry that will not read");
+    machine.containers(&[container(
+        "ws",
+        "running",
+        &[(&machine.clone(), MOUNTED_AT)],
+    )]);
+    machine.inside("ws", &[(1, 10, &[1])]);
+
+    assert!(matches!(machine.owner(RECORDED), Owner::CouldNotTell(_)));
+}
+
+#[test]
+fn without_the_whole_machines_table_nothing_is_proved_gone() {
+    // Review finding: `dl` in a pid namespace of its own cannot see a host
+    // agent, nor one in a container its docker does not list, so the
+    // namespaces it can see saying gone prove nothing.
+    let machine = Machine::new();
+    machine.only_a_namespace();
+    machine.containers(&[container(
+        "ws",
+        "running",
+        &[(&machine.clone(), MOUNTED_AT)],
+    )]);
+    machine.inside("ws", &[(1, 10, &[1])]);
+
+    let Owner::CouldNotTell(why) = machine.owner(RECORDED) else {
+        panic!("a partial view proves nothing gone");
+    };
+    assert!(why.contains("whole machine"), "{why}");
+
+    let stopped = Machine::new();
+    stopped.only_a_namespace();
+    stopped.containers(&[container("ws", "exited", &[(&stopped.clone(), MOUNTED_AT)])]);
+    assert!(matches!(stopped.owner(RECORDED), Owner::CouldNotTell(_)));
+}
+
+#[test]
+fn a_process_that_ends_while_the_table_is_read_is_gone_not_unreadable() {
+    assert!(vanished(&std::io::Error::from_raw_os_error(libc::ESRCH)));
+    assert!(vanished(&std::io::Error::from(ErrorKind::NotFound)));
+    assert!(!vanished(&std::io::Error::from_raw_os_error(libc::EACCES)));
 }

@@ -478,16 +478,23 @@ the process is gone:
   running when a process has start time `T` and pid `N`, in that namespace or as
   the innermost entry of its `NSpid` line (a nested container). A pid `N` with
   another start time is a reused pid.
-- When `dl` runs in the machine's own pid namespace (its `/proc` lists kernel
-  threads), the same test runs over every process on the machine first. An
-  agent in a namespace the mounts did not point at still keeps the lock. This
-  only ever refuses.
+- First of all, the same test runs over every process on the machine. That
+  needs `dl` in the machine's own pid namespace (its `/proc` lists kernel
+  threads) and a `/proc` that reads in full. An agent in a namespace the mounts
+  did not point at still keeps the lock. Without that table, nothing is proved
+  gone: `dl` run in a sandbox or a container, or a `/proc` mounted with
+  `hidepid`, always gives "could not tell".
 - Everything else is "could not tell" and the lock stands as before: a reason in
   any other shape (a `claude session` lock, one with no start time, one written
   on macOS), a docker that is missing, refuses or times out, a process table that
   does not list pid 1, a lock written on this machine but read from inside a pid
   namespace (a sandbox, a container), a line that does not parse, and a paused
   container.
+
+Two things this cannot see. A writer on another kernel that shares the path (a
+VM that mounts your home at the same path, an NFS home, a gVisor sandbox) is in
+no process table here, so its lock reads as stale. And a writer in another time
+namespace would show a shifted start time; docker's containers do not use one.
 
 A stale lock removes only the lock from the answer. The worktree still has to be
 clean and have nothing unpushed. The lock file is not touched. This proof runs

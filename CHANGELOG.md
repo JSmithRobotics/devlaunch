@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was clean and pushed. Claude Code's own agent lock names the process that holds it. The
   lock no longer stands the clone when every pid namespace that could have written it (this
   machine when the recorded path resolves here, and each container whose mounts put the
-  path on the worktree) says no process has that pid and start time. A stopped container
-  counts as gone. Every other lock, a live agent, and every failure to tell (no docker, a
+  path on the worktree) says no process has that pid and start time, and the machine's whole
+  process table does too. A stopped container counts as gone. `dl` run inside a pid
+  namespace of its own cannot read that table and proves nothing gone. Every other lock, a live agent, and every failure to tell (no docker, a
   timeout, a line that does not parse) still refuse, and now say why. `--prune`'s worktree
   sweep keeps every lock a claim.
 - **`?? .claude/worktrees/` no longer counts as an uncommitted change by itself.** When
