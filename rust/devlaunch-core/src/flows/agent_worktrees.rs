@@ -2149,39 +2149,27 @@ fn weigh_clone(
     locks: Locks<'_>,
     insist: impl Fn(&Site) -> Insistence,
 ) -> Weighing {
-    weigh_clone_knowing(
-        git,
-        clone,
-        bare,
-        picture,
-        want,
-        OnceCell::new(),
-        locks,
-        insist,
-    )
-}
-
-/// [`weigh_clone`], told what the clone count's rules cleared when the caller
-/// has already counted the clone, so the rules are not run a second time.
-fn weigh_clone_knowing(
-    git: &Git<'_>,
-    clone: &Path,
-    bare: Option<&Path>,
-    picture: &ClonePicture,
-    want: Derivatives,
-    cleared: OnceCell<Vec<String>>,
-    locks: Locks<'_>,
-    insist: impl Fn(&Site) -> Insistence,
-) -> Weighing {
     let weigher = Weigher {
         git,
         clone,
         bare,
         reachability: RefCell::new(HashMap::new()),
-        cleared,
+        cleared: OnceCell::new(),
         derivatives: want,
         locks,
     };
+    weigh_clone_with(&weigher, picture, insist)
+}
+
+/// [`weigh_clone`] with the weigher built by the caller, so a caller that has
+/// already counted the clone can hand it what the clone count's rules cleared
+/// and the rules are not run a second time.
+fn weigh_clone_with(
+    weigher: &Weigher<'_, '_>,
+    picture: &ClonePicture,
+    insist: impl Fn(&Site) -> Insistence,
+) -> Weighing {
+    let clone = weigher.clone;
     let roots = forest_of(clone, picture);
     let mut forest_paths = Vec::new();
     for root in &roots {
@@ -2191,7 +2179,7 @@ fn weigh_clone_knowing(
     let mut standing = Vec::new();
     let mut derivatives = Vec::new();
     for root in &roots {
-        let weighed = weigh(&weigher, root, insist(root), &forest_paths, &[]);
+        let weighed = weigh(weigher, root, insist(root), &forest_paths, &[]);
         if let Some(removable) = weighed.removable {
             going.push(materialize(removable));
         }
@@ -2765,16 +2753,16 @@ fn sites_of(git: &Git<'_>, clone: &Path, cleared: Vec<String>) -> SiteAccount {
     // full walk of a site plus an `exclusive_usage` over a 12000-file
     // environment. The field it leaves empty is discarded here rather than read
     // as an answer.
-    let weighed = weigh_clone_knowing(
+    let weigher = Weigher {
         git,
         clone,
         bare,
-        &picture,
-        Derivatives::NotAsked,
-        OnceCell::from(cleared),
-        Locks::ProveAgentsGone(Owners::new(git.runner())),
-        |_| Insistence::NotInsisted,
-    );
+        reachability: RefCell::new(HashMap::new()),
+        cleared: OnceCell::from(cleared),
+        derivatives: Derivatives::NotAsked,
+        locks: Locks::ProveAgentsGone(Owners::new(git.runner())),
+    };
+    let weighed = weigh_clone_with(&weigher, &picture, |_| Insistence::NotInsisted);
     SiteAccount {
         reasons: weighed
             .standing
