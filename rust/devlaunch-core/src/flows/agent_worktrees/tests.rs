@@ -2326,18 +2326,10 @@ fn a_reverted_commit_a_detached_worktree_sits_on_stays_counted_there() {
     );
 }
 
-#[test]
-fn a_worktree_count_clears_nothing_when_git_will_not_run_the_rules() {
-    // Every failure clears nothing: with the rules' listing refused, the
-    // worktree line is what git listed, the pure merge included.
-    let world = a_clone_with_two_pushed_branches();
-    let worktree = a_worktree_on_a_pure_merge(&world, "agent-one");
-    world.containerise();
-    let runner = RefusingTheCloneListing {
-        real: ProcessRunner::new(),
-    };
-    let git = Git::new(&runner);
-
+/// What *runner*'s git leaves of the agent worktree at *worktree*'s own
+/// `log --oneline HEAD --not --remotes` once the clone count's rules have run.
+fn counted_through(world: &Clone, runner: &dyn Runner, worktree: &Path) -> Vec<String> {
+    let git = Git::new(runner);
     let weigher = Weigher {
         git: &git,
         clone: &world.clone,
@@ -2347,27 +2339,98 @@ fn a_worktree_count_clears_nothing_when_git_will_not_run_the_rules() {
         derivatives: Derivatives::NotAsked,
     };
     let listed = run_git(
-        &worktree,
+        worktree,
         &["log", "--oneline", "HEAD", "--not", "--remotes"],
     );
-
-    assert_eq!(weigher.counted(&listed).len(), 1, "{listed}");
+    weigher.counted(&listed)
 }
 
-/// A runner that refuses the clone count's `git log --oneline ... --all`
-/// listing and runs everything else, the merge rule's `git log --merges ...
-/// --all` included.
-struct RefusingTheCloneListing {
-    real: ProcessRunner,
+#[test]
+fn a_worktree_count_clears_nothing_when_git_will_not_run_the_rules() {
+    // Every failure clears nothing: with the rules' listing refused, the
+    // worktree line is what git listed, the pure merge included.
+    let world = a_clone_with_two_pushed_branches();
+    let worktree = a_worktree_on_a_pure_merge(&world, "agent-one");
+    world.containerise();
+    let runner = Refusing {
+        real: ProcessRunner::new(),
+        refuses: the_clone_listing,
+    };
+
+    assert_eq!(counted_through(&world, &runner, &worktree).len(), 1);
 }
 
-impl Runner for RefusingTheCloneListing {
-    fn capture(&self, spec: &SpawnSpec) -> Outcome<CapturedText> {
-        let argv = spec.invocation.argv();
-        if ["log", "--oneline", "--all"]
+#[test]
+fn a_worktree_count_clears_nothing_when_git_will_not_list_the_tags() {
+    // The rules' listing names the clone's local tags, so with the tags refused
+    // there is no listing to run them on, and the pure merge stays counted.
+    let world = a_clone_with_two_pushed_branches();
+    let worktree = a_worktree_on_a_pure_merge(&world, "agent-one");
+    world.containerise();
+    let runner = Refusing {
+        real: ProcessRunner::new(),
+        refuses: the_tag_query,
+    };
+
+    assert_eq!(counted_through(&world, &runner, &worktree).len(), 1);
+}
+
+#[test]
+fn a_worktree_line_counts_what_git_listed_when_the_clone_count_could_not_run() {
+    // `git status` refused in the clone stops the clone count before its rules,
+    // so they cleared nothing, and the worktree line stays as git listed it.
+    let world = a_clone_with_two_pushed_branches();
+    a_worktree_on_a_pure_merge(&world, "agent-one");
+    world.containerise();
+    let runner = Refusing {
+        real: ProcessRunner::new(),
+        refuses: the_clone_status,
+    };
+    let git = Git::new(&runner);
+
+    let verdict = clone_verdict(&git, &world.clone, BareCache::At(&world.bare)).unsaved_json();
+    assert!(verdict["couldNotTell"].is_string(), "{verdict}");
+    let said = verdict["wouldLose"].as_str().expect("a loss");
+    assert!(
+        said.contains("1 unpushed commit(s) (in .claude/worktrees/agent-one)"),
+        "{said}"
+    );
+}
+
+/// The clone count's `git log --oneline ... --all` listing, and not the merge
+/// rule's `git log --merges ... --all`.
+fn the_clone_listing(argv: &[String]) -> bool {
+    ["log", "--oneline", "--all"]
+        .iter()
+        .all(|wanted| argv.iter().any(|arg| arg == wanted))
+}
+
+/// The `for-each-ref refs/tags/` that lists a repository's tags.
+fn the_tag_query(argv: &[String]) -> bool {
+    ["for-each-ref", "refs/tags/"]
+        .iter()
+        .all(|wanted| argv.iter().any(|arg| arg == wanted))
+}
+
+/// `git status` pinned to the clone itself, and not one asked through a
+/// worktree's admin directory.
+fn the_clone_status(argv: &[String]) -> bool {
+    argv.iter().any(|arg| arg == "status")
+        && argv
             .iter()
-            .all(|wanted| argv.iter().any(|arg| arg == wanted))
-        {
+            .any(|arg| arg.starts_with("--git-dir=") && arg.ends_with("/.git"))
+}
+
+/// A runner that refuses every capture *refuses* names and runs everything
+/// else.
+struct Refusing {
+    real: ProcessRunner,
+    refuses: fn(&[String]) -> bool,
+}
+
+impl Runner for Refusing {
+    fn capture(&self, spec: &SpawnSpec) -> Outcome<CapturedText> {
+        if (self.refuses)(&spec.invocation.argv()) {
             let mut refused = spec.clone();
             refused.invocation = Invocation::new("false");
             return self.real.capture(&refused);
