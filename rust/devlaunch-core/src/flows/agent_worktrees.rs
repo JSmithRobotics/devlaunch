@@ -132,7 +132,7 @@
 //! `rev-list --all`. It is in the shared ref store, which nothing here removes.
 //! No probe asks about it, and none should be added.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -1195,6 +1195,10 @@ struct Weigher<'a, 'r> {
     /// it. `Result` rather than the witness alone: a refusal is an answer and
     /// re-asking it would not make it a different one.
     reachability: RefCell<HashMap<String, Result<Elsewhere, Reason>>>,
+    /// The clone's unpushed commits the clone count's rules clear, asked once
+    /// per clone and only when a site lists a commit. See
+    /// [`Weigher::ask_elsewhere`].
+    cleared: OnceCell<Vec<String>>,
     /// Whether this pass costs the tagged derivatives inside the sites it
     /// stands. See [`Derivatives`].
     derivatives: Derivatives,
@@ -1223,6 +1227,21 @@ impl Weigher<'_, '_> {
     }
 
     /// [`Weigher::elsewhere`] with the memo taken out of the way.
+    ///
+    /// **The clone's listing goes through the clone count's rules.** A commit
+    /// that the merge, copy, squash or revert rule clears from the clone count
+    /// is cleared here too, so a site never stands on a commit the clone count
+    /// shows a remote already holds. The cleared commits are the clone count's
+    /// own ([`workspace_state::CloneState::cleared`]) where the caller counted
+    /// the clone first, and [`workspace_state::cleared_unpushed`] otherwise:
+    /// one pipeline either way.
+    /// The rules only take commits out of what git listed, and when git refuses
+    /// them nothing is taken out.
+    ///
+    /// A commit that the clone count still counts is listed here as well, once
+    /// per site that reaches it. The lines then add up to more than the
+    /// commits, but each line is true of its own directory, and that is what a
+    /// person reads it for.
     fn ask_elsewhere(&self, at: &Place, head: &WorktreeHead) -> Result<Elsewhere, Reason> {
         match in_the_cache(self.git, self.bare, head.commit()) {
             InTheCache::Reached => Ok(Elsewhere(())),
@@ -1243,7 +1262,7 @@ impl Weigher<'_, '_> {
                             ),
                         }),
                     }),
-                    Some(unpushed) => match NonEmpty::of(unpushed.lines().map(str::to_owned)) {
+                    Some(unpushed) => match NonEmpty::of(self.counted(&unpushed)) {
                         None => Ok(Elsewhere(())),
                         Some(commits) => Err(Reason::Holds {
                             at: at.clone(),
@@ -1260,6 +1279,18 @@ impl Weigher<'_, '_> {
                 }
             }
         }
+    }
+
+    /// The lines of *unpushed* that the clone count's rules leave counted.
+    fn counted(&self, unpushed: &str) -> Vec<String> {
+        let listed: Vec<String> = unpushed.lines().map(str::to_owned).collect();
+        if listed.is_empty() {
+            return listed;
+        }
+        let cleared = self.cleared.get_or_init(|| {
+            workspace_state::cleared_unpushed(self.git, self.clone, BareCache::of(self.bare))
+        });
+        workspace_state::not_among(listed.iter(), cleared)
     }
 
     /// Q2 for one present worktree, asked through the admin directory derived
@@ -1993,11 +2024,26 @@ fn weigh_clone(
     want: Derivatives,
     insist: impl Fn(&Site) -> Insistence,
 ) -> Weighing {
+    weigh_clone_knowing(git, clone, bare, picture, want, OnceCell::new(), insist)
+}
+
+/// [`weigh_clone`], told what the clone count's rules cleared when the caller
+/// has already counted the clone, so the rules are not run a second time.
+fn weigh_clone_knowing(
+    git: &Git<'_>,
+    clone: &Path,
+    bare: Option<&Path>,
+    picture: &ClonePicture,
+    want: Derivatives,
+    cleared: OnceCell<Vec<String>>,
+    insist: impl Fn(&Site) -> Insistence,
+) -> Weighing {
     let weigher = Weigher {
         git,
         clone,
         bare,
         reachability: RefCell::new(HashMap::new()),
+        cleared,
         derivatives: want,
     };
     let roots = forest_of(clone, picture);
@@ -2420,9 +2466,9 @@ fn forget(
 /// afternoon of unsaved work one level in. Dirt is per working tree;
 /// reachability is per repository (devlaunch#446).
 pub(crate) fn clone_verdict(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Verdict {
-    let own = workspace_state::holds_unsaved_work(git, clone, bare);
-    let own_reasons = lift(own);
-    let site_reasons = site_reasons(git, clone);
+    let state = workspace_state::read_clone(git, clone, bare);
+    let own_reasons = lift(state.unsaved);
+    let site_reasons = site_reasons(git, clone, state.cleared);
     match Standing::of(own_reasons.into_iter().chain(site_reasons).collect()) {
         Some(standing) => Verdict::Stands(standing),
         None => Verdict::Collectable(Proof {
@@ -2440,7 +2486,7 @@ pub(crate) struct CloneAccount {
 pub(crate) fn account_of(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> CloneAccount {
     let state = workspace_state::read_clone(git, clone, bare);
     let own_reasons = lift(state.unsaved);
-    let site_reasons = site_reasons(git, clone);
+    let site_reasons = site_reasons(git, clone, state.cleared);
     let holds = match Standing::of(own_reasons.into_iter().chain(site_reasons).collect()) {
         Some(standing) => Verdict::Stands(standing),
         None => Verdict::Collectable(Proof {
@@ -2509,7 +2555,11 @@ fn lift(own: Unsaved) -> Vec<Reason> {
 /// The sibling bare is derived from the clone's place in the cache
 /// (`<repos>/<owner>/<repo>/.bare` beside `<repos>/<owner>/<repo>/<leaf>`),
 /// which is the same sibling `--prune`'s sweep is handed by the repo manager.
-fn site_reasons(git: &Git<'_>, clone: &Path) -> Vec<Reason> {
+///
+/// *cleared* is what the clone count's rules cleared
+/// ([`workspace_state::CloneState::cleared`]), so each site's count clears
+/// the same commits the clone's own count did.
+fn site_reasons(git: &Git<'_>, clone: &Path, cleared: Vec<String>) -> Vec<Reason> {
     if std::fs::read_dir(worktrees_dir(clone)).is_err() {
         return Vec::new();
     }
@@ -2528,9 +2578,15 @@ fn site_reasons(git: &Git<'_>, clone: &Path) -> Vec<Reason> {
     // full walk of a site plus an `exclusive_usage` over a 12000-file
     // environment. The field it leaves empty is discarded here rather than read
     // as an answer.
-    let weighed = weigh_clone(git, clone, bare, &picture, Derivatives::NotAsked, |_| {
-        Insistence::NotInsisted
-    });
+    let weighed = weigh_clone_knowing(
+        git,
+        clone,
+        bare,
+        &picture,
+        Derivatives::NotAsked,
+        OnceCell::from(cleared),
+        |_| Insistence::NotInsisted,
+    );
     weighed
         .standing
         .into_iter()
