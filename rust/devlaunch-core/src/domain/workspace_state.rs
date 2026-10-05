@@ -418,6 +418,15 @@ impl<T> NonEmpty<T> {
 pub(crate) struct CloneState {
     pub(crate) branch: Option<String>,
     pub(crate) unsaved: Unsaved,
+    /// The unpushed commits the count's rules cleared, as full hashes
+    /// ([`cleared_by_the_rules`]).
+    ///
+    /// For the agent worktree lines of the same verdict, which take these out
+    /// of their own listings: they then clear what `unsaved` cleared, and the
+    /// rules run once. Empty wherever the rules cleared nothing, and wherever
+    /// git refused before they ran, so a worktree line then stays as git
+    /// listed it.
+    pub(crate) cleared: Vec<String>,
 }
 
 /// Report what *clone* holds. The only function here that talks to git.
@@ -475,6 +484,7 @@ pub(crate) fn read_clone(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Cl
             return CloneState {
                 branch: None,
                 unsaved: Unsaved::NothingToLose,
+                cleared: Vec::new(),
             };
         }
         Err(error) => {
@@ -484,6 +494,7 @@ pub(crate) fn read_clone(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Cl
                     clone: clone.to_path_buf(),
                     error: error.to_string(),
                 }),
+                cleared: Vec::new(),
             };
         }
     };
@@ -491,6 +502,7 @@ pub(crate) fn read_clone(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Cl
         return CloneState {
             branch: None,
             unsaved: Unsaved::NothingToLose,
+            cleared: Vec::new(),
         };
     }
     // Empty means git answered without naming a branch, which is not a branch;
@@ -500,15 +512,22 @@ pub(crate) fn read_clone(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Cl
         GitAnswer::Said(head) if !head.is_empty() => Some(head),
         _ => None,
     };
-    let unsaved = unsaved(git, clone, bare);
-    CloneState { branch, unsaved }
+    let (unsaved, cleared) = unsaved(git, clone, bare);
+    CloneState {
+        branch,
+        unsaved,
+        cleared,
+    }
 }
 
 /// What would be lost by deleting *clone*, as far as git can be made to say.
 ///
-/// The guard `dl <ws> rm` consults. Thin on purpose: the interesting behaviour is
-/// in [`read_clone`], and this is the name the guard reads by. Total — every path
-/// returns one of the three arms, and none of them means "go ahead" by default.
+/// The clone's own count, without the agent worktree lines that the guard
+/// `dl <ws> rm` adds to it (`flows::agent_worktrees::clone_verdict`, which reads
+/// [`read_clone`] so that both halves share [`CloneState::cleared`]). Kept for
+/// the tests that pin the clone's own count. Total — every path returns one of
+/// the three arms, and none of them means "go ahead" by default.
+#[cfg(test)]
 pub(crate) fn holds_unsaved_work(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Unsaved {
     read_clone(git, clone, bare).unsaved
 }
@@ -577,59 +596,121 @@ fn path_in(line: &str) -> Option<&str> {
 /// clone with no refs at all git exits 0 with no output, so the gate bought
 /// nothing, and on a clone whose HEAD is unborn but which carries an orphan branch
 /// it hid the one thing there was to find.
-fn unsaved(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Unsaved {
+fn unsaved(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> (Unsaved, Vec<String>) {
     let status = match git.status_porcelain(clone) {
         GitAnswer::Said(status) => status,
         GitAnswer::Refused(refused) => {
-            return Unsaved::CouldNotTell(CouldNotTell::GitCouldNotRead {
-                clone: clone.to_path_buf(),
-                reason: refused.reason().to_owned(),
-            });
+            return (
+                Unsaved::CouldNotTell(CouldNotTell::GitCouldNotRead {
+                    clone: clone.to_path_buf(),
+                    reason: refused.reason().to_owned(),
+                }),
+                Vec::new(),
+            );
         }
     };
 
     let mut losses = Vec::new();
+    let mut cleared = Vec::new();
     if let Some(changed) = NonEmpty::of(status.lines().map(str::to_owned)) {
         losses.push(Loss::Uncommitted(changed));
     }
     let local_tags = match local_tags(git, clone, bare) {
         GitAnswer::Said(tags) => tags,
         GitAnswer::Refused(refused) => {
-            return Unsaved::CouldNotTell(CouldNotTell::UnpushedNotListed {
-                clone: clone.to_path_buf(),
-                reason: refused.reason().to_owned(),
-            });
+            return (
+                Unsaved::CouldNotTell(CouldNotTell::UnpushedNotListed {
+                    clone: clone.to_path_buf(),
+                    reason: refused.reason().to_owned(),
+                }),
+                Vec::new(),
+            );
         }
     };
     match git.unpushed_commits(clone, &local_tags) {
         GitAnswer::Said(unpushed) => {
             if let Some(listed) = NonEmpty::of(unpushed.lines().map(str::to_owned)) {
-                let mut copied = already_on_a_remote(git, clone, &local_tags);
-                let left = not_among(listed.iter(), &copied);
-                if !left.is_empty() {
-                    copied.extend(squashed_onto_a_remote(git, clone, &left, &local_tags));
-                }
-                let left = not_among(listed.iter(), &copied);
-                if !left.is_empty() {
-                    copied.extend(reverted_in_pairs(git, clone, &left));
-                }
+                let copied = cleared_by_the_rules(git, clone, &listed, &local_tags);
                 if let Some(commits) = NonEmpty::of(not_among(listed.iter(), &copied)) {
                     let by_tags = owed_to_tags(git, clone, &local_tags)
                         .and_then(|by_tags| by_tags.leaving_out(&copied));
                     losses.push(Loss::Unpushed { commits, by_tags });
                 }
+                cleared = copied;
             }
         }
         GitAnswer::Refused(refused) => {
-            return Unsaved::CouldNotTell(CouldNotTell::UnpushedNotListed {
-                clone: clone.to_path_buf(),
-                reason: refused.reason().to_owned(),
-            });
+            return (
+                Unsaved::CouldNotTell(CouldNotTell::UnpushedNotListed {
+                    clone: clone.to_path_buf(),
+                    reason: refused.reason().to_owned(),
+                }),
+                Vec::new(),
+            );
         }
     }
-    match Losses::of(losses) {
+    let unsaved = match Losses::of(losses) {
         Some(losses) => Unsaved::WouldLose(losses),
         None => Unsaved::NothingToLose,
+    };
+    (unsaved, cleared)
+}
+
+/// Which of *listed* the rules show a remote already holds, as full hashes.
+///
+/// The one pipeline both counts go through: the merge and copy rules
+/// ([`already_on_a_remote`]), then the squash rule ([`squashed_onto_a_remote`])
+/// on what they left, then the revert rule ([`reverted_in_pairs`]) on what the
+/// squash rule left. *listed* is the clone count's `git log --oneline` lines.
+///
+/// Each rule only adds to what is cleared, and a rule git refuses adds
+/// nothing, so a failure anywhere leaves more counted, never less.
+fn cleared_by_the_rules(
+    git: &Git<'_>,
+    clone: &Path,
+    listed: &NonEmpty<String>,
+    local_tags: &[String],
+) -> Vec<String> {
+    let mut copied = already_on_a_remote(git, clone, local_tags);
+    let left = not_among(listed.iter(), &copied);
+    if !left.is_empty() {
+        copied.extend(squashed_onto_a_remote(git, clone, &left, local_tags));
+    }
+    let left = not_among(listed.iter(), &copied);
+    if !left.is_empty() {
+        copied.extend(reverted_in_pairs(git, clone, &left));
+    }
+    copied
+}
+
+/// The clone's unpushed commits that the rules clear, as full hashes: the
+/// commits the clone count leaves out although no remote ref reaches them.
+///
+/// For a count that lists a part of the clone's unpushed commits, which is an
+/// agent worktree's count of the commits under its HEAD (devlaunch#653,
+/// devlaunch#659, devlaunch#664 were each written for the clone count alone).
+/// Such a count takes these out of its own listing, so it clears a commit
+/// exactly when the clone count clears it, and the two cannot disagree about
+/// one commit.
+///
+/// **The rules are asked about the clone's whole listing, not the part.**
+/// The worktree's commits are among the clone's, because `--all` reads every
+/// worktree's HEAD, and the squash and revert rules weigh every ref that
+/// reaches a commit, so the answer for a commit does not depend on which count
+/// asks about it.
+///
+/// **Every failure clears nothing.** A refusal on the tags or on the listing
+/// gives an empty answer, so the part's count stays as git listed it.
+pub(crate) fn cleared_unpushed(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Vec<String> {
+    let Some(local_tags) = local_tags(git, clone, bare).said() else {
+        return Vec::new();
+    };
+    let Some(unpushed) = git.unpushed_commits(clone, &local_tags).said() else {
+        return Vec::new();
+    };
+    match NonEmpty::of(unpushed.lines().map(str::to_owned)) {
+        Some(listed) => cleared_by_the_rules(git, clone, &listed, &local_tags),
+        None => Vec::new(),
     }
 }
 
@@ -1045,7 +1126,10 @@ fn remote_refs_to_compare(branch: &LocalBranch, upstreams: &[&RemoteRef]) -> Vec
 /// A line starts with an abbreviated hash, and git makes that abbreviation
 /// unique in the repository it printed it for, so a full hash that starts with
 /// it is that commit.
-fn not_among<'a>(lines: impl Iterator<Item = &'a String>, hashes: &[String]) -> Vec<String> {
+pub(crate) fn not_among<'a>(
+    lines: impl Iterator<Item = &'a String>,
+    hashes: &[String],
+) -> Vec<String> {
     lines
         .filter(|line| !is_among(line, hashes))
         .cloned()

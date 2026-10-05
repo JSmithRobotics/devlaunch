@@ -1121,6 +1121,16 @@ branch only through a merge's second parent still counts unless another rule
 clears it, even when the squash does hold its change. In each case the refusal is yours to
 judge.
 
+The line for an agent worktree under `.claude/worktrees/` runs the same four
+rules. Its count is the commits under that worktree's HEAD that no remote ref
+reaches, less every commit the rules clear from the clone's own count, so a
+commit cleared in one line is cleared in all of them. A commit that stays
+counted is named in the clone's line and again in the line of each worktree
+that reaches it, so the lines can add up to more than the commits there are.
+Each line is still true of its own directory. Before this, a worktree line
+counted by hash alone, and a pure merge of two pushed branches on an agent's
+branch refused `rm` although the clone's own line cleared it.
+
 **An agent worktree answers for itself.** A clone whose `.claude/` is not
 gitignored shows `?? .claude/worktrees/` in its own `git status` whenever it holds
 an agent worktree. That line used to count as an uncommitted change on its own,
