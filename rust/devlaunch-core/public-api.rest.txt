@@ -830,8 +830,22 @@ pub fn devlaunch_core::domain::xdg::config_home() -> core::result::Result<std::p
 pub fn devlaunch_core::domain::xdg::devlaunch_cache() -> core::result::Result<std::path::PathBuf, devlaunch_core::domain::xdg::NoHomeDirectory>
 pub mod devlaunch_core::flows
 pub mod devlaunch_core::flows::agent_worktrees
+pub enum devlaunch_core::flows::agent_worktrees::AgentOwner
+pub devlaunch_core::flows::agent_worktrees::AgentOwner::CouldNotTell(alloc::string::String)
+pub devlaunch_core::flows::agent_worktrees::AgentOwner::StillRunning(alloc::string::String)
+impl core::clone::Clone for devlaunch_core::flows::agent_worktrees::AgentOwner
+pub fn devlaunch_core::flows::agent_worktrees::AgentOwner::clone(&self) -> devlaunch_core::flows::agent_worktrees::AgentOwner
+impl core::cmp::Eq for devlaunch_core::flows::agent_worktrees::AgentOwner
+impl core::cmp::PartialEq for devlaunch_core::flows::agent_worktrees::AgentOwner
+pub fn devlaunch_core::flows::agent_worktrees::AgentOwner::eq(&self, &devlaunch_core::flows::agent_worktrees::AgentOwner) -> bool
+impl core::fmt::Debug for devlaunch_core::flows::agent_worktrees::AgentOwner
+pub fn devlaunch_core::flows::agent_worktrees::AgentOwner::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for devlaunch_core::flows::agent_worktrees::AgentOwner
 pub enum devlaunch_core::flows::agent_worktrees::Blank
 pub devlaunch_core::flows::agent_worktrees::Blank::ASiteSitsInside
+pub devlaunch_core::flows::agent_worktrees::Blank::AgentLock
+pub devlaunch_core::flows::agent_worktrees::Blank::AgentLock::owner: devlaunch_core::flows::agent_worktrees::AgentOwner
+pub devlaunch_core::flows::agent_worktrees::Blank::AgentLock::reason: alloc::string::String
 pub devlaunch_core::flows::agent_worktrees::Blank::AppearedAfterThePlan
 pub devlaunch_core::flows::agent_worktrees::Blank::GitWouldNotSay(devlaunch_core::domain::workspace_state::CouldNotTell)
 pub devlaunch_core::flows::agent_worktrees::Blank::NotThisClonesToAccountFor(devlaunch_core::flows::agent_worktrees::Unaccountable)

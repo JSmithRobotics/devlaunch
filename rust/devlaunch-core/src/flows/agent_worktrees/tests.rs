@@ -1832,6 +1832,7 @@ fn the_listing_path_never_costs_a_derivative() {
         Some(&world.bare),
         &picture,
         Derivatives::Weighed,
+        Locks::EveryLockIsAClaim,
         |_| Insistence::NotInsisted,
     );
     let not_asked = weigh_clone(
@@ -1840,6 +1841,7 @@ fn the_listing_path_never_costs_a_derivative() {
         Some(&world.bare),
         &picture,
         Derivatives::NotAsked,
+        Locks::EveryLockIsAClaim,
         |_| Insistence::NotInsisted,
     );
 
@@ -2093,6 +2095,406 @@ fn a_tag_that_gained_an_outer_tag_is_not_told_its_worktree_stopped_being_weighed
         "the worktree is weighed and standing, so the refusal may not blame it: {}",
         withheld.because.describe()
     );
+}
+
+// =======================================================================
+// a Claude agent's lock, whose agent may be gone
+// =======================================================================
+
+/// Real git, and a scripted docker: every `docker` spawn goes to `docker`,
+/// everything else runs for real. No test here needs a docker daemon.
+struct DockerScripted<'a> {
+    real: ProcessRunner,
+    docker: &'a devlaunch_test_support::FakeRunner,
+}
+
+impl DockerScripted<'_> {
+    fn is_docker(spec: &SpawnSpec) -> bool {
+        spec.invocation.argv().first().map(String::as_str) == Some("docker")
+    }
+}
+
+impl Runner for DockerScripted<'_> {
+    fn capture(&self, spec: &SpawnSpec) -> Outcome<CapturedText> {
+        if Self::is_docker(spec) {
+            self.docker.capture(spec)
+        } else {
+            self.real.capture(spec)
+        }
+    }
+
+    fn passthrough(&self, spec: &SpawnSpec) -> Outcome {
+        self.real.passthrough(spec)
+    }
+
+    fn session(&self, spec: &SpawnSpec, on_stderr_line: &mut dyn FnMut(&str)) -> Outcome {
+        self.real.session(spec, on_stderr_line)
+    }
+
+    fn watched(&self, spec: &SpawnSpec, on_line: &mut dyn FnMut(&str)) -> Outcome {
+        self.real.watched(spec, on_line)
+    }
+
+    fn detach(&self, what: &Invocation) -> DetachOutcome {
+        self.real.detach(what)
+    }
+}
+
+/// The agent and the lock from the 2026-10-05 refusal.
+const AGENT: &str = "agent-a540dbaa96aa45899";
+const AGENT_LOCK: &str = "claude agent agent-a540dbaa96aa45899 (pid 8621 start 329153)";
+
+/// `git worktree lock --reason` by hand, for the same reason as
+/// [`lock_by_hand`].
+fn lock_with_reason(world: &Clone, leaf: &str, reason: &str) {
+    std::fs::write(
+        world
+            .clone
+            .join(".git")
+            .join("worktrees")
+            .join(leaf)
+            .join("locked"),
+        reason,
+    )
+    .expect("the lock git's own listing reads");
+}
+
+/// The 2026-10-05 clone: `.claude/` not gitignored, one agent worktree that is
+/// clean and detached at its pushed branch tip, locked by the agent, and
+/// registered from inside the workspace's container.
+fn the_incident() -> Clone {
+    let world = Clone::new();
+    let worktree = world.worktree(AGENT);
+    run_git(&worktree, &["checkout", "--detach"]);
+    lock_with_reason(&world, AGENT, AGENT_LOCK);
+    world.containerise();
+    world
+}
+
+/// One `/proc/<pid>/stat` line, start time in field 22.
+fn stat_line(pid: u32, start: u64) -> String {
+    format!(
+        "{pid} (claude) S 1 {pid} {pid} 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 {start} 1000 \
+         10 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0\n"
+    )
+}
+
+/// docker knows one running container, `ws`, mounting this clone where the
+/// registrations say it is, with these processes in it.
+fn a_running_container(
+    world: &Clone,
+    processes: &[(u32, u64)],
+) -> devlaunch_test_support::FakeRunner {
+    use devlaunch_test_support::Response;
+    let docker = devlaunch_test_support::FakeRunner::new();
+    docker.script(["docker", "ps", "--all"], Response::stdout("ws\n"));
+    docker.script(
+        ["docker", "inspect"],
+        Response::stdout(
+            serde_json::json!([{
+                "Id": "ws",
+                "Name": "/kinisi_jazzy_ws",
+                "State": { "Status": "running" },
+                "Mounts": [{
+                    "Type": "bind",
+                    "Source": world.clone.display().to_string(),
+                    "Destination": "/workspaces/devlaunch-container",
+                }],
+            }])
+            .to_string(),
+        ),
+    );
+    let mut out = String::new();
+    for (pid, start) in processes {
+        out.push_str(&stat_line(*pid, *start));
+    }
+    out.push_str("devlaunch-nspid\n");
+    for (pid, _) in processes {
+        out.push_str(&format!("/proc/{pid}/status:NSpid:\t{pid}\n"));
+    }
+    out.push_str("devlaunch-end\n");
+    docker.script(["docker", "exec"], Response::stdout(out));
+    docker
+}
+
+/// A procfs for the whole machine: init and one kernel thread, and no agent.
+/// The real one is a pid namespace's when the suite runs in a container.
+fn a_whole_machine(world: &Clone) -> PathBuf {
+    let root = world.tmp().join("proc");
+    for (pid, flags) in [(1_u32, 4_194_560_u64), (2, 2_129_984)] {
+        let at = root.join(pid.to_string());
+        std::fs::create_dir_all(&at).expect("a process directory");
+        std::fs::write(
+            at.join("stat"),
+            format!(
+                "{pid} (init) S 0 {pid} {pid} 0 -1 {flags} 100 0 0 0 1 2 0 0 20 0 1 0 5 1000 10 \
+                 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0\n"
+            ),
+        )
+        .expect("its stat");
+        std::fs::write(at.join("status"), format!("NSpid:\t{pid}\n")).expect("its status");
+    }
+    root
+}
+
+fn verdict_with(world: &Clone, docker: &devlaunch_test_support::FakeRunner) -> Verdict {
+    on_a_whole_machine(world, docker, |git| {
+        clone_verdict(git, &world.clone, BareCache::At(&world.bare))
+    })
+}
+
+/// What `dl --ls --json` reads for the clone, on the same machine.
+fn account_with(world: &Clone, docker: &devlaunch_test_support::FakeRunner) -> CloneAccount {
+    on_a_whole_machine(world, docker, |git| {
+        account_of(git, &world.clone, BareCache::At(&world.bare))
+    })
+}
+
+fn on_a_whole_machine<T>(
+    world: &Clone,
+    docker: &devlaunch_test_support::FakeRunner,
+    read: impl FnOnce(&Git<'_>) -> T,
+) -> T {
+    let runner = DockerScripted {
+        real: ProcessRunner::new(),
+        docker,
+    };
+    let git = Git::new(&runner);
+    let root = a_whole_machine(world);
+    agent_lock::TEST_PROC_ROOT.with(|it| *it.borrow_mut() = Some(root));
+    let answer = read(&git);
+    agent_lock::TEST_PROC_ROOT.with(|it| *it.borrow_mut() = None);
+    answer
+}
+
+#[test]
+fn the_incidents_clone_with_its_agent_gone_has_nothing_to_lose() {
+    // `dl kinisi-ros-feat-esdf-false-negative-audit-986w rme` refused this
+    // shape: "1 uncommitted change(s) (.claude/worktrees/), and git is holding
+    // it locked (claude agent ...)". The agent's pid was in no process table.
+    let world = the_incident();
+    let docker = a_running_container(&world, &[(1, 10), (77, 500)]);
+
+    let verdict = verdict_with(&world, &docker);
+
+    assert!(
+        matches!(verdict, Verdict::Collectable(_)),
+        "a clean, pushed worktree whose agent is gone holds nothing: {verdict:?}"
+    );
+    assert_eq!(
+        verdict.unsaved_json(),
+        serde_json::json!({ "nothingToLose": true })
+    );
+}
+
+#[test]
+fn the_incidents_clone_with_its_agent_running_stands_and_says_where() {
+    let world = the_incident();
+    let docker = a_running_container(&world, &[(1, 10), (8621, 329_153)]);
+
+    let Verdict::Stands(standing) = verdict_with(&world, &docker) else {
+        panic!("a live agent's lock must stand");
+    };
+    let said = standing.describe();
+    assert!(
+        said.contains(AGENT_LOCK) && said.contains("still running in container kinisi_jazzy_ws"),
+        "{said}"
+    );
+    assert!(
+        standing.would_lose().is_none(),
+        "a lock is never a loss, and the worktrees line is the site's to answer: {said}"
+    );
+}
+
+#[test]
+fn the_listing_reads_the_incidents_clone_as_its_agent_left_it() {
+    // `dl --ls --json` reads the clone through `account_of`, not
+    // `clone_verdict`, so it answers the same question on its own path.
+    let world = the_incident();
+    let gone = a_running_container(&world, &[(1, 10), (77, 500)]);
+    assert_eq!(
+        account_with(&world, &gone).holds.unsaved_json(),
+        serde_json::json!({ "nothingToLose": true })
+    );
+
+    let running = a_running_container(&world, &[(1, 10), (8621, 329_153)]);
+    let json = account_with(&world, &running).holds.unsaved_json();
+    let could_not_tell = json["couldNotTell"].as_str().expect("a couldNotTell key");
+    assert!(could_not_tell.contains(AGENT_LOCK), "{json}");
+    assert!(json["nothingToLose"].is_null(), "{json}");
+}
+
+#[test]
+fn an_agent_lock_on_a_registration_with_nothing_at_its_place_stands() {
+    // The worktree directory is gone, so there is no site to find the agent's
+    // namespace by. Every table that is asked says gone, and that is still no
+    // proof.
+    let world = the_incident();
+    std::fs::remove_dir_all(worktrees_dir(&world.clone).join(AGENT)).expect("removed by hand");
+    let docker = a_running_container(&world, &[(1, 10)]);
+
+    let Verdict::Stands(standing) = verdict_with(&world, &docker) else {
+        panic!("a lock nothing could check must stand");
+    };
+    assert!(
+        standing.iter().any(|it| matches!(
+            it,
+            Reason::CouldNotProve {
+                blank: Blank::AgentLock {
+                    owner: AgentOwner::CouldNotTell(_),
+                    ..
+                },
+                ..
+            }
+        )),
+        "{standing:?}"
+    );
+}
+
+#[test]
+fn an_agent_lock_nothing_could_check_stands_and_says_why() {
+    let world = the_incident();
+    let docker = devlaunch_test_support::FakeRunner::new();
+    docker.script_missing("docker");
+
+    let verdict = verdict_with(&world, &docker);
+
+    let json = verdict.unsaved_json();
+    let could_not_tell = json["couldNotTell"].as_str().expect("a couldNotTell key");
+    assert!(
+        could_not_tell.contains("could not tell whether that Claude agent is still running")
+            && could_not_tell.contains("docker is not installed"),
+        "{could_not_tell}"
+    );
+}
+
+#[test]
+fn a_dead_agents_lock_clears_only_the_lock() {
+    // The worktree holds an afternoon of work. The stale lock goes, and the
+    // work still stands the clone.
+    let world = the_incident();
+    std::fs::write(
+        worktrees_dir(&world.clone).join(AGENT).join("UNSAVED.txt"),
+        "an afternoon\n",
+    )
+    .expect("the note");
+    let docker = a_running_container(&world, &[(1, 10)]);
+
+    let Verdict::Stands(standing) = verdict_with(&world, &docker) else {
+        panic!("a dirty worktree stands, whatever its lock says");
+    };
+    let said = standing.describe();
+    assert!(said.contains("UNSAVED.txt"), "{said}");
+    assert!(!said.contains("locked"), "the lock is proved stale: {said}");
+}
+
+#[test]
+fn a_lock_in_any_other_shape_asks_docker_nothing() {
+    for reason in [
+        "claude session s-1 (pid 8621 start 329153)",
+        "claude agent agent-a540dbaa96aa45899 (pid 8621)",
+        "on a USB stick",
+    ] {
+        let world = the_incident();
+        lock_with_reason(&world, AGENT, reason);
+        let docker = a_running_container(&world, &[(1, 10)]);
+
+        let Verdict::Stands(standing) = verdict_with(&world, &docker) else {
+            panic!("{reason}: a lock nobody can interrogate stands");
+        };
+        assert!(
+            standing.iter().any(|it| matches!(
+                it,
+                Reason::CouldNotProve {
+                    blank: Blank::ThirdPartyClaim(Some(said)),
+                    ..
+                } if said == reason
+            )),
+            "{reason}: {standing:?}"
+        );
+        assert_eq!(docker.call_count(), 0, "{reason}");
+    }
+}
+
+#[test]
+fn prune_keeps_every_agent_lock_a_claim() {
+    // `--prune` keeps the clone and would forget the registration, which git
+    // refuses on a lock: it never asks whether the agent is gone.
+    let world = the_incident();
+    let docker = a_running_container(&world, &[(1, 10)]);
+    let runner = DockerScripted {
+        real: ProcessRunner::new(),
+        docker: &docker,
+    };
+    let git = Git::new(&runner);
+
+    let plan = sweep_clone(
+        &git,
+        &world.clone,
+        OWNER,
+        REPO,
+        Some(&world.bare),
+        Insistence::NotInsisted,
+    )
+    .expect("a clone with a worktree");
+
+    assert!(plan.going.is_empty(), "{:?}", plan.going);
+    assert_eq!(docker.call_count(), 0);
+}
+
+#[test]
+fn the_worktrees_line_clears_when_every_site_under_it_is_collectable() {
+    // `.claude/` not gitignored puts `?? .claude/` in the clone's own status
+    // for any agent worktree at all. Each site answers for itself.
+    let world = Clone::new();
+    world.worktree("agent-one");
+    world.containerise();
+    let docker = devlaunch_test_support::FakeRunner::new();
+
+    let verdict = verdict_with(&world, &docker);
+
+    assert!(matches!(verdict, Verdict::Collectable(_)), "{verdict:?}");
+    assert_eq!(docker.call_count(), 0, "no lock, no docker");
+}
+
+#[test]
+fn anything_beside_the_sites_still_counts() {
+    for (stray, named) in [
+        (".claude/worktrees/notes.txt", ".claude/"),
+        (".claude/settings.local.json", ".claude/"),
+    ] {
+        let world = Clone::new();
+        world.worktree("agent-one");
+        std::fs::write(world.clone.join(stray), "mine\n").expect("a stray file");
+        world.containerise();
+        let docker = devlaunch_test_support::FakeRunner::new();
+
+        let Verdict::Stands(standing) = verdict_with(&world, &docker) else {
+            panic!("{stray} is work beside the sites");
+        };
+        let lost = standing.would_lose().expect("a loss");
+        assert!(lost.contains(named), "{stray}: {lost}");
+    }
+}
+
+#[test]
+fn a_tracked_change_under_the_worktrees_directory_still_counts() {
+    let world = Clone::new();
+    std::fs::create_dir_all(worktrees_dir(&world.clone)).expect("the directory");
+    std::fs::write(worktrees_dir(&world.clone).join("README"), "tracked\n").expect("a file");
+    commit(&world.clone, "track a file there");
+    run_git(&world.clone, &["push", "origin", "main"]);
+    world.fetch();
+    world.worktree("agent-one");
+    std::fs::write(worktrees_dir(&world.clone).join("README"), "edited\n").expect("an edit");
+    world.containerise();
+    let docker = devlaunch_test_support::FakeRunner::new();
+
+    let Verdict::Stands(standing) = verdict_with(&world, &docker) else {
+        panic!("an edit to a tracked file is work");
+    };
+    let lost = standing.would_lose().expect("a loss");
+    assert!(lost.contains(".claude/worktrees/README"), "{lost}");
 }
 
 // ---------------------------------------------------------------------------
@@ -2402,6 +2804,7 @@ fn counted_through(world: &Clone, runner: &dyn Runner, worktree: &Path) -> Vec<S
         reachability: RefCell::new(HashMap::new()),
         cleared: OnceCell::new(),
         derivatives: Derivatives::NotAsked,
+        locks: Locks::EveryLockIsAClaim,
     };
     let listed = run_git(
         worktree,
