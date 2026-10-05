@@ -795,3 +795,21 @@ fn a_process_that_ends_while_the_table_is_read_is_gone_not_unreadable() {
     assert!(vanished(&std::io::Error::from(ErrorKind::NotFound)));
     assert!(!vanished(&std::io::Error::from_raw_os_error(libc::EACCES)));
 }
+
+#[test]
+fn a_listing_of_the_procfs_that_fails_partway_could_not_be_told() {
+    // Review finding: a readdir error after pid 1 and a kernel thread were
+    // listed left a table that passed for the whole machine, and the agent
+    // listed after the error read as gone.
+    let machine = Machine::new();
+    machine.host_process(8621, 329_153, &[8621]);
+    let root = machine.proc_root();
+    let listing = vec![
+        Ok(root.join("1")),
+        Ok(root.join("2")),
+        Err(std::io::Error::from_raw_os_error(libc::EIO)),
+        Ok(root.join("8621")),
+    ];
+
+    assert!(table_of(&root, listing).is_err());
+}

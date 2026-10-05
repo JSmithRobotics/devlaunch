@@ -626,13 +626,29 @@ fn vanished(error: &std::io::Error) -> bool {
 fn host_table(proc_root: &Path) -> Result<Vec<Process>, String> {
     let entries = std::fs::read_dir(proc_root)
         .map_err(|error| format!("could not read {}: {error}", proc_root.display()))?;
+    table_of(
+        proc_root,
+        entries.map(|entry| entry.map(|entry| entry.path())),
+    )
+}
+
+/// The process table out of the listing of `proc_root`, one path per entry.
+fn table_of(
+    proc_root: &Path,
+    entries: impl IntoIterator<Item = std::io::Result<PathBuf>>,
+) -> Result<Vec<Process>, String> {
     let mut table = Vec::new();
-    for entry in entries.filter_map(Result::ok) {
-        let name = entry.file_name();
-        let Some(name) = name.to_str().and_then(|name| digits(name, 10)) else {
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("could not read {}: {error}", proc_root.display()))?;
+        let Some(name) = entry
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| digits(name, 10))
+        else {
             continue;
         };
-        let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+        let stat = match std::fs::read_to_string(entry.join("stat")) {
             Ok(stat) => stat,
             // Ended between the listing and the read.
             Err(error) if vanished(&error) => continue,
@@ -643,7 +659,7 @@ fn host_table(proc_root: &Path) -> Result<Vec<Process>, String> {
             kernel_thread,
             start,
         } = stat_fields(&stat).ok_or_else(|| format!("could not read /proc/{name}/stat"))?;
-        let nspid = std::fs::read_to_string(entry.path().join("status"))
+        let nspid = std::fs::read_to_string(entry.join("status"))
             .ok()
             .and_then(|status| status.lines().find_map(nspid_entries));
         table.push(Process {
