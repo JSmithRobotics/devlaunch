@@ -470,8 +470,12 @@ fn a_mount_deeper_than_the_clone_shadows_it() {
             (&volume, "/home/kinisi/kinisi/kinisi_ros/.claude/worktrees"),
         ],
     )]);
+    machine.inside("ws", &[(1, 10, &[1])]);
 
-    assert!(matches!(machine.owner(RECORDED), Owner::CouldNotTell(_)));
+    let Owner::CouldNotTell(why) = machine.owner(RECORDED) else {
+        panic!("the clone's mount is shadowed there, so nothing sees the site");
+    };
+    assert!(why.contains("nothing on this machine sees it"), "{why}");
 }
 
 #[test]
