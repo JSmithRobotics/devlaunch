@@ -2290,6 +2290,33 @@ fn the_incidents_clone_with_its_agent_running_stands_and_says_where() {
 }
 
 #[test]
+fn an_agent_lock_on_a_registration_with_nothing_at_its_place_stands() {
+    // The worktree directory is gone, so there is no site to find the agent's
+    // namespace by. Every table that is asked says gone, and that is still no
+    // proof.
+    let world = the_incident();
+    std::fs::remove_dir_all(worktrees_dir(&world.clone).join(AGENT)).expect("removed by hand");
+    let docker = a_running_container(&world, &[(1, 10)]);
+
+    let Verdict::Stands(standing) = verdict_with(&world, &docker) else {
+        panic!("a lock nothing could check must stand");
+    };
+    assert!(
+        standing.iter().any(|it| matches!(
+            it,
+            Reason::CouldNotProve {
+                blank: Blank::AgentLock {
+                    owner: AgentOwner::CouldNotTell(_),
+                    ..
+                },
+                ..
+            }
+        )),
+        "{standing:?}"
+    );
+}
+
+#[test]
 fn an_agent_lock_nothing_could_check_stands_and_says_why() {
     let world = the_incident();
     let docker = devlaunch_test_support::FakeRunner::new();
