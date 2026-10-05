@@ -34,14 +34,20 @@
 //!   process is gone. A pid `N` with another start time is a reused pid, and is
 //!   gone too.
 //! - **The whole machine, first, and always.** A procfs that lists a kernel
-//!   thread is the initial pid namespace's, and lists every process on the
-//!   machine with its `NSpid`. The same test runs over all of it before
+//!   thread is the initial pid namespace's, and lists every process on this
+//!   kernel with its `NSpid`. The same test runs over all of it before
 //!   anything else, so an agent in a namespace the mounts did not map (another
 //!   docker, podman, a renamed clone's old path) still stands the site. A pass
 //!   that cannot read that table proves nothing gone: `dl` in a pid namespace of
-//!   its own (a sandbox, a container), `hidepid`, or an entry that will not
-//!   read. The namespaces above are still asked after it, because they are what
-//!   says the lock was written on this machine at all.
+//!   its own (a container or sandbox started without `--pid=host`), `hidepid`,
+//!   or an entry that will not read. `dl` in a container started with
+//!   `--pid=host` sees the kernel threads and runs the proof. The namespaces
+//!   above are still asked after it, and they are not a second opinion that
+//!   could be skipped when the table says gone. A container whose runtime gives
+//!   it a kernel of its own (Docker Desktop on Linux, colima or lima, kata,
+//!   gVisor through `--runtime`) is in no table on this kernel: its own table,
+//!   read through `docker exec`, is the only place its agent shows. They are
+//!   also what says the lock was written on this machine at all.
 //! - **Everything else is "could not tell".** A reason in any other shape, a
 //!   docker that is missing, refuses or times out, a mount source this machine
 //!   cannot read, a process table that does not list pid 1 (no procfs, or one
@@ -49,10 +55,12 @@
 //!   a line that does not parse, a process with start time `T` whose `NSpid`
 //!   could not be read, and a container that is paused or restarting.
 //!
-//! **What this cannot see.** A writer on another kernel that shares the path: a
-//! VM that mounts the same home at the same path, an NFS home shared between
-//! machines, a gVisor sandbox. Its processes are in no table here, so its lock
-//! reads as stale. And it assumes the reader and the writer share a time
+//! **What this cannot see.** A writer outside every running container this
+//! docker lists that shares the path: a VM that mounts the same home at the
+//! same path, an NFS home shared between machines, another machine. Its
+//! processes are in no table here, so its lock reads as stale. A gVisor or kata
+//! container that this docker runs is not one of them: it is asked through
+//! `docker exec` like any other. And it assumes the reader and the writer share a time
 //! namespace, as docker's containers do: under another one, the start time
 //! would read shifted and a live agent as a reused pid.
 //!
@@ -151,8 +159,8 @@ impl<'r> Owners<'r> {
     /// machine) is still running. `recorded` is the path git recorded for it.
     pub(crate) fn owner(&self, site: &Path, recorded: &Path, lock: &AgentLock) -> Owner {
         // First the whole machine. It lists every process on this kernel, the
-        // ones in namespaces the mounts below do not map included, so it is
-        // the one table whose silence means something. A pass that cannot read
+        // ones in namespaces the mounts below do not map included, so its
+        // silence covers every namespace on this kernel. A pass that cannot read
         // it (a pid namespace of its own, `hidepid`, an entry that will not
         // read) proves nothing gone.
         let table = match host_table(&self.proc_root) {
@@ -177,9 +185,11 @@ impl<'r> Owners<'r> {
             }
             InOne::CouldNotTell(why) => return Owner::CouldNotTell(why),
         }
-        // The whole machine saying gone is not enough on its own: the
-        // namespaces below are what says the lock was written on this machine
-        // at all, and each is still asked.
+        // The whole machine saying gone is not enough on its own, and the
+        // reads below are not optional. A container on a kernel of its own (a
+        // VM-backed docker, kata, gVisor) is in no table on this kernel, so its
+        // `docker exec` read is the only place its agent shows. The namespaces
+        // below are also what says the lock was written on this machine at all.
         match self.places(site, recorded) {
             Err(why) => Owner::CouldNotTell(why),
             Ok(places) => {
