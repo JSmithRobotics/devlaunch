@@ -2354,8 +2354,9 @@ fn a_worktree_count_clears_nothing_when_git_will_not_run_the_rules() {
     assert_eq!(weigher.counted(&listed).len(), 1, "{listed}");
 }
 
-/// A runner that refuses the clone count's `git log ... --all` listing and
-/// runs everything else.
+/// A runner that refuses the clone count's `git log --oneline ... --all`
+/// listing and runs everything else, the merge rule's `git log --merges ...
+/// --all` included.
 struct RefusingTheCloneListing {
     real: ProcessRunner,
 }
@@ -2363,7 +2364,10 @@ struct RefusingTheCloneListing {
 impl Runner for RefusingTheCloneListing {
     fn capture(&self, spec: &SpawnSpec) -> Outcome<CapturedText> {
         let argv = spec.invocation.argv();
-        if argv.iter().any(|arg| arg == "log") && argv.iter().any(|arg| arg == "--all") {
+        if ["log", "--oneline", "--all"]
+            .iter()
+            .all(|wanted| argv.iter().any(|arg| arg == wanted))
+        {
             let mut refused = spec.clone();
             refused.invocation = Invocation::new("false");
             return self.real.capture(&refused);
