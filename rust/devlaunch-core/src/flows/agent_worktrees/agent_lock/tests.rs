@@ -706,21 +706,39 @@ fn a_running_container_that_holds_something_else_there_is_not_asked() {
     }
 }
 
+/// A running container `ws` that sees the site and says gone, beside a
+/// container `other` that the test makes the only doubt.
+fn beside_a_clean_container(machine: &Machine, other: serde_json::Value) {
+    machine.containers(&[
+        other,
+        container("ws", "running", &[(&machine.clone(), MOUNTED_AT)]),
+    ]);
+    machine.inside("ws", &[(1, 10, &[1])]);
+}
+
 #[test]
 fn a_container_that_cannot_be_asked_could_not_be_told() {
+    // `ws` sees the site and says gone, so `other` is the only doubt: a
+    // container that could not be asked is not one that does not see it.
     let machine = Machine::new();
     let renamed_from = machine.dir.path().join("repos/o/r/old-name");
-    machine.containers(&[container("ws", "running", &[(&renamed_from, MOUNTED_AT)])]);
+    beside_a_clean_container(
+        &machine,
+        container("other", "running", &[(&renamed_from, MOUNTED_AT)]),
+    );
     machine.docker.script(
-        ["docker", "exec"],
+        ["docker", "exec", "--user", "0", "other"],
         Response::failed(126, "exec: \"sh\": executable file not found\n"),
     );
     assert!(matches!(machine.owner(RECORDED), Owner::CouldNotTell(_)));
 
     let odd = Machine::new();
     let renamed_from = odd.dir.path().join("repos/o/r/old-name");
-    odd.containers(&[container("ws", "running", &[(&renamed_from, MOUNTED_AT)])]);
-    odd.inside_the_path_is("ws", "stat: unrecognized option");
+    beside_a_clean_container(
+        &odd,
+        container("other", "running", &[(&renamed_from, MOUNTED_AT)]),
+    );
+    odd.inside_the_path_is("other", "stat: unrecognized option");
     assert!(matches!(odd.owner(RECORDED), Owner::CouldNotTell(_)));
 
     let paused = Machine::new();
