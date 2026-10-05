@@ -455,6 +455,14 @@ impl<'r> Git<'r> {
         Self { runner }
     }
 
+    /// The runner this client spawns through, for a question beside git's that
+    /// has to go through the same seam: whether the Claude agent that locked a
+    /// worktree is still running asks docker (`flows::agent_worktrees`), and a
+    /// test that scripts git's runner scripts that too.
+    pub(crate) fn runner(&self) -> &'r dyn Runner {
+        self.runner
+    }
+
     // ----------------------------------------------- one repository, pinned
 
     /// Ask git about *repo* — and only about *repo*.

@@ -117,9 +117,25 @@
 //! a worktree idle either, so nothing here claims it; every refusal names the
 //! fact it rests on.
 //!
+//! **One lock can be interrogated, and only in the clone-wide verdict.** Claude
+//! Code locks each worktree it makes for a subagent with
+//! `claude agent <id> (pid <N> start <T>)`, naming the process that holds it.
+//! When every pid namespace that could have written that lock says the process
+//! is gone, the lock is stale and the site is unclaimed ([`agent_lock`] has the
+//! rule and every way it refuses). That proves the *agent* gone, not the
+//! worktree idle: the site still has to be clean and have nothing unpushed. A
+//! lock in any other shape, an agent that is still running, and every failure
+//! to tell stay a claim, as [`Blank::AgentLock`] when the shape was Claude's. The
+//! proof is asked only by the readers deciding about the whole clone
+//! (`dl <ws> rm`, `--ls --json`, `--prune`'s orphan arm). `--prune`'s worktree
+//! sweep keeps every lock a claim ([`Locks`]): it would forget the registration
+//! with `git worktree remove`, which git refuses on a lock.
+//!
 //! The race with a container running `git worktree add` is real and cannot be
 //! closed from here — a container is not a participant in devlaunch's repository
-//! lock. What this module bounds is its radius: the acting pass re-derives every
+//! lock. So is the race with an agent that starts after the stale-lock proof and
+//! takes the same worktree over: `dl <ws> rm` reads the verdict once, just before
+//! it removes, and the window is the same one any new work in the clone has. What this module bounds is its radius: the acting pass re-derives every
 //! verdict immediately before acting, a site the plan did not approve cannot be
 //! collectable then, and the only thing left between the re-check and the act is
 //! one subtree the pass walked microseconds earlier or one registration it just
@@ -144,8 +160,10 @@ use crate::flows::disk_usage::{self, DiskUsage};
 use crate::flows::lifecycle::Insistence;
 use crate::flows::repo_manager::{Refusal, TreeSweep, remove_tree_as_far_as_it_goes};
 
+mod agent_lock;
 mod derivatives;
 
+use agent_lock::{Owner, Owners};
 pub use derivatives::{
     Derivative, NoRecipe, NotDerivableNow, Recipe, ReclaimedDerivative, Tagged, WithheldDerivative,
 };
@@ -806,9 +824,16 @@ struct Clean(());
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Elsewhere(());
 
-/// Q4 answered: no third party asserts a claim on the site.
+/// Q4 answered: no third party asserts a claim on the site, or the only claim
+/// is a Claude agent's lock and that agent is proved gone.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Unclaimed(());
+enum Unclaimed {
+    NoLock,
+    /// Every lock on the site is Claude Code's own agent lock, and every
+    /// namespace that could have written it says the agent is gone. See
+    /// [`agent_lock`].
+    AgentGone,
+}
 
 /// The bounded walk found nothing at the site.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -899,6 +924,8 @@ impl Reason {
             Self::Holds { .. } => Subject::GitsAccountOfContent,
             Self::CouldNotProve { blank, .. } => match blank {
                 Blank::ThirdPartyClaim(_) => Subject::AClaim,
+                // The agent may be running, or nothing could say it is not.
+                Blank::AgentLock { .. } => Subject::AClaim,
                 // Somebody may be working in it right now; that is the whole
                 // reason it was not in the plan. A claimant, so #468's
                 // derivative reclaim does not reach into it either.
@@ -1033,6 +1060,20 @@ impl Blank {
             Self::ThirdPartyClaim(Some(reason)) => {
                 format!("git is holding it locked ({reason})")
             }
+            Self::AgentLock {
+                reason,
+                owner: AgentOwner::StillRunning(place),
+            } => format!(
+                "git is holding it locked ({reason}), and that Claude agent is still running \
+                 {place}"
+            ),
+            Self::AgentLock {
+                reason,
+                owner: AgentOwner::CouldNotTell(why),
+            } => format!(
+                "git is holding it locked ({reason}), and devlaunch could not tell whether that \
+                 Claude agent is still running: {why}"
+            ),
             Self::AppearedAfterThePlan => {
                 "it appeared inside this directory after the plan was printed, so nobody has \
                  said yes to removing it"
@@ -1105,6 +1146,16 @@ impl Standing {
     }
 }
 
+/// What is known about the Claude agent behind a lock it did not prove stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentOwner {
+    /// A process with the lock's pid and start time is running, in the place
+    /// these words name.
+    StillRunning(String),
+    /// Why devlaunch could not tell. Every failure lands here.
+    CouldNotTell(String),
+}
+
 /// Why a question could not be put, one arm per cause.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Blank {
@@ -1115,6 +1166,10 @@ pub enum Blank {
     GitWouldNotSay(CouldNotTell),
     /// `locked`, with its reason where git printed one.
     ThirdPartyClaim(Option<String>),
+    /// `locked` by Claude Code's own agent lock, `claude agent <id> (pid <N>
+    /// start <T>)`, and that agent could not be shown to be gone. The one lock
+    /// devlaunch can interrogate; see [`agent_lock`].
+    AgentLock { reason: String, owner: AgentOwner },
     /// This site is not this clone's to account for; see [`Unaccountable`].
     NotThisClonesToAccountFor(Unaccountable),
     /// A site inside an approved subtree that the plan did not name, found by
@@ -1198,6 +1253,23 @@ struct Weigher<'a, 'r> {
     /// Whether this pass costs the tagged derivatives inside the sites it
     /// stands. See [`Derivatives`].
     derivatives: Derivatives,
+    /// Whether a Claude agent's lock may be proved stale. See [`Locks`].
+    locks: Locks<'r>,
+}
+
+/// What a lock is to one weighing.
+///
+/// Two arms because the passes that remove differ in what they remove. The
+/// clone-wide verdict (`dl <ws> rm`, `--ls --json`, `--prune`'s orphan arm) is
+/// for removing the whole clone, so a lock its agent has left is no claim on
+/// anything. `--prune`'s worktree sweep keeps the clone, would drop the
+/// registration with `git worktree remove`, and git refuses that on a lock, so
+/// it keeps every lock a claim.
+pub(crate) enum Locks<'r> {
+    /// Every lock stands the site, whatever its reason says.
+    EveryLockIsAClaim,
+    /// A Claude agent's lock whose agent is proved gone does not.
+    ProveAgentsGone(Owners<'r>),
 }
 
 impl Weigher<'_, '_> {
@@ -1324,14 +1396,58 @@ impl Weigher<'_, '_> {
     }
 
     /// Q4: the listing already answered; this reads it.
-    fn unclaimed(&self, at: &Place, joined: &NonEmpty<Joined>) -> Result<Unclaimed, Reason> {
-        match joined.iter().find_map(|it| it.locked.clone()) {
-            None => Ok(Unclaimed(())),
-            Some(lock) => Err(Reason::CouldNotProve {
-                at: at.clone(),
-                blank: Blank::ThirdPartyClaim(lock.reason),
-            }),
+    ///
+    /// Every lock on the site has to clear, one by one. A lock clears only when
+    /// it is Claude Code's own agent lock, this weighing may prove one stale, and
+    /// [`Owners::owner`] says the agent is gone. `dir` is the site on this
+    /// machine, which a registration with nothing at its place does not have.
+    fn unclaimed(
+        &self,
+        at: &Place,
+        dir: Option<&Path>,
+        joined: &NonEmpty<Joined>,
+    ) -> Result<Unclaimed, Reason> {
+        let mut witness = Unclaimed::NoLock;
+        for one in joined.iter() {
+            let Some(lock) = &one.locked else {
+                continue;
+            };
+            let claim = |blank| {
+                Err(Reason::CouldNotProve {
+                    at: at.clone(),
+                    blank,
+                })
+            };
+            let Locks::ProveAgentsGone(owners) = &self.locks else {
+                return claim(Blank::ThirdPartyClaim(lock.reason.clone()));
+            };
+            let Some((reason, agent)) = lock
+                .reason
+                .as_deref()
+                .and_then(|reason| Some((reason, agent_lock::parse(reason)?)))
+            else {
+                return claim(Blank::ThirdPartyClaim(lock.reason.clone()));
+            };
+            let owner = match dir {
+                Some(dir) => owners.owner(dir, one.recorded.as_path(), &agent),
+                None => Owner::CouldNotTell(
+                    "nothing is at its place in the clone to find it by".to_owned(),
+                ),
+            };
+            let owner = match owner {
+                Owner::Gone => {
+                    witness = Unclaimed::AgentGone;
+                    continue;
+                }
+                Owner::StillRunning(place) => AgentOwner::StillRunning(place),
+                Owner::CouldNotTell(why) => AgentOwner::CouldNotTell(why),
+            };
+            return claim(Blank::AgentLock {
+                reason: reason.to_owned(),
+                owner,
+            });
         }
+        Ok(witness)
     }
 
     /// This site's own verdict, children not consulted — the conjunction over
@@ -1354,7 +1470,7 @@ impl Weigher<'_, '_> {
                         Err(reason) => reasons.push(reason),
                     }
                 }
-                if let Err(reason) = self.unclaimed(&at, joined) {
+                if let Err(reason) = self.unclaimed(&at, None, joined) {
                     reasons.push(reason);
                 }
                 match (Standing::of(reasons), elsewhere) {
@@ -1406,7 +1522,7 @@ impl Weigher<'_, '_> {
                         Err(reason) => reasons.push(reason),
                     }
                 }
-                let unclaimed = match self.unclaimed(&at, joined) {
+                let unclaimed = match self.unclaimed(&at, Some(dir), joined) {
                     Ok(witness) => Some(witness),
                     Err(reason) => {
                         reasons.push(reason);
@@ -1960,9 +2076,15 @@ pub(crate) fn sweep_clone(
         return None;
     }
     let picture = ClonePicture::of(git, clone)?;
-    let weighed = weigh_clone(git, clone, bare, &picture, Derivatives::Weighed, |_| {
-        insistence
-    });
+    let weighed = weigh_clone(
+        git,
+        clone,
+        bare,
+        &picture,
+        Derivatives::Weighed,
+        Locks::EveryLockIsAClaim,
+        |_| insistence,
+    );
     Some(CloneWorktrees {
         clone: clone.to_path_buf(),
         owner: owner.to_owned(),
@@ -1982,6 +2104,8 @@ struct Weighing {
     going: Vec<Going>,
     standing: Vec<StandingSite>,
     derivatives: Vec<Tagged>,
+    /// Every site's path, for the clone's own dirt filter.
+    forest: Vec<PathBuf>,
 }
 
 /// Weigh every root in one clone's forest, with an insistence per going root.
@@ -1991,6 +2115,7 @@ fn weigh_clone(
     bare: Option<&Path>,
     picture: &ClonePicture,
     want: Derivatives,
+    locks: Locks<'_>,
     insist: impl Fn(&Site) -> Insistence,
 ) -> Weighing {
     let weigher = Weigher {
@@ -1999,6 +2124,7 @@ fn weigh_clone(
         bare,
         reachability: RefCell::new(HashMap::new()),
         derivatives: want,
+        locks,
     };
     let roots = forest_of(clone, picture);
     let mut forest_paths = Vec::new();
@@ -2042,6 +2168,7 @@ fn weigh_clone(
         going,
         standing,
         derivatives,
+        forest: forest_paths,
     }
 }
 
@@ -2202,6 +2329,7 @@ pub(crate) fn reclaim(
         bare,
         &picture,
         Derivatives::Weighed,
+        Locks::EveryLockIsAClaim,
         |root| {
             plan.going
                 .iter()
@@ -2214,6 +2342,7 @@ pub(crate) fn reclaim(
         going: fresh,
         standing: fresh_standing,
         derivatives: fresh_derivatives,
+        forest: _,
     } = weighed;
     for planned in &plan.going {
         let Some(confirmed) = fresh
@@ -2421,9 +2550,9 @@ fn forget(
 /// reachability is per repository (devlaunch#446).
 pub(crate) fn clone_verdict(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> Verdict {
     let own = workspace_state::holds_unsaved_work(git, clone, bare);
-    let own_reasons = lift(own);
-    let site_reasons = site_reasons(git, clone);
-    match Standing::of(own_reasons.into_iter().chain(site_reasons).collect()) {
+    let sites = sites_of(git, clone);
+    let own_reasons = lift(without_the_forest(own, clone, &sites.forest));
+    match Standing::of(own_reasons.into_iter().chain(sites.reasons).collect()) {
         Some(standing) => Verdict::Stands(standing),
         None => Verdict::Collectable(Proof {
             how: ProofHow::CloneProbesAnsweredClear,
@@ -2439,9 +2568,9 @@ pub(crate) struct CloneAccount {
 
 pub(crate) fn account_of(git: &Git<'_>, clone: &Path, bare: BareCache<'_>) -> CloneAccount {
     let state = workspace_state::read_clone(git, clone, bare);
-    let own_reasons = lift(state.unsaved);
-    let site_reasons = site_reasons(git, clone);
-    let holds = match Standing::of(own_reasons.into_iter().chain(site_reasons).collect()) {
+    let sites = sites_of(git, clone);
+    let own_reasons = lift(without_the_forest(state.unsaved, clone, &sites.forest));
+    let holds = match Standing::of(own_reasons.into_iter().chain(sites.reasons).collect()) {
         Some(standing) => Verdict::Stands(standing),
         None => Verdict::Collectable(Proof {
             how: ProofHow::CloneProbesAnsweredClear,
@@ -2488,6 +2617,44 @@ fn lift(own: Unsaved) -> Vec<Reason> {
     }
 }
 
+/// The clone's own answer with the untracked lines the forest accounts for
+/// taken out.
+///
+/// `.claude/worktrees/` is often not gitignored, and then the clone's own
+/// `git status` prints `?? .claude/worktrees/` for every clone that has an
+/// agent worktree in it, clean or not. Every site under it answers for itself,
+/// with its own verdict and its own path, in [`sites_of`]'s reasons, so the
+/// line is the same rule [`Weigher::clean`] applies one level in:
+/// [`accounted_for_by_the_forest`] drops an untracked entry only when
+/// everything under it is a site. A tracked change, and anything else under
+/// `.claude/`, still counts.
+fn without_the_forest(own: Unsaved, clone: &Path, forest: &[PathBuf]) -> Unsaved {
+    let Unsaved::WouldLose(losses) = own else {
+        return own;
+    };
+    let kept = losses.iter().filter_map(|loss| match loss {
+        Loss::Uncommitted(lines) => NonEmpty::of(
+            lines
+                .iter()
+                .filter(|line| !accounted_for_by_the_forest(clone, line, forest))
+                .cloned(),
+        )
+        .map(Loss::Uncommitted),
+        Loss::Unpushed { .. } => Some(loss.clone()),
+    });
+    match NonEmpty::of(kept) {
+        Some(losses) => Unsaved::WouldLose(losses),
+        None => Unsaved::NothingToLose,
+    }
+}
+
+/// What the sites in one clone say: every standing reason, and every site's
+/// path.
+struct SiteAccount {
+    reasons: Vec<Reason>,
+    forest: Vec<PathBuf>,
+}
+
 /// The standing reasons of every site in `clone`, or nothing where there are no
 /// sites — which is nearly every clone, at the cost of one failed `read_dir`.
 ///
@@ -2509,18 +2676,28 @@ fn lift(own: Unsaved) -> Vec<Reason> {
 /// The sibling bare is derived from the clone's place in the cache
 /// (`<repos>/<owner>/<repo>/.bare` beside `<repos>/<owner>/<repo>/<leaf>`),
 /// which is the same sibling `--prune`'s sweep is handed by the repo manager.
-fn site_reasons(git: &Git<'_>, clone: &Path) -> Vec<Reason> {
+///
+/// **A Claude agent's lock may be proved stale here** ([`Locks::ProveAgentsGone`]),
+/// because every reader of this answer is deciding about the whole clone. That
+/// costs docker calls only for a site whose lock is in Claude Code's own shape.
+fn sites_of(git: &Git<'_>, clone: &Path) -> SiteAccount {
     if std::fs::read_dir(worktrees_dir(clone)).is_err() {
-        return Vec::new();
+        return SiteAccount {
+            reasons: Vec::new(),
+            forest: Vec::new(),
+        };
     }
     let Some(picture) = ClonePicture::of(git, clone) else {
-        return vec![Reason::CouldNotProve {
-            at: Place::TheCloneItself,
-            blank: Blank::GitWouldNotSay(CouldNotTell::GitCouldNotRead {
-                clone: clone.to_path_buf(),
-                reason: "git would not list this clone's worktrees".to_owned(),
-            }),
-        }];
+        return SiteAccount {
+            reasons: vec![Reason::CouldNotProve {
+                at: Place::TheCloneItself,
+                blank: Blank::GitWouldNotSay(CouldNotTell::GitCouldNotRead {
+                    clone: clone.to_path_buf(),
+                    reason: "git would not list this clone's worktrees".to_owned(),
+                }),
+            }],
+            forest: Vec::new(),
+        };
     };
     let bare = clone.parent().map(|parent| parent.join(".bare"));
     let bare = bare.as_deref().filter(|path| path.is_dir());
@@ -2528,14 +2705,23 @@ fn site_reasons(git: &Git<'_>, clone: &Path) -> Vec<Reason> {
     // full walk of a site plus an `exclusive_usage` over a 12000-file
     // environment. The field it leaves empty is discarded here rather than read
     // as an answer.
-    let weighed = weigh_clone(git, clone, bare, &picture, Derivatives::NotAsked, |_| {
-        Insistence::NotInsisted
-    });
-    weighed
-        .standing
-        .into_iter()
-        .flat_map(|site| site.reasons.iter().cloned().collect::<Vec<_>>())
-        .collect()
+    let weighed = weigh_clone(
+        git,
+        clone,
+        bare,
+        &picture,
+        Derivatives::NotAsked,
+        Locks::ProveAgentsGone(Owners::new(git.runner())),
+        |_| Insistence::NotInsisted,
+    );
+    SiteAccount {
+        reasons: weighed
+            .standing
+            .into_iter()
+            .flat_map(|site| site.reasons.iter().cloned().collect::<Vec<_>>())
+            .collect(),
+        forest: weighed.forest,
+    }
 }
 
 // ===========================================================================

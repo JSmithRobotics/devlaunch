@@ -162,6 +162,84 @@ pub(crate) fn kill_containers(runner: &dyn Runner, ids: &NonEmpty<String>) -> An
     answer(runner.capture(&spec))
 }
 
+/// What asking docker for every container may cost before it is abandoned.
+const LIST_EVERY_CONTAINER: Duration = Duration::from_secs(5);
+
+/// What describing them may cost. A read, like the listing, but one that names
+/// every container on the machine at once.
+const INSPECT_THEM: Duration = Duration::from_secs(10);
+
+/// What reading one container's process table may cost.
+const READ_INSIDE: Duration = Duration::from_secs(10);
+
+/// The ids of every container docker knows, running or not, or why docker
+/// could not say.
+///
+/// The three reads below are for one question: whether the Claude agent that
+/// locked a worktree is still running (`flows::agent_worktrees`). That question
+/// clears a lock only on an answer, so **every arm that is not an answer is the
+/// same `Err`**: no docker on PATH is as much "could not tell" as a docker that
+/// refused, because a lock written inside a container this machine cannot see
+/// is not proved gone by the machine having no docker.
+pub(crate) fn every_container(runner: &dyn Runner) -> Result<Vec<String>, String> {
+    let stdout = read(
+        runner,
+        &["ps", "--all", "--quiet", "--no-trunc"],
+        LIST_EVERY_CONTAINER,
+    )?;
+    Ok(stdout
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// `docker inspect` over these containers: the JSON array docker prints, whole.
+pub(crate) fn inspect(runner: &dyn Runner, ids: &NonEmpty<String>) -> Result<String, String> {
+    let mut args = vec!["inspect"];
+    args.extend(ids.iter().map(String::as_str));
+    read(runner, &args, INSPECT_THEM)
+}
+
+/// Run `argv` inside a running container as root, and what it printed.
+///
+/// As root because a `/proc` mounted with `hidepid` hides other users'
+/// processes from everybody else, and a process the reader cannot see would
+/// read as a process that is gone.
+pub(crate) fn exec_as_root(
+    runner: &dyn Runner,
+    container: &str,
+    argv: &[&str],
+) -> Result<String, String> {
+    let mut args = vec!["exec", "--user", "0", container];
+    args.extend_from_slice(argv);
+    read(runner, &args, READ_INSIDE)
+}
+
+/// One bounded docker read: its stdout when it exited 0, and otherwise words
+/// for why not.
+fn read(runner: &dyn Runner, args: &[&str], timeout: Duration) -> Result<String, String> {
+    let spec = SpawnSpec::from(Invocation::new(PROGRAM).with_args(args.iter().copied()))
+        .with_timeout(timeout);
+    let verb = args.first().copied().unwrap_or_default();
+    match ran(runner.capture(&spec)) {
+        Ok((exit, CapturedText { stdout, .. })) if exit.is_success() => Ok(stdout),
+        Ok((exit, CapturedText { stderr, .. })) => Err(format!(
+            "docker {verb} failed ({exit:?}): {}",
+            stderr.trim()
+        )),
+        Err(NoAnswer::NotInstalled) => Err("docker is not installed".to_owned()),
+        Err(NoAnswer::NotStarted(failure)) if failure.kind == ErrorKind::TimedOut => {
+            Err(format!("docker {verb} did not answer in time"))
+        }
+        Err(NoAnswer::NotStarted(failure)) => Err(format!(
+            "docker {verb} could not start ({:?})",
+            failure.kind
+        )),
+    }
+}
+
 /// A docker spawn that produced nothing to read, in the two shapes both answers
 /// in this module report it as.
 enum NoAnswer {
