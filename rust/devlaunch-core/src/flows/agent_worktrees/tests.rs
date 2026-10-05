@@ -2326,6 +2326,54 @@ fn a_reverted_commit_a_detached_worktree_sits_on_stays_counted_there() {
     );
 }
 
+#[test]
+fn a_worktree_on_a_commit_and_its_revert_is_not_counted() {
+    // The revert rule clears a probe commit and its revert from the clone count
+    // (devlaunch#664), so the worktree on them counts neither.
+    let world = a_clone_with_two_pushed_branches();
+    run_git(&world.clone, &["switch", "-c", "w", "main"]);
+    std::fs::write(world.clone.join("probe.md"), "probe\n").expect("a probe");
+    commit(&world.clone, "probe");
+    run_git(&world.clone, &["revert", "--no-edit", "HEAD"]);
+    run_git(&world.clone, &["switch", "main"]);
+    let worktree = a_worktree_at(&world, "agent-one", &["w"]);
+    world.containerise();
+
+    assert_eq!(
+        the_clone_verdict(&world),
+        serde_json::json!({ "nothingToLose": true })
+    );
+    assert_eq!(going_dirs(&world.plan()), [worktree]);
+}
+
+#[test]
+fn a_worktree_commit_whose_copy_is_on_a_remote_is_not_counted() {
+    // The copy rule clears a commit whose patch a remote ref already holds
+    // (devlaunch#653): here a cherry-pick pushed to `origin/main`. `main` then
+    // rewrote the file, so a merge of the branch into `origin/main` conflicts
+    // and the squash rule clears nothing: the copy rule is the one that clears.
+    let world = a_clone_with_two_pushed_branches();
+    let worktree = world.worktree("agent-one");
+    std::fs::write(worktree.join("work.md"), "work\n").expect("work");
+    commit(&worktree, "work");
+    let tip = run_git(&worktree, &["rev-parse", "HEAD"]);
+    std::fs::write(world.clone.join("other.md"), "other\n").expect("other");
+    commit(&world.clone, "other work on main");
+    run_git(&world.clone, &["cherry-pick", tip.trim()]);
+    std::fs::write(world.clone.join("work.md"), "rewritten on main\n").expect("a rewrite");
+    commit(&world.clone, "rewrite the work on main");
+    run_git(&world.clone, &["push", "origin", "main"]);
+    run_git(&world.clone, &["fetch", "origin"]);
+    world.fetch();
+    world.containerise();
+
+    assert_eq!(
+        the_clone_verdict(&world),
+        serde_json::json!({ "nothingToLose": true })
+    );
+    assert_eq!(going_dirs(&world.plan()), [worktree]);
+}
+
 /// What *runner*'s git leaves of the agent worktree at *worktree*'s own
 /// `log --oneline HEAD --not --remotes` once the clone count's rules have run.
 fn counted_through(world: &Clone, runner: &dyn Runner, worktree: &Path) -> Vec<String> {
