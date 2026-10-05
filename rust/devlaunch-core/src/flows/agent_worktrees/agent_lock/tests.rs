@@ -749,8 +749,9 @@ fn a_kernel_thread_is_what_marks_the_whole_machine_and_a_parent_of_zero_is_not()
 
 #[test]
 fn a_lock_on_this_machine_needs_the_whole_machines_table() {
-    // `dl` run inside a pid namespace of its own (a sandbox, a container) sees
-    // a procfs with a pid 1 and none of the processes outside it. A host-side
+    // `dl` run inside a pid namespace of its own (a container or sandbox
+    // started without `--pid=host`) sees a procfs with a pid 1 and none of the
+    // processes outside it. A host-side
     // agent would read as gone there.
     let machine = Machine::new();
     machine.only_a_namespace();
