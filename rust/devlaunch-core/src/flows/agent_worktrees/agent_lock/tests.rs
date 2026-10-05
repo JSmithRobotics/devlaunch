@@ -494,6 +494,47 @@ fn a_mount_source_this_machine_cannot_see_could_not_be_told() {
 }
 
 #[test]
+fn a_mount_docker_described_without_a_source_could_not_be_told() {
+    // docker prints `"Source": ""` for a tmpfs, so an empty source is a mount
+    // with no directory behind it. A field that is absent or not a string is
+    // a description this module cannot read, and the container it belongs to
+    // might be the one with the agent in it.
+    let shadowing = |source: Option<serde_json::Value>| {
+        let mut mount = serde_json::json!({
+            "Type": "tmpfs",
+            "Destination": "/home/kinisi/kinisi/kinisi_ros/.claude/worktrees",
+        });
+        if let Some(source) = source {
+            mount["Source"] = source;
+        }
+        let mut other = container("other", "running", &[]);
+        other["Mounts"] = serde_json::json!([mount]);
+        other
+    };
+    let with = |source: Option<serde_json::Value>| {
+        let machine = Machine::new();
+        machine.containers(&[
+            container("ws", "running", &[(&machine.clone(), MOUNTED_AT)]),
+            shadowing(source),
+        ]);
+        machine.inside("ws", &[(1, 10, &[1])]);
+        machine.owner(RECORDED)
+    };
+
+    assert_eq!(with(Some(serde_json::json!(""))), Owner::Gone);
+    for source in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(serde_json::json!(7)),
+    ] {
+        assert!(
+            matches!(with(source.clone()), Owner::CouldNotTell(_)),
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
 fn every_docker_failure_could_not_be_told() {
     let missing = Machine::new();
     missing.docker.script_missing("docker");

@@ -390,8 +390,8 @@ struct Container {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Mount {
-    /// The directory on this machine. Empty for a tmpfs.
-    source: String,
+    /// The directory on this machine, or none for a tmpfs.
+    source: Option<PathBuf>,
     destination: PathBuf,
 }
 
@@ -425,19 +425,19 @@ impl Container {
         else {
             return Ok(Sees::No);
         };
-        if mount.source.is_empty() {
+        let Some(source) = &mount.source else {
             return Ok(Sees::No);
-        }
+        };
         let rest = recorded
             .strip_prefix(&mount.destination)
             .expect("the filter kept only mounts the path starts with");
-        let source = match std::fs::canonicalize(&mount.source) {
+        let source = match std::fs::canonicalize(source) {
             Ok(source) => source,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Sees::SourceIsGone),
             Err(error) => {
                 return Err(format!(
                     "could not see {}, which container {} mounts at {}: {error}",
-                    mount.source,
+                    source.display(),
                     self.name,
                     mount.destination.display()
                 ));
@@ -488,8 +488,10 @@ fn parse_inspect(json: &str) -> Result<Vec<Container>, String> {
                 .ok_or_else(|| bad("a container with no Mounts"))?
                 .iter()
                 .map(|mount| {
+                    // docker prints an empty source for a tmpfs.
+                    let source = text(&mount["Source"], "Source")?;
                     Ok(Mount {
-                        source: mount["Source"].as_str().unwrap_or_default().to_owned(),
+                        source: (!source.is_empty()).then(|| PathBuf::from(source)),
                         destination: PathBuf::from(text(&mount["Destination"], "Destination")?),
                     })
                 })
