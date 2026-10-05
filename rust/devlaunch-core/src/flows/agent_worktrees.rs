@@ -780,9 +780,9 @@ enum ProofHow {
         _elsewhere: Elsewhere,
         _unclaimed: Unclaimed,
     },
-    /// A registered site with nothing at it: no bytes, and the commits the
-    /// registration still names were found somewhere else. Emptiness alone never
-    /// carries a registered site.
+    /// A registered site with nothing at it: no bytes, and each commit the
+    /// registration still names was found somewhere else or cleared by the
+    /// clone count's rules. Emptiness alone never carries a registered site.
     HoldsNothing {
         _empty: NoBytes,
         _elsewhere: Elsewhere,
@@ -801,8 +801,8 @@ enum ProofHow {
 struct Clean(());
 
 /// Q3 answered: every commit reachable from here is reachable from a ref in a
-/// repository this pass does not remove — as of the last fetch, which is what
-/// the report says.
+/// repository this pass does not remove, or is cleared by the clone count's
+/// rules — as of the last fetch, which is what the report says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Elsewhere(());
 
@@ -1205,8 +1205,8 @@ struct Weigher<'a, 'r> {
 }
 
 impl Weigher<'_, '_> {
-    /// Q3 for one head: the commits it reaches exist somewhere else, or the
-    /// reason they could not be shown to.
+    /// Q3 for one head: each commit it reaches exists somewhere else or is
+    /// cleared by the clone count's rules, or the reason that could not be shown.
     ///
     /// The cache goes first, for [`InTheCache`]'s reason. The clone's probe is
     /// keyed on this site's own revision rather than on `--all`, because a loss
