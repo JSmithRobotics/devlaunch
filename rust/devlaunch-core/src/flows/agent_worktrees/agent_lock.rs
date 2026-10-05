@@ -67,6 +67,11 @@
 //! reader and the writer share a time namespace, as docker's containers do:
 //! under another one, the start time would read shifted and a live agent as a
 //! reused pid.
+//! Nor a guest: Claude Code lets a second session resume an agent worktree
+//! another session has locked, and leaves the owner's lock in place. Once the
+//! owner exits, the lock reads as gone while the guest still runs, so `dl <ws>
+//! rm` can delete a live guest's checkout. The clean-and-pushed questions bound
+//! the harm: no work is lost, but the guest loses its cwd.
 //!
 //! The lock file is never touched here. `dl <ws> rm` removes the whole clone,
 //! and a site whose lock is proved stale still has to pass every other question

@@ -497,7 +497,7 @@ the process is gone:
   namespace of its own, a line that does not parse, and a paused
   container.
 
-Two things this cannot see. A writer outside the running containers your docker
+Three things this cannot see. A writer outside the running containers your docker
 lists that shares the path (a VM that mounts your home at the same path, an NFS
 home, another machine) is in no process table here. When the worktree is on a
 network or shared filesystem (NFS, SMB, 9p, FUSE, Ceph and the like) the lock
@@ -506,6 +506,11 @@ home to a VM, the VM's lock still reads as stale.
 A gVisor or kata container your docker runs is asked through `docker exec` like
 any other. And a writer in another time
 namespace would show a shifted start time; docker's containers do not use one.
+And a guest: Claude Code lets a second session resume an agent worktree that
+another session has locked, and leaves the owner's lock in place. Once the owner
+exits, the lock reads as stale while the guest still runs, so `dl <ws> rm` can
+delete a live guest's checkout. The clean-and-pushed checks below bound that:
+no work is lost, but the guest loses its working directory.
 
 A stale lock removes only the lock from the answer. The worktree still has to be
 clean and have nothing unpushed. The lock file is not touched. This proof runs
