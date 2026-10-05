@@ -2094,3 +2094,428 @@ fn a_tag_that_gained_an_outer_tag_is_not_told_its_worktree_stopped_being_weighed
         withheld.because.describe()
     );
 }
+
+// ---------------------------------------------------------------------------
+// a worktree's count goes through the clone count's rules (merge, copy,
+// squash, revert: devlaunch#653, #659, #664)
+// ---------------------------------------------------------------------------
+
+/// A clone whose own tree ignores `.claude/`, with two branches `x` and `y`
+/// pushed to the forge, fetched into the cache and into the clone, each adding
+/// a file of its own.
+fn a_clone_with_two_pushed_branches() -> Clone {
+    let world = Clone::new();
+    std::fs::write(world.clone.join(".gitignore"), ".claude/\n").expect("gitignore");
+    commit(&world.clone, "ignore the agent worktrees");
+    run_git(&world.clone, &["push", "origin", "main"]);
+    for branch in ["x", "y"] {
+        run_git(&world.clone, &["switch", "-c", branch, "main"]);
+        std::fs::write(world.clone.join(format!("{branch}.md")), "pushed\n")
+            .expect("a pushed file");
+        commit(&world.clone, branch);
+        run_git(&world.clone, &["push", "origin", branch]);
+    }
+    run_git(&world.clone, &["switch", "main"]);
+    run_git(&world.clone, &["branch", "-D", "x", "y"]);
+    run_git(&world.clone, &["fetch", "origin"]);
+    world.fetch();
+    world
+}
+
+/// `w`, a local branch off `origin/x` with `origin/y` merged into it, and an
+/// agent worktree on it: the merge is the one commit no remote has, and it adds
+/// nothing of its own.
+fn a_worktree_on_a_pure_merge(world: &Clone, leaf: &str) -> PathBuf {
+    run_git(&world.clone, &["switch", "-c", "w", "origin/x"]);
+    run_git(&world.clone, &["merge", "--no-edit", "origin/y"]);
+    run_git(&world.clone, &["switch", "main"]);
+    let path = worktrees_dir(&world.clone).join(leaf);
+    std::fs::create_dir_all(worktrees_dir(&world.clone)).expect("the worktrees directory");
+    run_git(
+        &world.clone,
+        &["worktree", "add", &path.display().to_string(), "w"],
+    );
+    path
+}
+
+fn the_clone_verdict(world: &Clone) -> serde_json::Value {
+    let runner = ProcessRunner::new();
+    let git = Git::new(&runner);
+    clone_verdict(&git, &world.clone, BareCache::At(&world.bare)).unsaved_json()
+}
+
+#[test]
+fn a_worktree_on_a_merge_that_adds_nothing_is_not_counted_where_the_clone_count_clears_it() {
+    // The audit's case: `dl rm` counted "1 unpushed commit(s) (in agent-one)"
+    // for a merge of two pushed branches, while the clone's own count cleared
+    // the same commit by the merge rule (devlaunch#653). With nothing else in
+    // the clone that was a whole false refusal.
+    let world = a_clone_with_two_pushed_branches();
+    let worktree = a_worktree_on_a_pure_merge(&world, "agent-one");
+    world.containerise();
+
+    assert_eq!(
+        the_clone_verdict(&world),
+        serde_json::json!({ "nothingToLose": true })
+    );
+    assert_eq!(going_dirs(&world.plan()), [worktree]);
+}
+
+#[test]
+fn the_listing_does_not_count_a_worktree_on_a_merge_that_adds_nothing() {
+    // `dl --ls` reads the same verdict through `account_of`, which hands the
+    // clone count's cleared commits to the worktree lines just as `dl rm` does.
+    let world = a_clone_with_two_pushed_branches();
+    a_worktree_on_a_pure_merge(&world, "agent-one");
+    world.containerise();
+    let runner = ProcessRunner::new();
+    let git = Git::new(&runner);
+
+    let account = account_of(&git, &world.clone, BareCache::At(&world.bare));
+    assert_eq!(
+        account.holds.unsaved_json(),
+        serde_json::json!({ "nothingToLose": true })
+    );
+}
+
+#[test]
+fn a_detached_worktree_on_a_merge_that_adds_nothing_is_not_counted() {
+    // The audit's agent-ac4e17474b18b54c3 was detached: no branch reaches its
+    // HEAD, so only the merge rule can clear it, and the merge rule reads every
+    // worktree's HEAD.
+    let world = a_clone_with_two_pushed_branches();
+    let worktree = a_worktree_on_a_pure_merge(&world, "agent-one");
+    run_git(&worktree, &["switch", "--detach"]);
+    run_git(&world.clone, &["branch", "-D", "w"]);
+    world.containerise();
+
+    assert_eq!(
+        the_clone_verdict(&world),
+        serde_json::json!({ "nothingToLose": true })
+    );
+    assert_eq!(going_dirs(&world.plan()), [worktree]);
+}
+
+#[test]
+fn a_worktree_line_counts_only_what_the_rules_leave() {
+    // One real commit on top of the pure merge: the worktree line says 1, not 2,
+    // the same number the clone line says for the same commits.
+    let world = a_clone_with_two_pushed_branches();
+    let worktree = a_worktree_on_a_pure_merge(&world, "agent-one");
+    std::fs::write(worktree.join("work.md"), "work\n").expect("work");
+    commit(&worktree, "work nowhere else");
+    world.containerise();
+
+    let verdict = the_clone_verdict(&world);
+    let said = verdict["wouldLose"].as_str().expect("a loss");
+    assert!(
+        said.contains("1 unpushed commit(s) (in .claude/worktrees/agent-one)"),
+        "{said}"
+    );
+    assert!(!said.contains("2 unpushed"), "{said}");
+}
+
+#[test]
+fn a_worktree_merge_with_a_change_of_its_own_stays_counted() {
+    // The rules only remove: a merge that carries an edit no parent has is work
+    // on no remote, and the worktree line still counts it.
+    let world = a_clone_with_two_pushed_branches();
+    run_git(&world.clone, &["switch", "-c", "w", "origin/x"]);
+    run_git(&world.clone, &["merge", "--no-commit", "origin/y"]);
+    std::fs::write(world.clone.join("own.md"), "the merge's own edit\n").expect("an edit");
+    commit(&world.clone, "a merge with an edit of its own");
+    run_git(&world.clone, &["switch", "main"]);
+    let worktree = worktrees_dir(&world.clone).join("agent-one");
+    std::fs::create_dir_all(worktrees_dir(&world.clone)).expect("the worktrees directory");
+    run_git(
+        &world.clone,
+        &["worktree", "add", &worktree.display().to_string(), "w"],
+    );
+    world.containerise();
+
+    let verdict = the_clone_verdict(&world);
+    let said = verdict["wouldLose"].as_str().expect("a loss");
+    assert!(
+        said.contains("1 unpushed commit(s) (in .claude/worktrees/agent-one)"),
+        "{said}"
+    );
+    assert!(going_dirs(&world.plan()).is_empty());
+}
+
+#[test]
+fn a_worktree_commit_whose_only_copy_is_local_stays_counted() {
+    // A cherry-pick onto another local branch is no copy on a remote: both
+    // commits hold the work, and neither clears the other.
+    let world = a_clone_with_two_pushed_branches();
+    let worktree = world.worktree("agent-one");
+    std::fs::write(worktree.join("work.md"), "work\n").expect("work");
+    commit(&worktree, "work nowhere else");
+    let tip = run_git(&worktree, &["rev-parse", "HEAD"]);
+    run_git(&world.clone, &["switch", "-c", "copy", "main"]);
+    run_git(&world.clone, &["cherry-pick", tip.trim()]);
+    run_git(&world.clone, &["switch", "main"]);
+    world.containerise();
+
+    let verdict = the_clone_verdict(&world);
+    let said = verdict["wouldLose"].as_str().expect("a loss");
+    assert!(
+        said.contains("1 unpushed commit(s) (in .claude/worktrees/agent-one)"),
+        "{said}"
+    );
+    assert!(going_dirs(&world.plan()).is_empty());
+}
+
+/// An agent worktree at `<clone>/.claude/worktrees/<leaf>` on *revision*, which
+/// is a branch or, with `--detach`, a commit.
+fn a_worktree_at(world: &Clone, leaf: &str, revision: &[&str]) -> PathBuf {
+    let path = worktrees_dir(&world.clone).join(leaf);
+    std::fs::create_dir_all(worktrees_dir(&world.clone)).expect("the worktrees directory");
+    let shown = path.display().to_string();
+    let mut args = vec!["worktree", "add", shown.as_str()];
+    args.extend(revision);
+    run_git(&world.clone, &args);
+    path
+}
+
+#[test]
+fn a_squashed_commit_another_branch_grew_from_stays_counted_in_that_worktree() {
+    // The squash rule clears a branch's commits only when every ref that reaches
+    // them passed (devlaunch#659). `a` wrote `one` and `b` replaced it with
+    // `two`, which is what the squash on `origin/main` holds. `v` grew from `a`
+    // and holds `one`, which no remote holds, so the worktree on `v` still
+    // counts `a` as well as its own commit. The worktree on `w` counts `a` too:
+    // `a` stays counted in the clone, so it stays counted in every line.
+    let world = a_clone_with_two_pushed_branches();
+    run_git(&world.clone, &["switch", "-c", "w", "main"]);
+    std::fs::write(world.clone.join("notes.md"), "one\n").expect("a");
+    commit(&world.clone, "a");
+    let first = run_git(&world.clone, &["rev-parse", "HEAD"]);
+    std::fs::write(world.clone.join("notes.md"), "two\n").expect("b");
+    commit(&world.clone, "b");
+    run_git(&world.clone, &["switch", "-c", "squash", "origin/main"]);
+    run_git(&world.clone, &["checkout", "w", "--", "."]);
+    commit(&world.clone, "a and b, squashed");
+    run_git(&world.clone, &["push", "origin", "squash:main"]);
+    run_git(&world.clone, &["switch", "main"]);
+    run_git(&world.clone, &["branch", "-D", "squash"]);
+    run_git(&world.clone, &["fetch", "origin"]);
+    world.fetch();
+    run_git(&world.clone, &["switch", "-c", "v", first.trim()]);
+    std::fs::write(world.clone.join("d.md"), "d\n").expect("d");
+    commit(&world.clone, "d, grown from a");
+    run_git(&world.clone, &["switch", "main"]);
+    a_worktree_at(&world, "agent-one", &["v"]);
+    a_worktree_at(&world, "agent-two", &["w"]);
+    world.containerise();
+
+    let verdict = the_clone_verdict(&world);
+    let said = verdict["wouldLose"].as_str().expect("a loss");
+    assert!(
+        said.contains("2 unpushed commit(s) (in .claude/worktrees/agent-one)"),
+        "{said}"
+    );
+    assert!(
+        said.contains("1 unpushed commit(s) (in .claude/worktrees/agent-two)"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_reverted_commit_a_detached_worktree_sits_on_stays_counted_there() {
+    // A commit and its revert drop out together only when nothing else holds
+    // the reverted commit's state (devlaunch#664). A worktree's HEAD on it
+    // holds it, so that worktree still counts it.
+    let world = a_clone_with_two_pushed_branches();
+    run_git(&world.clone, &["switch", "-c", "w", "main"]);
+    std::fs::write(world.clone.join("probe.md"), "probe\n").expect("a probe");
+    commit(&world.clone, "probe");
+    let probe = run_git(&world.clone, &["rev-parse", "HEAD"]);
+    run_git(&world.clone, &["revert", "--no-edit", "HEAD"]);
+    run_git(&world.clone, &["switch", "main"]);
+    a_worktree_at(&world, "agent-one", &["--detach", probe.trim()]);
+    world.containerise();
+
+    let verdict = the_clone_verdict(&world);
+    let said = verdict["wouldLose"].as_str().expect("a loss");
+    assert!(
+        said.contains("1 unpushed commit(s) (in .claude/worktrees/agent-one)"),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_worktree_on_a_commit_and_its_revert_is_not_counted() {
+    // The revert rule clears a probe commit and its revert from the clone count
+    // (devlaunch#664), so the worktree on them counts neither.
+    let world = a_clone_with_two_pushed_branches();
+    run_git(&world.clone, &["switch", "-c", "w", "main"]);
+    std::fs::write(world.clone.join("probe.md"), "probe\n").expect("a probe");
+    commit(&world.clone, "probe");
+    run_git(&world.clone, &["revert", "--no-edit", "HEAD"]);
+    run_git(&world.clone, &["switch", "main"]);
+    let worktree = a_worktree_at(&world, "agent-one", &["w"]);
+    world.containerise();
+
+    assert_eq!(
+        the_clone_verdict(&world),
+        serde_json::json!({ "nothingToLose": true })
+    );
+    assert_eq!(going_dirs(&world.plan()), [worktree]);
+}
+
+#[test]
+fn a_worktree_commit_whose_copy_is_on_a_remote_is_not_counted() {
+    // The copy rule clears a commit whose patch a remote ref already holds
+    // (devlaunch#653): here a cherry-pick pushed to `origin/main`. `main` then
+    // rewrote the file, so a merge of the branch into `origin/main` conflicts
+    // and the squash rule clears nothing: the copy rule is the one that clears.
+    let world = a_clone_with_two_pushed_branches();
+    let worktree = world.worktree("agent-one");
+    std::fs::write(worktree.join("work.md"), "work\n").expect("work");
+    commit(&worktree, "work");
+    let tip = run_git(&worktree, &["rev-parse", "HEAD"]);
+    std::fs::write(world.clone.join("other.md"), "other\n").expect("other");
+    commit(&world.clone, "other work on main");
+    run_git(&world.clone, &["cherry-pick", tip.trim()]);
+    std::fs::write(world.clone.join("work.md"), "rewritten on main\n").expect("a rewrite");
+    commit(&world.clone, "rewrite the work on main");
+    run_git(&world.clone, &["push", "origin", "main"]);
+    run_git(&world.clone, &["fetch", "origin"]);
+    world.fetch();
+    world.containerise();
+
+    assert_eq!(
+        the_clone_verdict(&world),
+        serde_json::json!({ "nothingToLose": true })
+    );
+    assert_eq!(going_dirs(&world.plan()), [worktree]);
+}
+
+/// What *runner*'s git leaves of the agent worktree at *worktree*'s own
+/// `log --oneline HEAD --not --remotes` once the clone count's rules have run.
+fn counted_through(world: &Clone, runner: &dyn Runner, worktree: &Path) -> Vec<String> {
+    let git = Git::new(runner);
+    let weigher = Weigher {
+        git: &git,
+        clone: &world.clone,
+        bare: Some(&world.bare),
+        reachability: RefCell::new(HashMap::new()),
+        cleared: OnceCell::new(),
+        derivatives: Derivatives::NotAsked,
+    };
+    let listed = run_git(
+        worktree,
+        &["log", "--oneline", "HEAD", "--not", "--remotes"],
+    );
+    weigher.counted(&listed)
+}
+
+#[test]
+fn a_worktree_count_clears_nothing_when_git_will_not_run_the_rules() {
+    // Every failure clears nothing: with the rules' listing refused, the
+    // worktree line is what git listed, the pure merge included.
+    let world = a_clone_with_two_pushed_branches();
+    let worktree = a_worktree_on_a_pure_merge(&world, "agent-one");
+    world.containerise();
+    let runner = Refusing {
+        real: ProcessRunner::new(),
+        refuses: the_clone_listing,
+    };
+
+    assert_eq!(counted_through(&world, &runner, &worktree).len(), 1);
+}
+
+#[test]
+fn a_worktree_count_clears_nothing_when_git_will_not_list_the_tags() {
+    // The rules' listing names the clone's local tags, so with the tags refused
+    // there is no listing to run them on, and the pure merge stays counted.
+    let world = a_clone_with_two_pushed_branches();
+    let worktree = a_worktree_on_a_pure_merge(&world, "agent-one");
+    world.containerise();
+    let runner = Refusing {
+        real: ProcessRunner::new(),
+        refuses: the_tag_query,
+    };
+
+    assert_eq!(counted_through(&world, &runner, &worktree).len(), 1);
+}
+
+#[test]
+fn a_worktree_line_counts_what_git_listed_when_the_clone_count_could_not_run() {
+    // `git status` refused in the clone stops the clone count before its rules,
+    // so they cleared nothing, and the worktree line stays as git listed it.
+    let world = a_clone_with_two_pushed_branches();
+    a_worktree_on_a_pure_merge(&world, "agent-one");
+    world.containerise();
+    let runner = Refusing {
+        real: ProcessRunner::new(),
+        refuses: the_clone_status,
+    };
+    let git = Git::new(&runner);
+
+    let verdict = clone_verdict(&git, &world.clone, BareCache::At(&world.bare)).unsaved_json();
+    assert!(verdict["couldNotTell"].is_string(), "{verdict}");
+    let said = verdict["wouldLose"].as_str().expect("a loss");
+    assert!(
+        said.contains("1 unpushed commit(s) (in .claude/worktrees/agent-one)"),
+        "{said}"
+    );
+}
+
+/// The clone count's `git log --oneline ... --all` listing, and not the merge
+/// rule's `git log --merges ... --all`.
+fn the_clone_listing(argv: &[String]) -> bool {
+    ["log", "--oneline", "--all"]
+        .iter()
+        .all(|wanted| argv.iter().any(|arg| arg == wanted))
+}
+
+/// The `for-each-ref refs/tags/` that lists a repository's tags.
+fn the_tag_query(argv: &[String]) -> bool {
+    ["for-each-ref", "refs/tags/"]
+        .iter()
+        .all(|wanted| argv.iter().any(|arg| arg == wanted))
+}
+
+/// `git status` pinned to the clone itself, and not one asked through a
+/// worktree's admin directory.
+fn the_clone_status(argv: &[String]) -> bool {
+    argv.iter().any(|arg| arg == "status")
+        && argv
+            .iter()
+            .any(|arg| arg.starts_with("--git-dir=") && arg.ends_with("/.git"))
+}
+
+/// A runner that refuses every capture *refuses* names and runs everything
+/// else.
+struct Refusing {
+    real: ProcessRunner,
+    refuses: fn(&[String]) -> bool,
+}
+
+impl Runner for Refusing {
+    fn capture(&self, spec: &SpawnSpec) -> Outcome<CapturedText> {
+        if (self.refuses)(&spec.invocation.argv()) {
+            let mut refused = spec.clone();
+            refused.invocation = Invocation::new("false");
+            return self.real.capture(&refused);
+        }
+        self.real.capture(spec)
+    }
+
+    fn passthrough(&self, spec: &SpawnSpec) -> Outcome {
+        self.real.passthrough(spec)
+    }
+
+    fn session(&self, spec: &SpawnSpec, on_stderr_line: &mut dyn FnMut(&str)) -> Outcome {
+        self.real.session(spec, on_stderr_line)
+    }
+
+    fn watched(&self, spec: &SpawnSpec, on_line: &mut dyn FnMut(&str)) -> Outcome {
+        self.real.watched(spec, on_line)
+    }
+
+    fn detach(&self, what: &Invocation) -> DetachOutcome {
+        self.real.detach(what)
+    }
+}

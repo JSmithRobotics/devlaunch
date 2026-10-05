@@ -248,6 +248,7 @@ fn a_pushed_branch_with_a_clean_tree_holds_nothing_unsaved() {
         CloneState {
             branch: Some("feature".to_owned()),
             unsaved: Unsaved::NothingToLose,
+            cleared: Vec::new(),
         }
     );
 }
@@ -2661,6 +2662,7 @@ fn a_clone_that_is_not_there_holds_nothing() {
         CloneState {
             branch: None,
             unsaved: Unsaved::NothingToLose,
+            cleared: Vec::new(),
         }
     );
 }
@@ -2695,6 +2697,7 @@ fn a_path_with_a_file_at_it_rather_than_a_clone_also_holds_nothing() {
         CloneState {
             branch: None,
             unsaved: Unsaved::NothingToLose,
+            cleared: Vec::new(),
         }
     );
 }
@@ -2712,6 +2715,7 @@ fn a_clone_under_something_that_is_not_a_directory_holds_nothing() {
         CloneState {
             branch: None,
             unsaved: Unsaved::NothingToLose,
+            cleared: Vec::new(),
         }
     );
 }

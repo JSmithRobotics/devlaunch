@@ -1067,6 +1067,16 @@ branch only through a merge's second parent still counts unless another rule
 clears it, even when the squash does hold its change. In each case the refusal is yours to
 judge.
 
+The line for an agent worktree under `.claude/worktrees/` runs the same four
+rules. Its count is the commits under that worktree's HEAD that no remote ref
+reaches, less every commit the rules clear from the clone's own count, so a
+commit cleared in one line is cleared in all of them. A commit that stays
+counted is named in the clone's line and again in the line of each worktree
+that reaches it, so the lines can add up to more than the commits there are.
+Each line is still true of its own directory. Before this, a worktree line
+counted by hash alone, and a pure merge of two pushed branches on an agent's
+branch refused `rm` although the clone's own line cleared it.
+
 Tags are the one ref kind the answer has to think about, and both directions of
 getting it wrong have a ticket. A tag your remote carries, but which no remote
 *branch* reaches any more, must not read as unpushed: a repository that tags
