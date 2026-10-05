@@ -486,11 +486,40 @@ fn a_path_no_namespace_maps_to_the_site_could_not_be_told() {
 
 #[test]
 fn a_mount_source_this_machine_cannot_see_could_not_be_told() {
+    // A source that will not resolve for a reason other than being absent
+    // (here a symlink loop, which holds for root too) may still be the site.
     let machine = Machine::new();
-    let invisible = machine.dir.path().join("not-here");
-    machine.containers(&[container("ws", "running", &[(&invisible, MOUNTED_AT)])]);
+    let unresolvable = machine.dir.path().join("loop");
+    std::os::unix::fs::symlink(&unresolvable, &unresolvable).expect("a symlink loop");
+    beside_a_clean_container(
+        &machine,
+        container("other", "running", &[(&unresolvable, MOUNTED_AT)]),
+    );
 
-    assert!(matches!(machine.owner(RECORDED), Owner::CouldNotTell(_)));
+    let Owner::CouldNotTell(why) = machine.owner(RECORDED) else {
+        panic!("a source that will not resolve proves nothing");
+    };
+    assert!(why.contains("could not see"), "{why}");
+}
+
+#[test]
+fn a_mapped_path_that_will_not_resolve_could_not_be_told() {
+    // The source resolves, but the path under it does not, and not because
+    // nothing is there.
+    let machine = Machine::new();
+    let source = machine.dir.path().join("source");
+    std::fs::create_dir_all(&source).expect("a source");
+    std::os::unix::fs::symlink(source.join(".claude"), source.join(".claude"))
+        .expect("a symlink loop");
+    beside_a_clean_container(
+        &machine,
+        container("other", "running", &[(&source, MOUNTED_AT)]),
+    );
+
+    let Owner::CouldNotTell(why) = machine.owner(RECORDED) else {
+        panic!("a path that will not resolve proves nothing");
+    };
+    assert!(why.contains("could not resolve"), "{why}");
 }
 
 #[test]
@@ -743,7 +772,10 @@ fn a_container_that_cannot_be_asked_could_not_be_told() {
 
     let paused = Machine::new();
     let renamed_from = paused.dir.path().join("repos/o/r/old-name");
-    paused.containers(&[container("ws", "paused", &[(&renamed_from, MOUNTED_AT)])]);
+    beside_a_clean_container(
+        &paused,
+        container("other", "paused", &[(&renamed_from, MOUNTED_AT)]),
+    );
     assert!(matches!(paused.owner(RECORDED), Owner::CouldNotTell(_)));
 }
 
