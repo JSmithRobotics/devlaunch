@@ -2162,6 +2162,23 @@ fn a_worktree_on_a_merge_that_adds_nothing_is_not_counted_where_the_clone_count_
 }
 
 #[test]
+fn the_listing_does_not_count_a_worktree_on_a_merge_that_adds_nothing() {
+    // `dl --ls` reads the same verdict through `account_of`, which hands the
+    // clone count's cleared commits to the worktree lines just as `dl rm` does.
+    let world = a_clone_with_two_pushed_branches();
+    a_worktree_on_a_pure_merge(&world, "agent-one");
+    world.containerise();
+    let runner = ProcessRunner::new();
+    let git = Git::new(&runner);
+
+    let account = account_of(&git, &world.clone, BareCache::At(&world.bare));
+    assert_eq!(
+        account.holds.unsaved_json(),
+        serde_json::json!({ "nothingToLose": true })
+    );
+}
+
+#[test]
 fn a_detached_worktree_on_a_merge_that_adds_nothing_is_not_counted() {
     // The audit's agent-ac4e17474b18b54c3 was detached: no branch reaches its
     // HEAD, so only the merge rule can clear it, and the merge rule reads every
