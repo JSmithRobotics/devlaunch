@@ -807,6 +807,23 @@ fn a_whole_machines_table_that_will_not_read_could_not_be_told() {
 }
 
 #[test]
+fn a_process_at_the_same_start_whose_nspid_will_not_read_could_not_be_told() {
+    // The site's own container is exited, so it says gone. Only the whole
+    // machine's table can veto, and the one process started at the lock's
+    // moment has no `NSpid` to say which pid it is in its own namespace.
+    let machine = Machine::new();
+    machine.host_process(53_000, 329_153, &[53_000]);
+    std::fs::write(machine.proc_root().join("53000/status"), "Name:\tx\n")
+        .expect("a status with no NSpid");
+    machine.containers(&[container("ws", "exited", &[(&machine.clone(), MOUNTED_AT)])]);
+
+    let Owner::CouldNotTell(why) = machine.owner(RECORDED) else {
+        panic!("a process that may be the agent proves nothing gone");
+    };
+    assert!(why.contains("started at the same moment"), "{why}");
+}
+
+#[test]
 fn without_the_whole_machines_table_nothing_is_proved_gone() {
     // Review finding: `dl` in a pid namespace of its own cannot see a host
     // agent, nor one in a container its docker does not list, so the
