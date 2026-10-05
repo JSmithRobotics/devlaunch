@@ -459,6 +459,42 @@ the lock, and a lock is an *unproved*, never a loss: git documents it as saying
 nothing about whether anybody is working in there, so reporting it as work would
 be inventing work that may not exist.
 
+**One lock can be proved stale: Claude Code's own agent lock.** Claude Code locks
+each worktree it makes for a subagent with the reason
+`claude agent <id> (pid <N> start <T>)`, where `N` is the agent's pid and `T` its
+start time (field 22 of `/proc/<N>/stat`, clock ticks since boot). When the agent
+is dead the lock stays behind, and `dl <ws> rm` used to refuse on it with "could
+not tell" although nothing was at risk. Now the lock is stale, and stops
+standing the site, only when every pid namespace that could have written it says
+the process is gone:
+
+- The namespaces are this machine, when the recorded path resolves here to the
+  site, and every container whose mounts put the recorded path on the site. A
+  path nothing maps to the site is "could not tell". A running container whose
+  mount source is no longer on this machine is asked by device and inode whether
+  the path is the site, because a bind mount follows a renamed directory.
+- A container that is exited, created or dead has no process left. In a running
+  container, or on this machine, the process table is read: the agent is still
+  running when a process has start time `T` and pid `N`, in that namespace or as
+  the innermost entry of its `NSpid` line (a nested container). A pid `N` with
+  another start time is a reused pid.
+- When `dl` runs in the machine's own pid namespace (its `/proc` lists kernel
+  threads), the same test runs over every process on the machine first. An
+  agent in a namespace the mounts did not point at still keeps the lock. This
+  only ever refuses.
+- Everything else is "could not tell" and the lock stands as before: a reason in
+  any other shape (a `claude session` lock, one with no start time, one written
+  on macOS), a docker that is missing, refuses or times out, a process table that
+  does not list pid 1, a lock written on this machine but read from inside a pid
+  namespace (a sandbox, a container), a line that does not parse, and a paused
+  container.
+
+A stale lock removes only the lock from the answer. The worktree still has to be
+clean and have nothing unpushed. The lock file is not touched. This proof runs
+only for the answers about a whole clone: `dl <ws> rm`, `dl --ls --json` and the
+orphan rule. The worktree sweep above keeps every lock a claim, because it would
+drop the registration with `git worktree remove`, which git refuses on a lock.
+
 **One limit, stated because it is a limit and not an oversight: gitignored
 content is not weighed.** `git worktree remove` deletes a worktree whose only
 content is gitignored, exit 0 and silent, and so does the removal here. It is
@@ -1066,6 +1102,15 @@ and a branch whose merges do not fit still counts. A commit that reached a passi
 branch only through a merge's second parent still counts unless another rule
 clears it, even when the squash does hold its change. In each case the refusal is yours to
 judge.
+
+**An agent worktree answers for itself.** A clone whose `.claude/` is not
+gitignored shows `?? .claude/worktrees/` in its own `git status` whenever it holds
+an agent worktree. That line used to count as an uncommitted change on its own,
+even when every worktree under it was clean and pushed. It now drops out when
+everything under it is a worktree the clone weighs, because each of those
+reports its own work and its own lock, under its own path, as described in "The
+agent worktrees inside a clone it keeps". Anything else under `.claude/`, and
+any change to a tracked file there, still counts.
 
 Tags are the one ref kind the answer has to think about, and both directions of
 getting it wrong have a ticket. A tag your remote carries, but which no remote
