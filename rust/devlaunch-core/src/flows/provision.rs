@@ -216,6 +216,23 @@ const CLAUDE_UID_KEY: &str = "claudeuid";
 /// is no directory to `stat` at all.
 const CLAUDE_DIR_UID_KEY: &str = "claudediruid";
 
+/// The same pair as [`CLAUDE_WRITABLE_KEY`] and [`CLAUDE_DIR_UID_KEY`], asked of
+/// [`CLAUDE_CONFIG_TARGET`] itself rather than of the effective config directory.
+///
+/// That pair describes whatever `CLAUDE_CONFIG_DIR` resolved to, which is the
+/// target only on a container that reads the variable devlaunch sets. A
+/// devcontainer that pins `CLAUDE_CONFIG_DIR` itself -- the case
+/// [`crate::flows::launch::ClaudeConfigEnv`] exists for -- leaves the pair
+/// describing the pinned directory while the bind, the thing the user asked for,
+/// goes unexamined. A profile the container's user cannot write was then neither
+/// reported nor withheld: see [`ClaudeMountFacts::target_unusable`].
+///
+/// Only asked when [`CLAUDE_TARGET_MOUNTED_KEY`] says the bind landed. The path
+/// exists unmounted on any container that ever had one, and its uid would then
+/// describe an empty directory rather than a profile.
+const CLAUDE_TARGET_WRITABLE_KEY: &str = "claudetargetwritable";
+const CLAUDE_TARGET_UID_KEY: &str = "claudetargetuid";
+
 /// The three literal values a tri-state probe fact travels as: known-true,
 /// known-false, and "the probe could not say" -- never printed as anything else,
 /// so a missing or garbled key and this literal are the only two spellings of
@@ -1646,6 +1663,19 @@ fn claude_config_lines() -> Vec<String> {
         "  cfg_dir_uid=".to_owned(),
         "fi".to_owned(),
         format!("echo \"{PROBE_MARK} {CLAUDE_DIR_UID_KEY} $cfg_dir_uid\""),
+        // The same two questions asked of the bind's own path: see
+        // [`CLAUDE_TARGET_WRITABLE_KEY`] for why `cfg_dir`'s answers cannot stand
+        // in for them, and why neither is asked when nothing is mounted there.
+        format!("cfg_target_writable={TRI_UNKNOWN}"),
+        "cfg_target_uid=".to_owned(),
+        format!("if [ \"$cfg_target_mounted\" = {TRI_YES} ]; then"),
+        format!(
+            "  if [ -w \"{CLAUDE_CONFIG_TARGET}\" ]; then cfg_target_writable={TRI_YES}; else cfg_target_writable={TRI_NO}; fi"
+        ),
+        format!("  cfg_target_uid=$(stat -c %u \"{CLAUDE_CONFIG_TARGET}\" 2>/dev/null || true)"),
+        "fi".to_owned(),
+        format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_WRITABLE_KEY} $cfg_target_writable\""),
+        format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_UID_KEY} $cfg_target_uid\""),
     ]
 }
 
@@ -1955,6 +1985,8 @@ pub struct ClaudeMountFacts {
     writable: Option<bool>,
     container_uid: Option<u32>,
     dir_uid: Option<u32>,
+    target_writable: Option<bool>,
+    target_uid: Option<u32>,
 }
 
 impl ClaudeMountFacts {
@@ -1980,6 +2012,10 @@ impl ClaudeMountFacts {
             container_uid: found.get(CLAUDE_UID_KEY).and_then(|uid| uid.parse().ok()),
             dir_uid: found
                 .get(CLAUDE_DIR_UID_KEY)
+                .and_then(|uid| uid.parse().ok()),
+            target_writable: parse_tri(found.get(CLAUDE_TARGET_WRITABLE_KEY)),
+            target_uid: found
+                .get(CLAUDE_TARGET_UID_KEY)
                 .and_then(|uid| uid.parse().ok()),
         }
     }
@@ -2021,6 +2057,36 @@ impl ClaudeMountFacts {
     pub fn dir_uid(&self) -> Option<u32> {
         self.dir_uid
     }
+
+    /// Whether [`CLAUDE_CONFIG_TARGET`] itself was writable, and the uid owning
+    /// it -- [`Self::writable`] and [`Self::dir_uid`] asked of the bind's own path.
+    /// `None` when nothing is mounted there or the probe could not say; see
+    /// [`CLAUDE_TARGET_WRITABLE_KEY`] for why the pair above cannot stand in.
+    pub fn target_writable(&self) -> Option<bool> {
+        self.target_writable
+    }
+
+    /// The uid owning [`CLAUDE_CONFIG_TARGET`] (`stat -c %u`), the other half of
+    /// [`Self::target_writable`].
+    pub fn target_uid(&self) -> Option<u32> {
+        self.target_uid
+    }
+
+    /// Whether the bind landed on a directory this container's user cannot write.
+    ///
+    /// The one judgement this struct makes, because it is the one the facts above
+    /// are gathered for and spelling it at each caller would be two copies of it.
+    /// Writability and not readability: [`ClaudeConfig::Bound`] forwards nothing
+    /// on the grounds that the mounted directory refreshes its own credential,
+    /// which a directory the container cannot write cannot do -- so the ground is
+    /// gone whether or not the credential can still be read.
+    ///
+    /// `false` unless the probe said so outright. Unknown is not a negative here
+    /// any more than anywhere else in this struct: a bind no probe examined keeps
+    /// the treatment it would have had.
+    pub(crate) fn target_unusable(&self) -> bool {
+        self.target_mounted == Some(true) && self.target_writable == Some(false)
+    }
 }
 
 impl ClaudeMountFacts {
@@ -2047,17 +2113,19 @@ impl ClaudeMountFacts {
     pub(crate) fn synthetic(
         target_mounted: Option<bool>,
         target_source: Option<&str>,
-        writable: Option<bool>,
+        target_writable: Option<bool>,
         container_uid: Option<u32>,
-        dir_uid: Option<u32>,
+        target_uid: Option<u32>,
     ) -> Self {
         Self {
             dir: None,
             target_mounted,
             target_source: target_source.map(str::to_owned),
-            writable,
+            writable: None,
             container_uid,
-            dir_uid,
+            dir_uid: None,
+            target_writable,
+            target_uid,
         }
     }
 }
@@ -3772,7 +3840,15 @@ if [ -n "$cfg_dir" ]; then
 else
   cfg_dir_uid=
 fi
-echo "devlaunch-probe claudediruid $cfg_dir_uid""#;
+echo "devlaunch-probe claudediruid $cfg_dir_uid"
+cfg_target_writable=unknown
+cfg_target_uid=
+if [ "$cfg_target_mounted" = yes ]; then
+  if [ -w "/var/tmp/devlaunch-claude" ]; then cfg_target_writable=yes; else cfg_target_writable=no; fi
+  cfg_target_uid=$(stat -c %u "/var/tmp/devlaunch-claude" 2>/dev/null || true)
+fi
+echo "devlaunch-probe claudetargetwritable $cfg_target_writable"
+echo "devlaunch-probe claudetargetuid $cfg_target_uid""#;
 
     const PYTHON_TRANSFER_SCRIPT: &str = r#"set -eu
 exec >&2
@@ -5838,9 +5914,15 @@ fi
             "devlaunch-probe claudedir /var/tmp/devlaunch-claude\n",
             "devlaunch-probe claudetargetmounted yes\n",
             "devlaunch-probe claudetargetsource /home/hostuser/.claude-profiles/bear\n",
-            "devlaunch-probe claudewritable no\n",
+            "devlaunch-probe claudewritable yes\n",
             "devlaunch-probe claudeuid 1000\n",
-            "devlaunch-probe claudediruid 1001\n",
+            "devlaunch-probe claudediruid 1000\n",
+            // Deliberately the opposite of the pair above, which is the whole
+            // reason both pairs exist: a devcontainer that pins
+            // `CLAUDE_CONFIG_DIR` reports a perfectly writable directory of its
+            // own while the bind sits unwritable beside it.
+            "devlaunch-probe claudetargetwritable no\n",
+            "devlaunch-probe claudetargetuid 1001\n",
         );
         let facts = ClaudeMountFacts::parse(report);
         assert_eq!(facts.dir(), Some("/var/tmp/devlaunch-claude"));
@@ -5849,9 +5931,12 @@ fi
             facts.target_source(),
             Some("/home/hostuser/.claude-profiles/bear")
         );
-        assert_eq!(facts.writable(), Some(false));
+        assert_eq!(facts.writable(), Some(true));
         assert_eq!(facts.container_uid(), Some(1000));
-        assert_eq!(facts.dir_uid(), Some(1001));
+        assert_eq!(facts.dir_uid(), Some(1000));
+        assert_eq!(facts.target_writable(), Some(false));
+        assert_eq!(facts.target_uid(), Some(1001));
+        assert!(facts.target_unusable());
     }
 
     #[test]
@@ -5865,6 +5950,8 @@ fi
             "devlaunch-probe claudewritable unknown\n",
             "devlaunch-probe claudeuid \n",
             "devlaunch-probe claudediruid \n",
+            "devlaunch-probe claudetargetwritable unknown\n",
+            "devlaunch-probe claudetargetuid \n",
         );
         let facts = ClaudeMountFacts::parse(empty);
         assert_eq!(facts.dir(), None);
@@ -5873,6 +5960,9 @@ fi
         assert_eq!(facts.writable(), None);
         assert_eq!(facts.container_uid(), None);
         assert_eq!(facts.dir_uid(), None);
+        assert_eq!(facts.target_writable(), None);
+        assert_eq!(facts.target_uid(), None);
+        assert!(!facts.target_unusable());
 
         // Missing keys entirely, as an unparsable or truncated report gives.
         let facts = ClaudeMountFacts::parse("");
@@ -5882,6 +5972,9 @@ fi
         assert_eq!(facts.writable(), None);
         assert_eq!(facts.container_uid(), None);
         assert_eq!(facts.dir_uid(), None);
+        assert_eq!(facts.target_writable(), None);
+        assert_eq!(facts.target_uid(), None);
+        assert!(!facts.target_unusable());
 
         // Garbled: neither "yes" nor "no" nor "unknown" reads as known either.
         let facts = ClaudeMountFacts::parse("devlaunch-probe claudetargetmounted maybe");
@@ -5890,6 +5983,14 @@ fi
         // Garbled uids, which `str::parse::<u32>` refuses same as an empty one.
         let facts = ClaudeMountFacts::parse("devlaunch-probe claudeuid not-a-number");
         assert_eq!(facts.container_uid(), None);
+
+        // The bind landed and the probe could not say whether it is writable. Not
+        // a negative, so the treatment `ClaudeConfig::Bound` earns stands.
+        let facts = ClaudeMountFacts::parse(concat!(
+            "devlaunch-probe claudetargetmounted yes\n",
+            "devlaunch-probe claudetargetwritable unknown\n",
+        ));
+        assert!(!facts.target_unusable());
     }
 
     #[test]

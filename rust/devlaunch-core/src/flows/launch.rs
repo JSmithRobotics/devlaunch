@@ -3721,10 +3721,17 @@ impl ClaudeConfigEnv {
     /// -- the failure [`ClaudeProfileMount::up_args`] already refuses to cause.
     /// `None` is "the probe could not say" and is not a negative, but it is not a
     /// licence either: unknown leaves the container's own answer standing.
+    ///
+    /// A bind the container's user cannot write
+    /// ([`ClaudeMountFacts::target_unusable`]) is not a licence either, and for
+    /// the same reason the unmounted target is not: repointing Claude Code at it
+    /// buys a directory it cannot keep a credential in, where leaving the
+    /// container's own answer standing at least lets a forwarded token be the
+    /// login.
     pub(crate) fn from_mount(mount: &ClaudeMountFacts) -> Self {
         match mount.target_mounted() {
-            Some(true) => Self::Set,
-            Some(false) | None => Self::Leave,
+            Some(true) if !mount.target_unusable() => Self::Set,
+            _ => Self::Leave,
         }
     }
 }
@@ -4210,15 +4217,36 @@ impl<'a> SessionContext<'a> {
     /// bind landed and pointed `CLAUDE_CONFIG_DIR` at
     /// [`crate::flows::provision::CLAUDE_CONFIG_TARGET`], never whether the mount is
     /// actually usable. A bind is not a guarantee -- see [`claude_profile_mount_notice`]
-    /// for the two ways it can still be silently inert, and this arm says nothing at
-    /// all when it is not, since there is nothing to forward and nothing that failed
-    /// to forward either way.
+    /// for the two ways it can still be silently inert. One of them, a bind this
+    /// container's user cannot write, takes the `Bound` arm's treatment away
+    /// entirely: forwarding nothing is right only while the mounted directory can
+    /// refresh the credential it holds, so the host's token becomes the fallback
+    /// rather than a session with no login at all.
     fn forwarded_claude(
         &self,
         claude: ClaudeConfigEnv,
         notices: &mut dyn Notices<LaunchNotice>,
     ) -> Result<Option<claude::Token>, SessionRefused> {
         let seen = self.claude_seen.get();
+        let mount = seen.mount();
+        // Said for the bind itself, not from inside whichever arm below claims the
+        // session. A devcontainer that pins `CLAUDE_CONFIG_DIR` leaves the probe
+        // classifying the pinned directory, and the bind the user asked for earns
+        // the same notice either way. Every path that reached this from the `Bound`
+        // arm had `target_mounted` true already -- both `ClaudeConfig::Bound` and
+        // `ClaudeConfigEnv::Set` require it -- so nothing that was silent before
+        // starts talking.
+        if let Some(name) = self.host.claude.profile.as_deref()
+            && mount.target_mounted() == Some(true)
+        {
+            let requested = match ClaudeProfileMount::ensure(self.host) {
+                ClaudeProfileMount::Bound { source, .. } => Some(source),
+                _ => None,
+            };
+            if let Some(notice) = claude_profile_mount_notice(name, requested.as_deref(), mount) {
+                notices.say(notice);
+            }
+        }
         // What the session will actually read, which is the payload's export where
         // there is one and the probe's classification otherwise. The two differ in
         // exactly the case [`ClaudeConfigEnv`] exists for: a devcontainer that pins
@@ -4226,14 +4254,6 @@ impl<'a> SessionContext<'a> {
         // mount that the export is about to make the effective one. Forwarding a
         // token there would put a credential that cannot refresh over one that can,
         // which is the whole reason the `Bound` arm forwards nothing.
-        //
-        // What this cannot yet tell apart is a bind the container's user cannot
-        // read: the probe reports writability and ownership for the directory the
-        // devcontainer pinned, never for the target, so a pinned container whose
-        // uid does not own the profile is pointed at an unreadable directory with
-        // no token to fall back on. Identical to what the same container gets today
-        // with no pin at all, so not a regression -- but it is why the target's own
-        // uid is worth probing.
         let effective = match claude {
             ClaudeConfigEnv::Set => Some(ClaudeConfig::Bound),
             ClaudeConfigEnv::Leave => seen.config(),
@@ -4241,18 +4261,14 @@ impl<'a> SessionContext<'a> {
         match effective {
             Some(ClaudeConfig::Ours) => {}
             Some(ClaudeConfig::Bound) => {
-                if let Some(name) = self.host.claude.profile.as_deref() {
-                    let requested = match ClaudeProfileMount::ensure(self.host) {
-                        ClaudeProfileMount::Bound { source, .. } => Some(source),
-                        _ => None,
-                    };
-                    if let Some(notice) =
-                        claude_profile_mount_notice(name, requested.as_deref(), seen.mount())
-                    {
-                        notices.say(notice);
-                    }
+                // The one exception, and it is the same fact `ClaudeConfigEnv`
+                // already withheld the export over: a directory the container's
+                // user cannot write cannot refresh the credential it holds, so the
+                // premise that forwarding nothing is harmless is gone and the
+                // host's token is the only login this session can get.
+                if !mount.target_unusable() {
+                    return Ok(None);
                 }
-                return Ok(None);
             }
             Some(ClaudeConfig::Foreign) | None => {
                 if let Some(name) = self.host.claude.profile.as_deref() {
@@ -4350,7 +4366,7 @@ impl<'a> SessionContext<'a> {
 ///   rewriting the container's user to the host's uid at creation. A repo that
 ///   turns that off, or pins `containerUser`/`remoteUser` to a fixed user, is
 ///   what leaves the two uids [`ClaudeMountFacts::container_uid`] and
-///   [`ClaudeMountFacts::dir_uid`] apart.
+///   [`ClaudeMountFacts::target_uid`] apart.
 ///
 /// The switch is checked first: a mount pointed at the wrong profile entirely is
 /// the more fundamental problem, and its own uid facts describe whichever
@@ -4405,21 +4421,15 @@ fn claude_profile_mount_notice(
             });
         }
     }
-    // Never when the writability and uid facts are known to be about some other
-    // directory. They describe whatever `cfg_dir` the probe resolved, which is the
-    // target on a container that reads it and the declared path on one whose
-    // devcontainer pins `CLAUDE_CONFIG_DIR` -- and [`ClaudeConfigEnv`] brings that
-    // second kind here too, where a mismatch reported from the pinned directory's
-    // uids would name the bind and quote numbers that have nothing to do with it.
-    //
-    // An unresolved `cfg_dir` passes, rather than being a third way to be unsure:
-    // the probe answers `claudewritable` with `unknown` whenever it has no
-    // directory to ask about, so `Some(false)` here already implies one.
-    if mount
-        .dir()
-        .is_none_or(|dir| dir == provision::CLAUDE_CONFIG_TARGET)
-        && mount.writable() == Some(false)
-        && let (Some(container_uid), Some(dir_uid)) = (mount.container_uid(), mount.dir_uid())
+    // The target's own writability and uid, never `cfg_dir`'s. Those describe
+    // whatever the probe resolved, which is the target on a container that reads
+    // the variable and the declared path on one whose devcontainer pins
+    // `CLAUDE_CONFIG_DIR` -- and on the second kind a mismatch reported from them
+    // would name the bind while quoting numbers that have nothing to do with it.
+    // Guarding on `dir()` kept that quiet; it also held the notice back on exactly
+    // the containers that needed it most.
+    if mount.target_unusable()
+        && let (Some(container_uid), Some(dir_uid)) = (mount.container_uid(), mount.target_uid())
     {
         return Some(LaunchNotice::ClaudeProfileMountUidMismatch {
             name: name.to_owned(),
@@ -11887,17 +11897,27 @@ mod tests {
         assert!(zellij < export && export < command, "{line}");
     }
 
-    /// The probe's live fact licenses the export, never the request: a launch that
+    /// The probe's live facts license the export, never the request: a launch that
     /// names a profile against a container the mount never landed in would
-    /// otherwise point Claude Code at an empty directory.
+    /// otherwise point Claude Code at an empty directory, and one against a bind
+    /// this container's user cannot write at a directory it cannot keep a
+    /// credential in. Unknown is neither a negative nor a licence, which is the
+    /// row that distinguishes this from "anything but a confirmed good bind".
     #[test]
-    fn an_unmounted_claude_profile_target_exports_nothing() {
-        for target_mounted in [Some(false), None] {
-            let facts = ClaudeMountFacts::synthetic(target_mounted, None, None, None, None);
+    fn a_claude_profile_target_that_is_not_known_usable_exports_nothing() {
+        for (target_mounted, target_writable, expected) in [
+            (Some(false), None, ClaudeConfigEnv::Leave),
+            (None, None, ClaudeConfigEnv::Leave),
+            (Some(true), Some(false), ClaudeConfigEnv::Leave),
+            (Some(true), None, ClaudeConfigEnv::Set),
+            (Some(true), Some(true), ClaudeConfigEnv::Set),
+        ] {
+            let facts =
+                ClaudeMountFacts::synthetic(target_mounted, None, target_writable, None, None);
             assert_eq!(
                 ClaudeConfigEnv::from_mount(&facts),
-                ClaudeConfigEnv::Leave,
-                "{target_mounted:?}"
+                expected,
+                "{target_mounted:?} {target_writable:?}"
             );
         }
     }
@@ -13029,39 +13049,70 @@ mod tests {
     }
 
     #[test]
-    fn a_bound_mount_the_containers_uid_cannot_write_names_both_uids_and_the_devcontainer() {
+    fn a_bound_mount_the_containers_uid_cannot_write_is_named_and_falls_back_to_the_token() {
         // Mounted and pointed at the right source, but not writable -- and the
-        // probe can name why, because it saw both uids.
-        let scene = Scene::new()
-            .on_a_terminal(&["myws"])
-            .with_running("myws")
-            .naming_a_claude_profile("work", true);
-        let source = scene
-            .host
-            .claude_profiles_root
-            .clone()
-            .unwrap()
-            .join("work");
-        let mount = ClaudeMountFacts::synthetic(
-            Some(true),
-            Some(source.to_str().expect("a utf-8 fixture path")),
-            Some(false),
-            Some(1000),
-            Some(1001),
-        );
-        let (opened, notices) =
-            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Bound), mount);
-        assert!(opened.is_ok(), "{opened:?}");
-        assert_eq!(
-            claude_profile_mount_notices(&notices),
-            vec![LaunchNotice::ClaudeProfileMountUidMismatch {
-                name: "work".to_owned(),
-                target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
-                container_uid: 1000,
-                dir_uid: 1001,
-            }],
-            "{notices:?}"
-        );
+        // probe can name why, because it saw both uids. Both shapes a bind takes:
+        // `Bound` is the container that reads the variable devlaunch sets, `Ours`
+        // the one whose devcontainer pins `CLAUDE_CONFIG_DIR` at a directory of
+        // its own, where the probe's classification describes the pin and the
+        // target's own facts are the only evidence about the bind.
+        //
+        // The bind is unusable either way, so the treatment `Bound` earns is
+        // withheld on both: no export pointing Claude Code at a directory it
+        // cannot keep a credential in, and the host's token forwarded rather than
+        // a session left with no login at all.
+        for seen in [ClaudeConfig::Bound, ClaudeConfig::Ours] {
+            let scene = Scene::new()
+                .on_a_terminal(&["myws"])
+                .with_running("myws")
+                .naming_a_claude_profile("work", true);
+            let source = scene
+                .host
+                .claude_profiles_root
+                .clone()
+                .unwrap()
+                .join("work");
+            let mount = ClaudeMountFacts::synthetic(
+                Some(true),
+                Some(source.to_str().expect("a utf-8 fixture path")),
+                Some(false),
+                Some(1000),
+                Some(1001),
+            );
+            let (opened, notices) = a_session_on_someone_elses_claude(&scene, Some(seen), mount);
+            assert!(opened.is_ok(), "{seen:?}: {opened:?}");
+            assert_eq!(
+                claude_profile_mount_notices(&notices),
+                vec![LaunchNotice::ClaudeProfileMountUidMismatch {
+                    name: "work".to_owned(),
+                    target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+                    container_uid: 1000,
+                    dir_uid: 1001,
+                }],
+                "{seen:?}: {notices:?}"
+            );
+
+            let calls = scene.runner.calls_to("ssh");
+            let call = calls.last().expect("an openssh session");
+            assert_eq!(
+                call.invocation()
+                    .env
+                    .entries
+                    .get("CLAUDE_CODE_OAUTH_TOKEN")
+                    .map(String::as_str),
+                Some("not-a-real-token-from-the-profile"),
+                "{seen:?}",
+            );
+            assert!(
+                !call
+                    .invocation()
+                    .argv()
+                    .iter()
+                    .any(|argument| argument.contains("CLAUDE_CONFIG_DIR")),
+                "{seen:?}: {:?}",
+                call.invocation().argv(),
+            );
+        }
     }
 
     #[test]

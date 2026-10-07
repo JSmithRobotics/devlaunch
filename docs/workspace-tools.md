@@ -203,6 +203,15 @@ before this existed learns it on its next `up`. When it fires, no token
 is forwarded: the mounted credential refreshes itself and a forwarded one cannot,
 so putting one over the other would be a downgrade.
 
+It does not fire on a bind this container's user cannot write. `dl` asks the
+container about the bind's own owner and writability and not only about whatever
+`CLAUDE_CONFIG_DIR` resolved to, so a devcontainer that pins the variable no
+longer hides a profile the container's uid does not own. Such a bind is named
+once and otherwise treated as if it were not there: the variable is left alone
+and the host's token is forwarded after all, because a directory the container
+cannot write cannot refresh the credential in it, and a session with no login at
+all is the worse of the two outcomes.
+
 A session `dl` starts no command for is outside that. An interactive `dl <ws>`,
 and any `claude` you start yourself in a workspace whose devcontainer pins the
 variable, still read what the devcontainer said. The export is deliberately
