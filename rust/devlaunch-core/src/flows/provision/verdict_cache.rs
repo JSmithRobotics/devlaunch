@@ -178,6 +178,7 @@ impl VerdictCache {
             },
             result_mtime,
             dir: mount.dir().map(str::to_owned),
+            source: mount.target_source().map(str::to_owned),
             mounted: match mount.target_mounted() {
                 // Before the plain `Mounted` arm: a bind the container's user
                 // cannot write has to come back as the thing it is, or a launch
@@ -233,12 +234,15 @@ impl VerdictCache {
     /// Separate from [`Self::remembered_claude`] because the two answer different
     /// questions and a memo can carry one without the other: a pass that could not
     /// classify the directory may still have seen the mount, and a memo written
-    /// before this field existed carries the classification and not the mount.
+    /// before these fields existed carries the classification and not the mount.
     ///
-    /// Both facts, not just the mount, because the pair is what
-    /// [`ClaudeMountFacts::target_unusable`] is read from and a launch that answers
-    /// only the first reads an unusable bind as a working one -- which is the
-    /// `Bound` treatment, on every warm attach, with nothing said.
+    /// Whether the container's user can write the bind travels beside the mount
+    /// because the pair is what [`ClaudeMountFacts::target_unusable`] is read from,
+    /// and a launch that answers only the mount reads an unusable bind as a working
+    /// one -- which is the `Bound` treatment, on every warm attach, with nothing
+    /// said. Which source is mounted travels with them because without it a warm
+    /// attach cannot tell the profile it was asked for from the one the container
+    /// was created with, and said the first was mounted when the second was.
     ///
     /// Unknown for every doubt, on the same list as [`Self::remembered_claude`]'s,
     /// and unknown is what leaves the container's own `CLAUDE_CONFIG_DIR` standing
@@ -248,12 +252,15 @@ impl VerdictCache {
             return ClaudeMountFacts::default();
         };
         let dir = memo.dir;
+        // The source only where something is mounted to have one. A memo that says
+        // the target is not mounted carries no bind to name.
+        let source = memo.source;
         match memo.mounted {
-            MemoMount::Mounted => ClaudeMountFacts::remembered(Some(true), None, dir),
+            MemoMount::Mounted => ClaudeMountFacts::remembered(Some(true), None, dir, source),
             MemoMount::MountedUnwritable => {
-                ClaudeMountFacts::remembered(Some(true), Some(false), dir)
+                ClaudeMountFacts::remembered(Some(true), Some(false), dir, source)
             }
-            MemoMount::NotMounted => ClaudeMountFacts::remembered(Some(false), None, dir),
+            MemoMount::NotMounted => ClaudeMountFacts::remembered(Some(false), None, dir, None),
             MemoMount::Unknown | MemoMount::Unrecorded => ClaudeMountFacts::default(),
         }
     }
@@ -404,9 +411,9 @@ struct Memo {
     claude: MemoWord,
     result_mtime: Stamp,
     /// Whether the last pass found [`crate::flows::provision::CLAUDE_CONFIG_TARGET`]
-    /// itself mounted, which is the one mount fact a host-side record can carry
-    /// honestly: the bind lands only at container creation, and this file's anchor
-    /// already expires on a container that was rebuilt.
+    /// itself mounted, which a host-side record can carry honestly: the bind lands
+    /// only at container creation, and this file's anchor already expires on a
+    /// container that was rebuilt.
     ///
     /// Its own word rather than an `Option<Option<bool>>`, which cannot carry the
     /// distinction: serde writes an inner `None` as `null` and reads `null` back as
@@ -414,11 +421,25 @@ struct Memo {
     #[serde(default)]
     mounted: MemoMount,
     /// The effective `CLAUDE_CONFIG_DIR` the last pass saw, which is what says
-    /// whether the session reads the bind or reads past it. Carried for the same
-    /// reason [`Self::mounted`] is: it comes from the image and the devcontainer's
-    /// environment, and this file's anchor already expires on a rebuilt container.
+    /// whether the session reads the bind or reads past it. Exactly as stable as
+    /// the classification in [`Self::claude`] already is, which is the standard
+    /// this memo holds to throughout: the probe reads both under `bash -lc`, so a
+    /// `CLAUDE_CONFIG_DIR` export in a shell startup file, or a repointed `~/.claude`
+    /// symlink, moves the two together and neither waits for a rebuild.
     #[serde(default)]
     dir: Option<String>,
+    /// Which source is mounted at
+    /// [`crate::flows::provision::CLAUDE_CONFIG_TARGET`], which is what says
+    /// *which* profile the container actually has. Carried for the same reason
+    /// [`Self::mounted`] is, and more strongly: the source is the mount, so it is
+    /// fixed for exactly as long as the mount is.
+    ///
+    /// Absent on a memo an older build wrote, which reads back as unknown -- and
+    /// unknown is what keeps a launch from naming the profile it was asked for as
+    /// the one that is mounted
+    /// ([`crate::flows::launch::claude_profile_mount_notice`]).
+    #[serde(default)]
+    source: Option<String>,
 }
 
 /// The four things a pass can have concluded about the config directory.
@@ -743,6 +764,14 @@ mod tests {
             assert_eq!(
                 remembered.dir(),
                 mounted.is_some().then_some("/home/dev/.claude-pinned"),
+                "{mounted:?}"
+            );
+            // And which source is mounted there, without which a warm attach
+            // cannot tell the profile it was asked for from the one the container
+            // was created with.
+            assert_eq!(
+                remembered.target_source(),
+                (mounted == Some(true)).then_some("/home/me/.claude-profiles/work"),
                 "{mounted:?}"
             );
             assert_eq!(

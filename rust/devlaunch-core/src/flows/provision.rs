@@ -2091,33 +2091,44 @@ impl ClaudeMountFacts {
 }
 
 impl ClaudeMountFacts {
-    /// The two facts a host-side record carries, with every other left unknown.
+    /// The facts a host-side record carries, with every other left unknown.
     ///
     /// [`crate::flows::provision::verdict_cache::VerdictCache::remembered_claude_mount`]
-    /// is the whole of what a launch that ran no probe can know, and it is enough
-    /// for the decisions that need it: the bind lands only at container creation
-    /// and the memo's anchor expires with the container, so whether the target is
-    /// mounted and whether the container's user can write it both survive a warm
-    /// attach where a uid or a source path would be a guess.
+    /// is the whole of what a launch that ran no probe can know. The four are
+    /// whether the target is mounted, which source is mounted there, whether the
+    /// container's user can write it, and which directory the session actually
+    /// reads -- the ones a warm attach needs to say anything at all about a named
+    /// profile, where a uid would be a guess.
+    ///
+    /// `target_source` is what keeps a warm attach from naming the profile it was
+    /// asked for as the one that is mounted. The bind lands only at container
+    /// creation and the memo's anchor expires with the container, so the source is
+    /// as fixed as the mount itself; the launch that asks about a *different*
+    /// profile is exactly the case the memo exists to answer.
     ///
     /// `target_writable` is `Some(false)` or unknown and never `Some(true)`: the
     /// memo records the unusable bind as the state it is and everything else as
-    /// plain "mounted", so a true here would be a fact nothing wrote down.
+    /// plain "mounted", so a true here would be a fact nothing wrote down. It is
+    /// the one remembered fact a rebuild is not needed to change -- a bind reflects
+    /// the host directory's owner and mode live, so a `chown` on the host takes
+    /// effect in the container at once and is only reflected here by the next pass.
     ///
-    /// `dir` is the effective config directory, which belongs here for the same
-    /// reason the other two do: it comes from the image and the devcontainer's
-    /// environment, so it cannot move without the container being rebuilt. Without
-    /// it a warm attach cannot tell a mount the session reads past from one it
-    /// reads, and says the wrong thing about the profile on every launch but the
-    /// one that probed.
+    /// `dir` is the effective config directory, without which a warm attach cannot
+    /// tell a mount the session reads past from one it reads. Exactly as stable as
+    /// the classification remembered beside it, which is the standard this memo
+    /// already holds to: both are read by the same probe, under the same shell
+    /// startup files, and a `CLAUDE_CONFIG_DIR` export added to `~/.profile` moves
+    /// both together.
     pub(crate) fn remembered(
         target_mounted: Option<bool>,
         target_writable: Option<bool>,
         dir: Option<String>,
+        target_source: Option<String>,
     ) -> Self {
         Self {
             dir,
             target_mounted,
+            target_source,
             target_writable,
             ..Self::default()
         }
@@ -3304,16 +3315,15 @@ fn provision(
         return Ok(Pass {
             provisioning: Provisioning::CachedProvisioned,
             claude: verdicts.remembered_claude(workspace),
-            // No probe ran, so every mount fact but two comes back unknown. The two
-            // are whether the target is mounted at all and whether the container's
-            // user can write it, which the memo carries under the same anchor and
-            // which a container cannot change without being
-            // rebuilt. Consequence of the rest: `Switches` carries no profile name,
-            // so a relaunch that names a different `--claude-profile` against a
-            // warm, trusted cache has nothing here to notice the change with --
-            // `claude_profile_mount_notice` never runs, because this pass never
-            // ran the probe it needs. That is the headline case this gap costs:
-            // a warm restart naming a new profile silently keeps the old mount.
+            // No probe ran, so the only mount facts that come back are the ones the
+            // memo carries under the same anchor: whether the target is mounted,
+            // which source is mounted there, the effective config directory, and
+            // whether the container's user can write it. The uids are the ones left
+            // unknown, and a notice that cannot name them says so
+            // (`LaunchNotice::ClaudeProfileMountUnwritable`). Writability is also
+            // the one of the four a rebuild is not needed to change -- a `chown` on
+            // the host profile is live in the container and shows up here only
+            // after the next pass.
             claude_mount: verdicts.remembered_claude_mount(workspace),
         });
     }

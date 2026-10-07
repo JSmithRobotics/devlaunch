@@ -3194,6 +3194,16 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             python_repr(name),
             target.display()
         ),
+        // warning: the same dead end with no uids to blame it on -- a read-only
+        // mount, or a mode the directory's own owner cannot write. See
+        // LaunchNotice::ClaudeProfileMountUnwritable's own doc.
+        LaunchNotice::ClaudeProfileMountUnwritable { name, target } => format!(
+            "Claude profile {}: {} is bound in, but this container's user cannot write to it, so \
+             a refreshed Claude login cannot be saved. A read-only mount, or a mode the \
+             directory's own owner cannot write, is what is left once the uids match.",
+            python_repr(name),
+            target.display()
+        ),
         LaunchNotice::ClaudeProfileMountIgnored { name, dir } => format!(
             "Claude profile {}: it is mounted in this container, but this session reads {} \
              instead, so `claude` here does not use that profile. A command run through \
@@ -6008,7 +6018,7 @@ mod tests {
     }
 
     #[test]
-    fn a_uid_mismatch_names_both_uids_and_the_devcontainer() {
+    fn an_unwritable_bind_names_the_uids_only_when_they_explain_it() {
         let line = launch_notice(&LaunchNotice::ClaudeProfileMountUidMismatch {
             name: "bear".to_owned(),
             target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
@@ -6023,6 +6033,23 @@ mod tests {
                  refreshed Claude login cannot be saved. This repo's devcontainer.json is the \
                  likely cause -- \"updateRemoteUserUID\": false, or containerUser/remoteUser \
                  pinned to a fixed user -- rather than anything on the host."
+                    .to_owned()
+            )
+        );
+
+        // Same dead end, no uids to blame: the line must not send the reader to
+        // devcontainer.json over a read-only mount.
+        let line = launch_notice(&LaunchNotice::ClaudeProfileMountUnwritable {
+            name: "bear".to_owned(),
+            target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
+        });
+        assert_eq!(
+            line,
+            Some(
+                "Claude profile 'bear': /var/tmp/devlaunch-claude is bound in, but this \
+                 container's user cannot write to it, so a refreshed Claude login cannot be \
+                 saved. A read-only mount, or a mode the directory's own owner cannot write, is \
+                 what is left once the uids match."
                     .to_owned()
             )
         );

@@ -635,6 +635,17 @@ pub enum LaunchNotice {
         container_uid: u32,
         dir_uid: u32,
     },
+    /// The same failure as [`Self::ClaudeProfileMountUidMismatch`] with the cause
+    /// left unnamed: the bind landed, and this container's user cannot write it,
+    /// but the two uids are equal or the probe could not stat them, so there is no
+    /// ownership story to tell. A read-only mount and a mode the directory's own
+    /// owner cannot write both land here.
+    ///
+    /// Said rather than skipped because the consequence is the same either way --
+    /// a refreshed credential has nowhere to land, and the bind gets none of the
+    /// treatment a working one earns -- and a silent unusable bind is the state
+    /// this whole table exists to stop.
+    ClaudeProfileMountUnwritable { name: String, target: PathBuf },
     /// A named profile is mounted and usable at the target, but this session
     /// reads a different Claude configuration directory, so the mount goes
     /// unused.
@@ -2215,11 +2226,10 @@ impl ClaudeObservation {
 
     /// From [`Provision::remembered_claude`] and
     /// [`Provision::remembered_claude_mount`], which are the facts a host-side
-    /// record keeps. Whether the target is mounted, and whether the container's
-    /// user can write it, survive because neither can change without the container
-    /// being rebuilt, which expires the memo; every other mount fact describes a
-    /// live directory nothing here has looked at, and reads "unknown" rather than a
-    /// guessed one.
+    /// record keeps: whether the target is mounted, which source is mounted there,
+    /// which directory the session reads, and whether the container's user can
+    /// write it. The uids are what reads "unknown" rather than a guessed value,
+    /// because they describe a live directory nothing here has looked at.
     fn remembered(config: Option<ClaudeConfig>, mount: ClaudeMountFacts) -> Self {
         Self { config, mount }
     }
@@ -2632,8 +2642,9 @@ pub trait Provision {
     }
 
     /// What the host's records say of the profile mount in the container standing
-    /// now: whether the target was mounted, and whether the container's user could
-    /// write it.
+    /// now: whether the target was mounted, which source is mounted there, which
+    /// directory the session reads, and whether the container's user could write
+    /// it.
     ///
     /// A second question beside [`Self::remembered_claude`] for
     /// [`Self::last_claude_mount`]'s reason, and asked on the same fast-attach arm:
@@ -4317,7 +4328,7 @@ impl<'a> SessionContext<'a> {
         // session. A devcontainer that pins `CLAUDE_CONFIG_DIR` leaves the probe
         // classifying the pinned directory, and the bind the user asked for earns
         // the same notice either way.
-        let mut said_about_the_mount = false;
+        let mut said_the_mount_is_idle = false;
         if let Some(name) = self.host.claude.profile.as_deref()
             && mount.target_mounted() == Some(true)
         {
@@ -4328,7 +4339,8 @@ impl<'a> SessionContext<'a> {
             if let Some(notice) =
                 claude_profile_mount_notice(name, requested.as_deref(), mount, effective)
             {
-                said_about_the_mount = true;
+                said_the_mount_is_idle =
+                    matches!(notice, LaunchNotice::ClaudeProfileMountIgnored { .. });
                 notices.say(notice);
             }
         }
@@ -4345,13 +4357,15 @@ impl<'a> SessionContext<'a> {
                 }
             }
             Some(ClaudeConfig::Foreign) | None => {
-                // Unless the mount already earned a sentence of its own, which
-                // names the profile and the reason it is not in effect. Two
-                // notices for one launch leaves the second contradicting the
-                // first: this one says the configuration is nobody's to forward
-                // into, over a line that has just named the profile mounted there.
+                // Unless the mount notice already said this launch's session reads
+                // a different directory, which is the one notice that contradicts
+                // this one: it names the profile as mounted and unread, where this
+                // says the configuration is nobody's to forward into. Every other
+                // mount notice is about the bind and says nothing about which
+                // account `claude` will run as, so dropping this one there leaves
+                // the session's actual login unmentioned.
                 if let Some(name) = self.host.claude.profile.as_deref()
-                    && !said_about_the_mount
+                    && !said_the_mount_is_idle
                 {
                     notices.say(LaunchNotice::ClaudeProfileNotForwarded {
                         name: name.to_owned(),
@@ -4516,22 +4530,36 @@ fn claude_profile_mount_notice(
     // `CLAUDE_CONFIG_DIR` -- and on the second kind a mismatch reported from them
     // would name the bind while quoting numbers that have nothing to do with it.
     //
-    // The uids must actually differ: an unusable bind can equally be a read-only
-    // mount or a mode the owner itself cannot write, and "your uid (1000) does not
-    // own it (uid 1000)" is a sentence that sends the reader after the wrong cause.
-    if mount.target_unusable()
-        && let (Some(container_uid), Some(dir_uid)) = (mount.container_uid(), mount.target_uid())
-        && container_uid != dir_uid
-    {
-        return Some(LaunchNotice::ClaudeProfileMountUidMismatch {
-            name: name.to_owned(),
-            target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
-            container_uid,
-            dir_uid,
+    // The uids explain the unusable bind only when they actually differ: it can
+    // equally be a read-only mount or a mode the owner itself cannot write, and
+    // "your uid (1000) does not own it (uid 1000)" is a sentence that sends the
+    // reader after the wrong cause. So the pair chooses the wording, never whether
+    // there is a notice at all -- an unusable bind the probe cannot explain is
+    // still an unusable bind, and saying nothing about it is the silence this whole
+    // table exists to end.
+    if mount.target_unusable() {
+        return Some(match (mount.container_uid(), mount.target_uid()) {
+            (Some(container_uid), Some(dir_uid)) if container_uid != dir_uid => {
+                LaunchNotice::ClaudeProfileMountUidMismatch {
+                    name: name.to_owned(),
+                    target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+                    container_uid,
+                    dir_uid,
+                }
+            }
+            _ => LaunchNotice::ClaudeProfileMountUnwritable {
+                name: name.to_owned(),
+                target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+            },
         });
     }
+    // Only over a source this launch could identify. The notice names the profile
+    // as the thing mounted here, which is a claim about the bind and not about the
+    // request: with no source to check it against -- an older memo, a probe that
+    // could not read mountinfo -- the mount may be another profile entirely, and
+    // the switch check above had nothing to catch it with.
     if matches!(effective, Some(ClaudeConfig::Foreign) | None)
-        && !mount.target_unusable()
+        && mount.target_source().is_some()
         && let Some(dir) = mount.dir()
         && dir != provision::CLAUDE_CONFIG_TARGET
     {
@@ -7904,8 +7932,8 @@ mod tests {
         /// What the host's records say about a workspace no pass ran for, which is
         /// what `dl`'s real implementation reads out of its verdict cache.
         claude_remembered: Option<ClaudeConfig>,
-        /// What those same records say about the profile mount, which is the one
-        /// mount fact they carry.
+        /// What those same records say about the profile mount, which is the part
+        /// of `claude_mount` they carry.
         claude_remembered_mount: ClaudeMountFacts,
         /// The mount facts the same pass observed, alongside `claude_seen` --
         /// unknown by default, like every fact [`ClaudeMountFacts`] carries.
@@ -12905,7 +12933,7 @@ mod tests {
         let claude_seen = ClaudeSeen::new();
         claude_seen.set(ClaudeObservation::remembered(
             seen,
-            ClaudeMountFacts::remembered(mounted, None, None),
+            ClaudeMountFacts::remembered(mounted, None, None, None),
         ));
         let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
         let _ = workspace_ssh(
@@ -13212,6 +13240,7 @@ mod tests {
                     notice,
                     LaunchNotice::ClaudeProfileNotForwarded { .. }
                         | LaunchNotice::ClaudeProfileMountUidMismatch { .. }
+                        | LaunchNotice::ClaudeProfileMountUnwritable { .. }
                         | LaunchNotice::ClaudeProfileMountSwitched { .. }
                         | LaunchNotice::ClaudeProfileMountIgnored { .. }
                 )
@@ -13252,18 +13281,79 @@ mod tests {
 
     #[test]
     fn a_bound_mount_the_containers_uid_cannot_write_is_named_and_falls_back_to_the_token() {
-        // Mounted and pointed at the right source, but not writable -- and the
-        // probe can name why, because it saw both uids. Both shapes a bind takes:
-        // `Bound` is the container that reads the variable devlaunch sets, `Ours`
-        // the one whose devcontainer pins `CLAUDE_CONFIG_DIR` at a directory of
-        // its own, where the probe's classification describes the pin and the
-        // target's own facts are the only evidence about the bind.
+        // Mounted and pointed at the right source, but not writable. Every shape
+        // that takes, because the notice and the login are decided separately and
+        // each row pins one of them.
         //
-        // The bind is unusable either way, so the treatment `Bound` earns is
-        // withheld on both: no export pointing Claude Code at a directory it
-        // cannot keep a credential in, and the host's token forwarded rather than
-        // a session left with no login at all.
-        for seen in [ClaudeConfig::Bound, ClaudeConfig::Ours] {
+        // The classification is which container this is: `Bound` reads the variable
+        // devlaunch sets, `Ours` pins `CLAUDE_CONFIG_DIR` at a directory of its own
+        // whose owner happens to be the host, `Foreign` at one that is somebody
+        // else's. The uids are whether the probe can say *why* the bind is
+        // unwritable: two it saw and that differ name the devcontainer setting to go
+        // edit, and anything else (a read-only mount, a mode the owner itself cannot
+        // write, a probe that could not stat) has to be said without numbers rather
+        // than not said at all.
+        //
+        // The bind is unusable in every row, so the treatment `Bound` earns is
+        // withheld in every row: no export pointing Claude Code at a directory it
+        // cannot keep a credential in. What the session gets instead is the
+        // classification's own answer, which is the profile's token on the two
+        // containers whose configuration is the host's and nothing on `Foreign` --
+        // where the mount notice does not displace `ClaudeProfileNotForwarded`,
+        // because that line is still true and is the only one that says `claude`
+        // will run as another account.
+        let unwritable = |name: &str| LaunchNotice::ClaudeProfileMountUnwritable {
+            name: name.to_owned(),
+            target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+        };
+        let mismatch = |name: &str| LaunchNotice::ClaudeProfileMountUidMismatch {
+            name: name.to_owned(),
+            target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+            container_uid: 1000,
+            dir_uid: 1001,
+        };
+        for (row, seen, uids, expected, token) in [
+            (
+                "bound, uids apart",
+                ClaudeConfig::Bound,
+                (Some(1000), Some(1001)),
+                vec![mismatch("work")],
+                Some("not-a-real-token-from-the-profile"),
+            ),
+            (
+                "pinned elsewhere but ours, uids apart",
+                ClaudeConfig::Ours,
+                (Some(1000), Some(1001)),
+                vec![mismatch("work")],
+                Some("not-a-real-token-from-the-profile"),
+            ),
+            (
+                "pinned at somebody else's, uids apart",
+                ClaudeConfig::Foreign,
+                (Some(1000), Some(1001)),
+                vec![
+                    mismatch("work"),
+                    LaunchNotice::ClaudeProfileNotForwarded {
+                        name: "work".to_owned(),
+                    },
+                ],
+                None,
+            ),
+            (
+                "bound, same uid and still unwritable",
+                ClaudeConfig::Bound,
+                (Some(1000), Some(1000)),
+                vec![unwritable("work")],
+                Some("not-a-real-token-from-the-profile"),
+            ),
+            (
+                "bound, no uid the probe could stat",
+                ClaudeConfig::Bound,
+                (None, None),
+                vec![unwritable("work")],
+                Some("not-a-real-token-from-the-profile"),
+            ),
+        ] {
             let scene = Scene::new()
                 .on_a_terminal(&["myws"])
                 .with_running("myws")
@@ -13274,24 +13364,20 @@ mod tests {
                 .clone()
                 .unwrap()
                 .join("work");
+            let (container_uid, target_uid) = uids;
             let mount = ClaudeMountFacts::synthetic(
                 Some(true),
                 Some(source.to_str().expect("a utf-8 fixture path")),
                 Some(false),
-                Some(1000),
-                Some(1001),
+                container_uid,
+                target_uid,
             );
             let (opened, notices) = a_session_on_someone_elses_claude(&scene, Some(seen), mount);
-            assert!(opened.is_ok(), "{seen:?}: {opened:?}");
+            assert!(opened.is_ok(), "{row}: {opened:?}");
             assert_eq!(
                 claude_profile_mount_notices(&notices),
-                vec![LaunchNotice::ClaudeProfileMountUidMismatch {
-                    name: "work".to_owned(),
-                    target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
-                    container_uid: 1000,
-                    dir_uid: 1001,
-                }],
-                "{seen:?}: {notices:?}"
+                expected,
+                "{row}: {notices:?}"
             );
 
             let calls = scene.runner.calls_to("ssh");
@@ -13302,8 +13388,8 @@ mod tests {
                     .entries
                     .get("CLAUDE_CODE_OAUTH_TOKEN")
                     .map(String::as_str),
-                Some("not-a-real-token-from-the-profile"),
-                "{seen:?}",
+                token,
+                "{row}",
             );
             assert!(
                 !call
@@ -13311,7 +13397,7 @@ mod tests {
                     .argv()
                     .iter()
                     .any(|argument| argument.contains("CLAUDE_CONFIG_DIR")),
-                "{seen:?}: {:?}",
+                "{row}: {:?}",
                 call.invocation().argv(),
             );
         }
@@ -16055,7 +16141,7 @@ mod tests {
         let mut parts = launching(&scene.runner, &updater, &completion);
         parts.provision.claude_remembered = Some(ClaudeConfig::Ours);
         parts.provision.claude_remembered_mount =
-            ClaudeMountFacts::remembered(Some(true), None, None);
+            ClaudeMountFacts::remembered(Some(true), None, None, None);
         let mut cold = NeverCold;
         let mut launch = Launch::new(
             &mut parts.context,
@@ -16113,6 +16199,11 @@ mod tests {
             Some(true),
             None,
             Some("/home/dev/.claude-pinned".to_owned()),
+            scene
+                .host
+                .claude_profiles_root
+                .as_ref()
+                .map(|root| root.join("work").display().to_string()),
         );
         let mut cold = NeverCold;
         let mut launch = Launch::new(
@@ -16152,6 +16243,78 @@ mod tests {
         );
     }
 
+    /// Which profile is mounted is a fact of the mount, so a warm attach that
+    /// cannot name it says nothing about it rather than naming the one it was asked
+    /// for. The headline failure this closes: a container created with one profile
+    /// and attached with `--claude-profile` naming another was told its mount was
+    /// the second one, idle.
+    #[test]
+    fn a_warm_attach_never_claims_a_mount_is_the_profile_it_was_asked_for() {
+        for (row, bound, expected) in [
+            ("the records name the source", Some("bear"), true),
+            ("a memo from before the field", None, false),
+        ] {
+            let workspace =
+                WorkspaceId::new("octocat", "Hello-World", "master").expect("a safe triple");
+            let scene = Scene::new()
+                .with_running(workspace.value())
+                .naming_a_claude_profile("kinisi", true);
+            let root = scene
+                .host
+                .claude_profiles_root
+                .clone()
+                .expect("a profiles root");
+            let updater = SelfInvocation::new("dl");
+            let completion = scene.cache_dir().join("completion.json");
+            let mut parts = launching(&scene.runner, &updater, &completion);
+            parts.provision.claude_remembered = Some(ClaudeConfig::Foreign);
+            parts.provision.claude_remembered_mount = ClaudeMountFacts::remembered(
+                Some(true),
+                None,
+                Some("/home/dev/.claude-pinned".to_owned()),
+                bound.map(|name| root.join(name).display().to_string()),
+            );
+            let mut cold = NeverCold;
+            let mut launch = Launch::new(
+                &mut parts.context,
+                &mut parts.refresh,
+                &mut cold,
+                &parts.provision,
+                &scene.host,
+                &mut parts.chatter,
+                &mut parts.said,
+            );
+            let launched = launch.run(
+                "octocat/Hello-World@master",
+                &LaunchVerb::Attach { command: None },
+                None,
+            );
+            assert!(launched.is_ok(), "{row}: {launched:?}");
+            drop(launch);
+
+            let mut expected_notices = Vec::new();
+            if expected {
+                expected_notices.push(LaunchNotice::ClaudeProfileMountSwitched {
+                    name: "kinisi".to_owned(),
+                    requested: root.join("kinisi"),
+                    bound: root.join("bear"),
+                });
+            }
+            // Never displaced by a mount notice that is not the idle-mount one: the
+            // session still runs as whatever the pinned directory holds, and this is
+            // the only line that says so.
+            expected_notices.push(LaunchNotice::ClaudeProfileNotForwarded {
+                name: "kinisi".to_owned(),
+            });
+            assert_eq!(
+                claude_profile_mount_notices(&parts.said),
+                expected_notices,
+                "{row}: {:?}",
+                parts.said
+            );
+        }
+    }
+
     /// The other half of the same fact, on the launches that run no probe: a bind
     /// this container's user cannot write keeps the treatment the probe withholds,
     /// which is the container's own `CLAUDE_CONFIG_DIR` left alone and the
@@ -16168,7 +16331,7 @@ mod tests {
         let mut parts = launching(&scene.runner, &updater, &completion);
         parts.provision.claude_remembered = Some(ClaudeConfig::Ours);
         parts.provision.claude_remembered_mount =
-            ClaudeMountFacts::remembered(Some(true), Some(false), None);
+            ClaudeMountFacts::remembered(Some(true), Some(false), None, None);
         let mut cold = NeverCold;
         let mut launch = Launch::new(
             &mut parts.context,

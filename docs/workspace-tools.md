@@ -205,8 +205,11 @@ block, say) wins it, and the profile sits mounted and unread. So `dl <ws> -- cmd
 also exports the variable in the shell it runs the command in, which is applied
 last and beats both. It fires on whether the mount is actually in the container
 and whether the container's user can write it, facts `dl` writes down beside the
-workspace and which only a rebuild can change, so the warm calls after the first
-get them too. A workspace created
+workspace so that the warm calls after the first get them too. The mount itself
+only a rebuild can change. Writability is not like that: a bind reflects the host
+directory's owner and mode live, so a `chown` or `chmod` on the host profile is in
+effect in the container at once, while the answer written down beside the
+workspace catches up only on the next `up`. A workspace created
 before this existed learns it on its next `up`. When it fires, no token
 is forwarded: the mounted credential refreshes itself and a forwarded one cannot,
 so putting one over the other would be a downgrade.
@@ -215,12 +218,19 @@ It does not fire on a bind this container's user cannot write. `dl` asks the
 container about the bind's own owner and writability and not only about whatever
 `CLAUDE_CONFIG_DIR` resolved to, so a devcontainer that pins the variable no
 longer hides a profile the container's uid does not own. Such a bind is named
-once and otherwise treated as if it were not there: the variable is left alone,
-and the session gets whatever login it would have had with nothing bound, which
-is the named profile's own token unless the container's own Claude configuration
-belongs to somebody else, where `dl` forwards nothing over it either way. A
+once, with the two uids when they are what explains it and without them when
+anything else does, and otherwise gets none of the treatment a working bind
+earns: `dl` adds no export of its own, and the session gets whatever login it
+would have had with nothing bound, which is the named profile's own token unless
+the container's own Claude configuration belongs to somebody else, where `dl`
+forwards nothing over it either way. A
 directory the container cannot write cannot refresh the credential in it, so the
 reason for withholding the token is gone.
+
+What `dl` does not undo there is the `CLAUDE_CONFIG_DIR` devpod was given at the
+create, which is part of the container's own environment from then on. So on a
+devcontainer that does not pin the variable, a session over an unwritable bind
+still reads the bind, with the host's token forwarded over it.
 
 A session `dl` starts no command for is outside that. An interactive `dl <ws>`,
 and any `claude` you start yourself in a workspace whose devcontainer pins the
