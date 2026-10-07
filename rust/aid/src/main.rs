@@ -449,6 +449,9 @@ Options:
     --claude-profile <name>          Passed through to dl: bind that Claude login
                                      into the workspace. Per launch, so it is
                                      given again on a recreate
+    --memory <size|none>             Passed through to dl: hold the workspace's
+                                     containers to this much memory, swap
+                                     included. Defaults to 8G
     --devcontainer <variant|path>    Passed through to dl
     --rm                             Delete the workspace once the agent's session
                                      ends, the way docker run --rm does. Appendable:

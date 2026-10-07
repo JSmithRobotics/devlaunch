@@ -3013,6 +3013,27 @@ pub(crate) fn repoint_failure(failure: &RepointFailure) -> String {
 // the launch
 // ---------------------------------------------------------------------------
 
+/// A byte count as the person who typed `--memory` wrote it.
+///
+/// Powers of 1024 and the short suffix, matching both what `--memory` takes and
+/// what docker prints, so the number in this line can be typed straight back.
+/// Whole units only: a cap is set in round numbers, and `8G` reads where
+/// `8.00 GiB` only looks precise.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [(u64, &str); 4] = [
+        (1024 * 1024 * 1024 * 1024, "T"),
+        (1024 * 1024 * 1024, "G"),
+        (1024 * 1024, "M"),
+        (1024, "K"),
+    ];
+    for (scale, suffix) in UNITS {
+        if bytes >= scale && bytes.is_multiple_of(scale) {
+            return format!("{}{suffix}", bytes / scale);
+        }
+    }
+    format!("{bytes}B")
+}
+
 /// One launch notice's line, or `None` for one Python prints nothing for.
 ///
 /// `dl.py` configures `logging.basicConfig(level=logging.INFO,
@@ -3039,6 +3060,18 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
         LaunchNotice::HostProcViewBound { entries } => format!(
             "This host runs lxcfs, so the container reads its own memory and CPU limits from \
              /proc rather than the machine's ({entries} entries bound read-only)."
+        ),
+
+        // --- the per-container memory cap
+        LaunchNotice::MemoryCapped { bytes, containers } => format!(
+            "Held {containers} container{} to {} of memory, swap included.",
+            if *containers == 1 { "" } else { "s" },
+            human_bytes(*bytes)
+        ),
+        LaunchNotice::MemoryCapNotSet { bytes, reason } => format!(
+            "Could not hold this workspace's containers to {} ({reason}), so they keep whatever \
+             limit they already had.",
+            human_bytes(*bytes)
         ),
 
         // --- the launch lock (locks.py:89's bare `print`, and dl.py 3727/3744)
