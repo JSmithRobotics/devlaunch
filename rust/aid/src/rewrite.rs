@@ -361,7 +361,12 @@ const SUFFIX_MODIFIERS: &[&str] = &["--force"];
 /// these exact words, and only as whole argv words. `aid <ws> explain the --rm flag`
 /// ends on `flag` and is untouched, and a quoted `aid <ws> 'why --rm'` is one
 /// argument that is not `--rm`. Divergence row 32.
-const SUFFIX_OPTIONS: &[&str] = &["--rm"];
+///
+/// `--recreate` and `--reset` are here for the same reason and not a weaker one:
+/// dl takes either beside a command, so `aid <ws> fix it --recreate` is "rebuild
+/// the container, then send the agent in", and left out of the peel the flag
+/// became another word of prompt and the container was never rebuilt.
+const SUFFIX_OPTIONS: &[&str] = &["--rm", "--recreate", "--reset"];
 
 /// The retired spellings, peeled for one reason: so dl refuses them by name.
 ///
@@ -2187,6 +2192,28 @@ mod tests {
 
         assert_eq!(built[0], "--rm");
         assert_eq!(built[1], "owner/repo");
+    }
+
+    #[test]
+    fn a_trailing_rebuild_flag_rides_to_dl_rather_than_becoming_prompt() {
+        // The positions the flags are actually typed in: `aid <ws> --recreate` and
+        // `aid <ws> <prompt> --recreate`. Outside the peel both fell into the
+        // prompt, so the agent was asked to read `--recreate` and the container was
+        // never rebuilt. Only the leading form worked.
+        for flag in ["--recreate", "--reset"] {
+            let bare = parsed(&["owner/repo", flag]);
+            assert_eq!(prompt(&bare), "", "{flag}");
+            assert_eq!(bare.spec_options, [flag], "{flag}");
+
+            let with_prompt = parsed(&["owner/repo", "fix it", flag]);
+            assert_eq!(prompt(&with_prompt), "fix it", "{flag}");
+            assert_eq!(with_prompt.spec_options, [flag], "{flag}");
+
+            let built = build_dl_args(&parsed(&["owner/repo", "fix it", flag]), &id_of)
+                .expect("an agent line");
+            assert_eq!(built[0], "owner/repo", "{flag}");
+            assert_eq!(built[1], flag, "{flag}");
+        }
     }
 
     #[test]

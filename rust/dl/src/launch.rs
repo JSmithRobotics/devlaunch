@@ -376,16 +376,37 @@ mod tests {
 
     #[test]
     fn a_rebuild_with_a_command_keeps_the_command() {
-        let words = NonEmpty::of(["make".to_owned(), "test".to_owned()]).expect("a command");
-        match family(&Verb::Reset(Some(words))) {
-            Family::Launch {
-                verb:
-                    LaunchVerb::Reset {
-                        command: Some(command),
-                    },
-                ..
-            } => assert_eq!(command.line(), "make test"),
-            _ => panic!("`--reset -- <cmd>` is a reset that runs the command"),
+        // Both arms, because they are mapped separately and one of them carrying
+        // `None` is `dl <ws> --recreate -- <cmd>` rebuilding and then opening an
+        // interactive shell with the command silently dropped.
+        for (verb, spelling) in [
+            (
+                Verb::Recreate(Some(
+                    NonEmpty::of(["make".to_owned(), "test".to_owned()]).expect("a command"),
+                )),
+                "--recreate",
+            ),
+            (
+                Verb::Reset(Some(
+                    NonEmpty::of(["make".to_owned(), "test".to_owned()]).expect("a command"),
+                )),
+                "--reset",
+            ),
+        ] {
+            let command = match family(&verb) {
+                Family::Launch {
+                    verb:
+                        LaunchVerb::Recreate {
+                            command: Some(command),
+                        }
+                        | LaunchVerb::Reset {
+                            command: Some(command),
+                        },
+                    ..
+                } => command,
+                _ => panic!("`{spelling} -- <cmd>` is a rebuild that runs the command"),
+            };
+            assert_eq!(command.line(), "make test", "{spelling}");
         }
     }
 

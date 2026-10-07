@@ -3194,15 +3194,26 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             python_repr(name),
             target.display()
         ),
-        // warning: the same dead end with no uids to blame it on -- a read-only
-        // mount, or a mode the directory's own owner cannot write. See
+        // warning: the same dead end with no uids to blame it on. Which sentence
+        // follows turns on whether anything read them: equal uids rule ownership
+        // out, unread uids rule nothing out. See
         // LaunchNotice::ClaudeProfileMountUnwritable's own doc.
-        LaunchNotice::ClaudeProfileMountUnwritable { name, target } => format!(
+        LaunchNotice::ClaudeProfileMountUnwritable {
+            name,
+            target,
+            uids_compared,
+        } => format!(
             "Claude profile {}: {} is bound in, but this container's user cannot write to it, so \
-             a refreshed Claude login cannot be saved. A read-only mount, or a mode the \
-             directory's own owner cannot write, is what is left once the uids match.",
+             a refreshed Claude login cannot be saved. {}",
             python_repr(name),
-            target.display()
+            target.display(),
+            if *uids_compared {
+                "A read-only mount, or a mode the directory's own owner cannot write, is what is \
+                 left once the uids match."
+            } else {
+                "This session did not read the directory's owner, so what blocks the write is not \
+                 known here; `dl <workspace> up` looks again."
+            }
         ),
         LaunchNotice::ClaudeProfileMountIgnored { name, dir } => format!(
             "Claude profile {}: it is mounted in this container, but this session reads {} \
@@ -6042,6 +6053,7 @@ mod tests {
         let line = launch_notice(&LaunchNotice::ClaudeProfileMountUnwritable {
             name: "bear".to_owned(),
             target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
+            uids_compared: true,
         });
         assert_eq!(
             line,
@@ -6050,6 +6062,25 @@ mod tests {
                  container's user cannot write to it, so a refreshed Claude login cannot be \
                  saved. A read-only mount, or a mode the directory's own owner cannot write, is \
                  what is left once the uids match."
+                    .to_owned()
+            )
+        );
+
+        // And the third case, which is the warm attach: nothing read the uids, so
+        // the line must not claim they match -- the cold launch of the same
+        // workspace prints the mismatch above.
+        let line = launch_notice(&LaunchNotice::ClaudeProfileMountUnwritable {
+            name: "bear".to_owned(),
+            target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
+            uids_compared: false,
+        });
+        assert_eq!(
+            line,
+            Some(
+                "Claude profile 'bear': /var/tmp/devlaunch-claude is bound in, but this \
+                 container's user cannot write to it, so a refreshed Claude login cannot be \
+                 saved. This session did not read the directory's owner, so what blocks the \
+                 write is not known here; `dl <workspace> up` looks again."
                     .to_owned()
             )
         );

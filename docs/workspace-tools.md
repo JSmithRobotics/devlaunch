@@ -218,9 +218,12 @@ It does not fire on a bind this container's user cannot write. `dl` asks the
 container about the bind's own owner and writability and not only about whatever
 `CLAUDE_CONFIG_DIR` resolved to, so a devcontainer that pins the variable no
 longer hides a profile the container's uid does not own. Such a bind is named
-once, with the two uids when they are what explains it and without them when
-anything else does, and otherwise gets none of the treatment a working bind
-earns: `dl` adds no export of its own, and the session gets whatever login it
+once: with the two uids when they are what explains it, without them and naming
+no cause when nothing read them, and with the usual "a read-only mount or a mode
+the owner cannot write" when they were read and agree. It is named only where the
+mount's own source is known, because the line names the profile as the thing bound
+there and an unidentified source may be another profile's. Otherwise it gets none
+of the treatment a working bind earns: `dl` adds no export of its own, and the session gets whatever login it
 would have had with nothing bound, which is the named profile's own token unless
 the container's own Claude configuration belongs to somebody else, where `dl`
 forwards nothing over it either way. A

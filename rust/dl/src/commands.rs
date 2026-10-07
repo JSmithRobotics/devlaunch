@@ -1847,16 +1847,29 @@ fn render_select<'r>(
             no_pick()
         }
         select::Pick::Undrawable(reason) => {
-            let line = match &verb {
-                Verb::Attach { .. } => "dl <workspace>".to_owned(),
-                Verb::Run(..) => "dl <workspace> -- <command>".to_owned(),
-                verb => format!("dl <workspace> {}", verb.word()),
-            };
             eprintln!(
-                "{reason}, so the picker cannot be drawn. Name the workspace instead: {line}"
+                "{reason}, so the picker cannot be drawn. Name the workspace instead: {}",
+                name_the_workspace_instead(&verb)
             );
             no_pick()
         }
+    }
+}
+
+/// The line to retype with the workspace named, for a run whose picker could not
+/// be drawn.
+///
+/// It has to be a line that takes the same request back. A rebuild carrying a
+/// command spells it with the flag rather than the verb word, because
+/// `dl <ws> recreate` has no room for the `-- <command>` the user typed and the
+/// grammar refuses the flag beside the word.
+fn name_the_workspace_instead(verb: &Verb) -> String {
+    match verb {
+        Verb::Attach { .. } => "dl <workspace>".to_owned(),
+        Verb::Run(..) => "dl <workspace> -- <command>".to_owned(),
+        Verb::Recreate(Some(_)) => "dl <workspace> --recreate -- <command>".to_owned(),
+        Verb::Reset(Some(_)) => "dl <workspace> --reset -- <command>".to_owned(),
+        verb => format!("dl <workspace> {}", verb.word()),
     }
 }
 
@@ -2076,6 +2089,43 @@ mod herdr_editor_tests {
         );
         assert_eq!(started_agent(&run(&["make", "test"])), None);
         assert_eq!(started_agent(&Verb::Attach { rm: RmOnExit::No }), None);
+    }
+}
+
+#[cfg(test)]
+mod undrawable_picker_tests {
+    use super::{Verb, name_the_workspace_instead};
+    use crate::cli::RmOnExit;
+    use devlaunch_core::domain::workspace_state::NonEmpty;
+
+    fn words() -> NonEmpty<String> {
+        NonEmpty::of(["make".to_owned(), "test".to_owned()]).expect("a command")
+    }
+
+    #[test]
+    fn the_line_offered_takes_the_same_request_back() {
+        // `dl <workspace> recreate` is refused a `-- <command>`, so offering it to
+        // somebody who typed one tells them to retype their line without their
+        // command in it.
+        for (verb, expected) in [
+            (Verb::Attach { rm: RmOnExit::No }, "dl <workspace>"),
+            (
+                Verb::Run(words(), RmOnExit::No),
+                "dl <workspace> -- <command>",
+            ),
+            (
+                Verb::Recreate(Some(words())),
+                "dl <workspace> --recreate -- <command>",
+            ),
+            (
+                Verb::Reset(Some(words())),
+                "dl <workspace> --reset -- <command>",
+            ),
+            (Verb::Recreate(None), "dl <workspace> recreate"),
+            (Verb::Reset(None), "dl <workspace> reset"),
+        ] {
+            assert_eq!(name_the_workspace_instead(&verb), expected);
+        }
     }
 }
 

@@ -637,15 +637,26 @@ pub enum LaunchNotice {
     },
     /// The same failure as [`Self::ClaudeProfileMountUidMismatch`] with the cause
     /// left unnamed: the bind landed, and this container's user cannot write it,
-    /// but the two uids are equal or the probe could not stat them, so there is no
-    /// ownership story to tell. A read-only mount and a mode the directory's own
-    /// owner cannot write both land here.
+    /// but ownership is not what explains it.
+    ///
+    /// `uids_compared` is whether this launch saw both uids at all, and it picks
+    /// the wording. True means they were read and are equal, so a read-only mount
+    /// or a mode the directory's own owner cannot write is what is left. False
+    /// means nothing read them -- a warm attach runs no probe, and the memo it
+    /// reads carries no uids -- so no cause can be ruled out and none is named.
+    /// Collapsing the two said "once the uids match" on an attach that never
+    /// looked, which is a claim the cold launch of the same workspace can
+    /// contradict outright.
     ///
     /// Said rather than skipped because the consequence is the same either way --
     /// a refreshed credential has nowhere to land, and the bind gets none of the
     /// treatment a working one earns -- and a silent unusable bind is the state
     /// this whole table exists to stop.
-    ClaudeProfileMountUnwritable { name: String, target: PathBuf },
+    ClaudeProfileMountUnwritable {
+        name: String,
+        target: PathBuf,
+        uids_compared: bool,
+    },
     /// A named profile is mounted and usable at the target, but this session
     /// reads a different Claude configuration directory, so the mount goes
     /// unused.
@@ -4531,10 +4542,16 @@ fn claude_profile_mount_notice(
     // equally be a read-only mount or a mode the owner itself cannot write, and
     // "your uid (1000) does not own it (uid 1000)" is a sentence that sends the
     // reader after the wrong cause. So the pair chooses the wording, never whether
-    // there is a notice at all -- an unusable bind the probe cannot explain is
+    // there is a notice at all -- an unusable bind the evidence cannot explain is
     // still an unusable bind, and saying nothing about it is the silence this whole
-    // table exists to end.
-    if mount.target_unusable() {
+    // table exists to end. Unseen uids are their own wording and not the equal one:
+    // a warm attach reads a memo that carries no uids, and "once the uids match"
+    // there contradicts the cold launch that printed the mismatch.
+    //
+    // Over a source this launch could identify, for the reason the ignored arm
+    // below is: these notices name the profile as the thing bound here, and with
+    // no source to check that against the bind may be another profile's.
+    if mount.target_unusable() && mount.target_source().is_some() {
         return Some(match (mount.container_uid(), mount.target_uid()) {
             (Some(container_uid), Some(dir_uid)) if container_uid != dir_uid => {
                 LaunchNotice::ClaudeProfileMountUidMismatch {
@@ -4544,9 +4561,10 @@ fn claude_profile_mount_notice(
                     dir_uid,
                 }
             }
-            _ => LaunchNotice::ClaudeProfileMountUnwritable {
+            uids => LaunchNotice::ClaudeProfileMountUnwritable {
                 name: name.to_owned(),
                 target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+                uids_compared: matches!(uids, (Some(_), Some(_))),
             },
         });
     }
@@ -13303,21 +13321,24 @@ mod tests {
         // where the mount notice does not displace `ClaudeProfileNotForwarded`,
         // because that line is still true and is the only one that says `claude`
         // will run as another account.
-        let unwritable = |name: &str| LaunchNotice::ClaudeProfileMountUnwritable {
-            name: name.to_owned(),
-            target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
-        };
+        let unwritable =
+            |name: &str, uids_compared: bool| LaunchNotice::ClaudeProfileMountUnwritable {
+                name: name.to_owned(),
+                target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+                uids_compared,
+            };
         let mismatch = |name: &str| LaunchNotice::ClaudeProfileMountUidMismatch {
             name: name.to_owned(),
             target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
             container_uid: 1000,
             dir_uid: 1001,
         };
-        for (row, seen, uids, expected, token) in [
+        for (row, seen, uids, source_known, expected, token) in [
             (
                 "bound, uids apart",
                 ClaudeConfig::Bound,
                 (Some(1000), Some(1001)),
+                true,
                 vec![mismatch("work")],
                 Some("not-a-real-token-from-the-profile"),
             ),
@@ -13325,6 +13346,7 @@ mod tests {
                 "pinned elsewhere but ours, uids apart",
                 ClaudeConfig::Ours,
                 (Some(1000), Some(1001)),
+                true,
                 vec![mismatch("work")],
                 Some("not-a-real-token-from-the-profile"),
             ),
@@ -13332,6 +13354,7 @@ mod tests {
                 "pinned at somebody else's, uids apart",
                 ClaudeConfig::Foreign,
                 (Some(1000), Some(1001)),
+                true,
                 vec![
                     mismatch("work"),
                     LaunchNotice::ClaudeProfileNotForwarded {
@@ -13344,14 +13367,31 @@ mod tests {
                 "bound, same uid and still unwritable",
                 ClaudeConfig::Bound,
                 (Some(1000), Some(1000)),
-                vec![unwritable("work")],
+                true,
+                vec![unwritable("work", true)],
                 Some("not-a-real-token-from-the-profile"),
             ),
             (
-                "bound, no uid the probe could stat",
+                // The warm attach: no probe ran, so the memo's answer comes back
+                // with no uids. The line must not say they match -- the cold launch
+                // of this same workspace can have printed the mismatch.
+                "bound, no uid anything read",
                 ClaudeConfig::Bound,
                 (None, None),
-                vec![unwritable("work")],
+                true,
+                vec![unwritable("work", false)],
+                Some("not-a-real-token-from-the-profile"),
+            ),
+            (
+                // A memo written before the source was recorded. The notices here
+                // name the profile as the thing bound, and with no source to check
+                // that against the bind may be another profile's -- the same reason
+                // the ignored notice is gated on one.
+                "bound, unwritable, source nothing could identify",
+                ClaudeConfig::Bound,
+                (Some(1000), Some(1001)),
+                false,
+                vec![],
                 Some("not-a-real-token-from-the-profile"),
             ),
         ] {
@@ -13368,7 +13408,7 @@ mod tests {
             let (container_uid, target_uid) = uids;
             let mount = ClaudeMountFacts::synthetic(
                 Some(true),
-                Some(source.to_str().expect("a utf-8 fixture path")),
+                source_known.then(|| source.to_str().expect("a utf-8 fixture path")),
                 Some(false),
                 container_uid,
                 target_uid,
@@ -17938,7 +17978,17 @@ mod tests {
             &mut parts.said,
         );
 
-        let launched = launch.run("myws", &LaunchVerb::Recreate { command: None }, None);
+        // With a command, because `dl <ws> --recreate -- <cmd>` is the form the
+        // rebuild flags exist for: the rebuild happens and then the command runs.
+        // Dropping the command here -- attaching with `None` -- is an interactive
+        // shell where the caller asked for one command, and a script waits forever.
+        let launched = launch.run(
+            "myws",
+            &LaunchVerb::Recreate {
+                command: Some(RemoteCommand::argv(&["make", "test"])),
+            },
+            None,
+        );
 
         assert_eq!(
             launched,
@@ -17950,6 +18000,17 @@ mod tests {
             .find(|argv| argv.first().map(String::as_str) == Some("up"))
             .expect("an up");
         assert!(up.contains(&"--recreate".to_owned()), "{up:?}");
+        let session = scene
+            .devpod_commands()
+            .into_iter()
+            .find(|argv| argv.first().map(String::as_str) == Some("ssh"))
+            .expect("a session");
+        assert!(
+            session
+                .iter()
+                .any(|argument| argument.contains("make test")),
+            "{session:?}"
+        );
     }
 
     #[test]

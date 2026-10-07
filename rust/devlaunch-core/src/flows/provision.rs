@@ -3319,8 +3319,8 @@ fn provision(
             // memo carries under the same anchor: whether the target is mounted,
             // which source is mounted there, the effective config directory, and
             // whether the container's user can write it. The uids are the ones left
-            // unknown, and a notice that cannot name them says so
-            // (`LaunchNotice::ClaudeProfileMountUnwritable`). Writability is also
+            // unknown, and `LaunchNotice::ClaudeProfileMountUnwritable` has a
+            // wording for that which names no cause at all. Writability is also
             // the one of the four a rebuild is not needed to change -- a `chown` on
             // the host profile is live in the container and shows up here only
             // after the next pass.

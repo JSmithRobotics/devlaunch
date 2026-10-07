@@ -1355,14 +1355,14 @@ fn workspace_command(cli: Cli, argv: &[String]) -> Result<Command, GrammarError>
     })
 }
 
+type RebuildVerb = fn(Option<NonEmpty<String>>) -> Verb;
+
 /// Folds `--recreate` / `--reset` into the attach family's verb.
 ///
 /// Only the two forms that hand over a session can take one, so any other verb
 /// is refused rather than left to ignore it. `--rm` is refused beside either:
 /// `RmOnExit` is not carried by the rebuild verbs, and a throwaway workspace
 /// does not need rebuilding.
-type RebuildVerb = fn(Option<NonEmpty<String>>) -> Verb;
-
 fn with_rebuild(cli: &Cli, verb: Verb) -> Result<Verb, GrammarError> {
     let (modifier, make): (&'static str, RebuildVerb) = match (cli.recreate, cli.reset) {
         (false, false) => return Ok(verb),
