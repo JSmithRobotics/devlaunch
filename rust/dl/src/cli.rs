@@ -2177,6 +2177,7 @@ mod tests {
                 devcontainer: None,
                 claude_profile: Some("../../etc".to_owned()),
                 from: None,
+                memory: None,
             })
         );
     }
@@ -2215,6 +2216,7 @@ mod tests {
                 devcontainer: None,
                 claude_profile: None,
                 from: Some("develop".to_owned()),
+                memory: None,
             })
         );
         assert_eq!(
