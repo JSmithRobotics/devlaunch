@@ -4100,9 +4100,12 @@ impl ClaudeConfigEnv {
     /// A bind the container's user cannot write
     /// ([`ClaudeMountFacts::target_unusable`]) is not a licence either, and for
     /// the same reason the unmounted target is not: repointing Claude Code at it
-    /// buys a directory it cannot keep a credential in, where leaving the
-    /// container's own answer standing at least lets a forwarded token be the
-    /// login.
+    /// buys a directory it cannot keep a credential in. Withholding the export
+    /// leaves the container's own `CLAUDE_CONFIG_DIR` standing, which is a
+    /// different account from the one asked for whenever a set is bound, so
+    /// [`SessionContext::forwarded_claude`] forwards the named profile's host
+    /// token in exactly those cases rather than letting the session run as the
+    /// anchor in silence.
     pub(crate) fn from_mount(mount: &ClaudeMountFacts, selected: Option<&str>) -> Self {
         if mount.target_mounted() != Some(true) || mount.target_unusable() {
             return Self::Leave;
@@ -4116,9 +4119,12 @@ impl ClaudeConfigEnv {
             // the single-profile one is above, and the probe answers for every
             // bind rather than only the one it read
             // ([`ClaudeMountFacts::bind_unwritable`]): without that, a profile of
-            // a set the container cannot write would be exported with no token
-            // forwarded either, which is the credential-refresh dead end the
-            // `target_unusable` gate exists to avoid.
+            // a set the container cannot write would be exported over a directory
+            // no refreshed credential can be written to, which is the
+            // credential-refresh dead end the `target_unusable` gate exists to
+            // avoid. Withholding it here hands the session the anchor's account
+            // instead, so [`SessionContext::forwarded_claude`] forwards the named
+            // profile's host token over the top of it.
             Some(name)
                 if bound_profiles(mount).any(|bound| bound == name)
                     && !mount.bind_unwritable(&profile_target(name)) =>
@@ -4702,7 +4708,17 @@ impl<'a> SessionContext<'a> {
                 // user cannot write cannot refresh the credential it holds, so the
                 // premise that forwarding nothing is harmless is gone and the
                 // host's token is the only login this session can get.
-                if !mount.target_unusable() {
+                //
+                // The same fact asked of a set: the export was withheld over a
+                // bind of the *selected* profile that the container cannot write,
+                // so `CLAUDE_CONFIG_DIR` still names the anchor and the session
+                // would otherwise run as that other account without a word.
+                let switched_to_unwritable =
+                    self.host.claude.selected_profile().is_some_and(|name| {
+                        bound_profiles(mount).any(|bound| bound == name)
+                            && mount.bind_unwritable(&profile_target(name))
+                    });
+                if !mount.target_unusable() && !switched_to_unwritable {
                     return Ok(None);
                 }
             }
@@ -14205,6 +14221,73 @@ mod tests {
                 Some("not-a-real-token-from-the-profile")
             };
             assert_eq!(forwarded, expected_token, "{seen:?}");
+        }
+    }
+
+    #[test]
+    fn a_set_profile_the_container_cannot_write_runs_on_the_host_token() {
+        // `ClaudeConfigEnv::from_mount` withholds the export over a bind the
+        // container cannot write, and on a bound set that leaves the container's
+        // own `CLAUDE_CONFIG_DIR` naming the anchor -- a different account from the
+        // one asked for. `Bound` forwards nothing on the premise that the mounted
+        // directory refreshes its own credential; the unwritable bind is exactly
+        // where that premise is gone, so the host token is what makes the session
+        // run as the profile named rather than as the set's first.
+        let target = provision::CLAUDE_CONFIG_TARGET;
+        let bear = format!("{target}/bear");
+        let work = format!("{target}/work");
+        for writable in [false, true] {
+            let scene = Scene::new()
+                .with_running("myws")
+                .naming_a_claude_profile("work", true);
+            // No source: a set binds one directory per name under the target and
+            // nothing at the target itself, which is what the probe reports.
+            let mut mount =
+                ClaudeMountFacts::synthetic(Some(true), None, Some(true), Some(1000), Some(1000))
+                    .with_binds(&[&bear, &work])
+                    .with_dir(&bear);
+            if !writable {
+                mount = mount.with_unwritable_binds(&[&work]);
+            }
+            let (opened, notices) =
+                a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Bound), mount);
+            assert!(opened.is_ok(), "{writable}: {opened:?}");
+
+            let expected_notices = if writable {
+                Vec::new()
+            } else {
+                vec![LaunchNotice::ClaudeProfileMountUnwritable {
+                    name: "work".to_owned(),
+                    target: PathBuf::from(&work),
+                    uids_compared: false,
+                }]
+            };
+            assert_eq!(
+                claude_profile_mount_notices(&notices),
+                expected_notices,
+                "{writable}: {notices:?}"
+            );
+
+            let calls = scene.runner.calls_to("devpod");
+            let session = calls
+                .iter()
+                .find(|call| call.args().first().map(String::as_str) == Some("ssh"))
+                .expect("a session");
+            let forwarded = session
+                .invocation()
+                .env
+                .entries
+                .get(claude::TOKEN_VAR)
+                .map(String::as_str);
+            let expected_token = if writable {
+                // The export lands, so the bind itself is the login and a
+                // short-lived host token over the top of it would be the
+                // credential-refresh regression `Bound` exists to avoid.
+                None
+            } else {
+                Some("not-a-real-token-from-the-profile")
+            };
+            assert_eq!(forwarded, expected_token, "{writable}");
         }
     }
 

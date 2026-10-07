@@ -268,9 +268,14 @@ const CLAUDE_TARGET_UID_KEY: &str = "claudetargetuid";
 /// [`ClaudeMountFacts::target_unusable`] already refuses to walk into for a single
 /// profile. See [`crate::flows::launch::ClaudeConfigEnv::from_mount`].
 ///
-/// Only the unwritable ones, so the everyday answer is empty. Absent -- an older
-/// memo, a probe that could not run -- is unknown and not "all writable", the
-/// reading every fact here holds to.
+/// Only the unwritable ones, so the everyday answer is empty -- which is also why
+/// absent is operationally indistinguishable from all-writable here, unlike every
+/// other fact in this report. An older memo or a probe that could not run leaves
+/// [`ClaudeMountFacts::bind_unwritable`] answering `false` for every bind, so the
+/// export lands over a directory nothing examined. That fail-open is deliberate:
+/// it is what every container created before this key existed already did, and
+/// the alternative -- treating unknown as unwritable -- would withhold the export
+/// from every one of them until it was recreated.
 const CLAUDE_TARGET_UNWRITABLE_KEY: &str = "claudetargetunwritable";
 
 /// The three literal values a tri-state probe fact travels as: known-true,
@@ -1638,21 +1643,6 @@ const CLAUDE_TARGET_BINDS_AWK: &str = "$5 == t || index($5, t \"/\") == 1 { prin
 /// mount at its own directory and fails the other way, towards
 /// [`ClaudeConfig::Ours`]. Both are pre-existing and out of scope here; this
 /// sentence only says which is which.
-/// The `case` that picks the anchor out of `$cfg_dir`, verbatim -- no surrounding
-/// script -- so [`claude_config_lines`] splices it in and the differential test on
-/// [`ClaudeMountFacts::target_anchor`] runs the very same string, for the reason
-/// [`CLAUDE_MOUNT_SCAN_AWK`] is a constant of its own. Reads `cfg_dir`, sets
-/// `cfg_anchor`.
-fn claude_anchor_case() -> String {
-    [
-        "case \"$cfg_dir\" in".to_owned(),
-        format!("  \"{CLAUDE_CONFIG_TARGET}\"|\"{CLAUDE_CONFIG_TARGET}\"/*) cfg_anchor=$cfg_dir;;"),
-        format!("  *) cfg_anchor=\"{CLAUDE_CONFIG_TARGET}\";;"),
-        "esac".to_owned(),
-    ]
-    .join("\n")
-}
-
 fn claude_config_lines() -> Vec<String> {
     vec![
         "cfg_home=$(readlink -f \"${HOME-}\" 2>/dev/null || true)".to_owned(),
@@ -1688,9 +1678,12 @@ fn claude_config_lines() -> Vec<String> {
         // shadows. See [`CLAUDE_TARGET_BINDS_KEY`]. Space-joined for
         // `CLAUDE_MOUNTS_KEY`'s reason -- a report is a map, so a repeated key
         // would keep only the last. A profile name carries no space; a shadowed
-        // link's name may, and such a bind splits into fragments, which name no
-        // profile and so are dropped rather than mistaken for one
-        // ([`crate::flows::launch::bound_profiles`]).
+        // link's name may, and the kernel escapes one in mountinfo field 5, so
+        // such a bind travels as a single token (`<target>/my\040skills`) rather
+        // than splitting. It still names no profile:
+        // [`crate::flows::launch::bound_profiles`] drops it because a container
+        // with a bind at the target has no set at all, and in a set the leaf
+        // carries a `/`.
         "cfg_target_binds=".to_owned(),
         "if [ -r /proc/self/mountinfo ]; then".to_owned(),
         format!(
@@ -1774,6 +1767,14 @@ fn claude_config_lines() -> Vec<String> {
         // The same writability question asked of every bind, not just the anchor:
         // see [`CLAUDE_TARGET_UNWRITABLE_KEY`]. Unquoted on purpose -- the list is
         // whitespace-joined and word splitting is how it is read back.
+        //
+        // The escapes the kernel wrote are still in those words, so a bind whose
+        // name holds a space is `-w`-tested at a path that does not exist and is
+        // therefore always listed here. Harmless: the list is only ever consulted
+        // by [`ClaudeMountFacts::bind_unwritable`] for a
+        // [`crate::flows::launch::profile_target`] of a
+        // [`crate::clients::claude::ProfileName`], which can hold no backslash, so
+        // no such entry is ever matched.
         "cfg_target_unwritable=".to_owned(),
         "for cfg_bind in $cfg_target_binds; do".to_owned(),
         "  if [ ! -w \"$cfg_bind\" ]; then cfg_target_unwritable=\"$cfg_target_unwritable$cfg_bind \"; fi"
@@ -1781,6 +1782,21 @@ fn claude_config_lines() -> Vec<String> {
         "done".to_owned(),
         format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_UNWRITABLE_KEY} $cfg_target_unwritable\""),
     ]
+}
+
+/// The `case` that picks the anchor out of `$cfg_dir`, verbatim -- no surrounding
+/// script -- so [`claude_config_lines`] splices it in and the differential test on
+/// [`ClaudeMountFacts::target_anchor`] runs the very same string, for the reason
+/// [`CLAUDE_MOUNT_SCAN_AWK`] is a constant of its own. Reads `cfg_dir`, sets
+/// `cfg_anchor`.
+fn claude_anchor_case() -> String {
+    [
+        "case \"$cfg_dir\" in".to_owned(),
+        format!("  \"{CLAUDE_CONFIG_TARGET}\"|\"{CLAUDE_CONFIG_TARGET}\"/*) cfg_anchor=$cfg_dir;;"),
+        format!("  *) cfg_anchor=\"{CLAUDE_CONFIG_TARGET}\";;"),
+        "esac".to_owned(),
+    ]
+    .join("\n")
 }
 
 // ===========================================================================
@@ -2222,6 +2238,10 @@ impl ClaudeMountFacts {
     /// `false` unless the probe said so outright. Unknown is not a negative here
     /// any more than anywhere else in this struct: a bind no probe examined keeps
     /// the treatment it would have had.
+    pub(crate) fn target_unusable(&self) -> bool {
+        self.target_mounted == Some(true) && self.target_writable == Some(false)
+    }
+
     /// Whether the probe found this particular bind unwritable by the container's
     /// user -- [`Self::target_unusable`] asked of a bind the session is not
     /// reading yet, which is every profile of a set but the current one.
@@ -2230,10 +2250,6 @@ impl ClaudeMountFacts {
     /// reason.
     pub(crate) fn bind_unwritable(&self, bind: &str) -> bool {
         self.unwritable_binds.iter().any(|known| known == bind)
-    }
-
-    pub(crate) fn target_unusable(&self) -> bool {
-        self.target_mounted == Some(true) && self.target_writable == Some(false)
     }
 }
 
@@ -2396,9 +2412,10 @@ fn cfg_dir_is_foreign(container_home: &str, host_home: Option<&str>, mount_roots
 ///
 /// Read from the report by both [`ClaudeConfig::parse`] and
 /// [`ClaudeMountFacts::parse`], so the split lives here rather than twice.
-/// Nothing is unescaped, for [`CLAUDE_TARGET_BINDS_AWK`]'s reason. Split on
-/// whitespace, which a profile's own path cannot hold; a shadowed symlink's name
-/// can, and [`CLAUDE_TARGET_BINDS_KEY`] says what that costs.
+/// Nothing is unescaped, for [`CLAUDE_TARGET_BINDS_AWK`]'s reason, which is also
+/// what makes splitting on whitespace sound: a mount point the kernel wrote
+/// carries no literal space, tab or newline -- those arrive as `\040` and the
+/// like -- so one bind is one token whatever its name holds.
 fn target_binds(found: &BTreeMap<String, String>) -> Vec<String> {
     found
         .get(CLAUDE_TARGET_BINDS_KEY)

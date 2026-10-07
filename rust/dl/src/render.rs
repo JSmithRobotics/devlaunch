@@ -3347,12 +3347,28 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
                     " No profile was selected, so `claude` here runs as your host's \
                      unnamed login until CLAUDE_CONFIG_DIR names one of them.",
                 ),
-                // A set with something unbound and no selection is the first name
-                // typed having failed to bind, which refuses the session outright
-                // rather than running it as anything.
+                // No selection with something unbound is the first name typed
+                // having failed to bind, and the names go into `bound` and
+                // `unbound` in the order they were typed -- so the first name
+                // typed is `unbound`'s first. `default` is the one name that
+                // fails to bind by design and still has a login behind it:
+                // `resolve_token` skips it and forwards the host's own, where
+                // every other name there is refused.
+                None if !bound.is_empty()
+                    && unbound.first().map(String::as_str)
+                        == Some(claude_profiles::DEFAULT_PROFILE) =>
+                {
+                    message.push_str(
+                        " The first name given is `default`, which is never bound into a \
+                         set, so this session runs on your host's ordinary Claude login \
+                         rather than on any of these.",
+                    )
+                }
                 None if !bound.is_empty() => message.push_str(
-                    " The first name given is not among them, so this session is \
-                     refused rather than run as some other account.",
+                    " The first name given is not among them, so nothing was selected: \
+                     the session is refused rather than run as some other account, \
+                     unless this container's own Claude configuration is one dl does \
+                     not forward into, which gets its own notice.",
                 ),
                 None => {}
             }
@@ -6271,6 +6287,47 @@ mod tests {
         assert!(
             line.contains("Not bound: otter"),
             "a name that bound nothing is said, not dropped: {line}"
+        );
+    }
+
+    /// What the line says when no profile was selected, which is two different
+    /// outcomes wearing one shape: `default` first is a login the host still
+    /// forwards, any other unbound name first is a refused session.
+    #[test]
+    fn an_unselected_claude_profile_set_says_which_of_the_two_outcomes_this_is() {
+        let notice = |first: &str| {
+            launch_notice(&LaunchNotice::ClaudeProfileSetBound {
+                bound: vec!["bear".to_owned()],
+                unbound: vec![first.to_owned()],
+                selected: None,
+                target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
+                extra_binds: Vec::new(),
+                extra_binds_capped: false,
+                extra_binds_refused: false,
+                credential_binds: Vec::new(),
+            })
+            .expect("a sentence")
+        };
+
+        let default_first = notice("default");
+        assert!(
+            default_first.contains("ordinary Claude login"),
+            "`default` is skipped by the token lookup, not refused: {default_first}"
+        );
+        assert!(
+            !default_first.contains("refused"),
+            "nothing is refused here: {default_first}"
+        );
+
+        let otter_first = notice("otter");
+        assert!(
+            otter_first.contains("refused rather than run as some other account"),
+            "a name with no login behind it does refuse the session: {otter_first}"
+        );
+
+        assert!(
+            otter_first.contains("`default` is never part of a set"),
+            "and why a name went unbound at all: {otter_first}"
         );
     }
 
