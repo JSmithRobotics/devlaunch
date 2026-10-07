@@ -69,7 +69,7 @@ use crate::clients::devpod::{
     self, Call, ContainerState, EnsureProviderFailed, ListingUnreadable, NotRun, Patience,
     ProviderRegistration,
 };
-use crate::clients::devpod_home::{CreateRecord, DevpodHome, create_record};
+use crate::clients::devpod_home::{CreateRecord, DevpodHome, create_record, sole_compose_override};
 use crate::clients::docker;
 use crate::clients::gh::{self, GhEvent, StagedToken, Token, TokenLookup};
 use crate::clients::herdr;
@@ -655,6 +655,27 @@ pub enum LaunchNotice {
         name: String,
         requested: PathBuf,
         bound: PathBuf,
+    },
+    /// A named profile was asked for on a workspace devpod built from a
+    /// docker-compose devcontainer, where the mount set is generated once at the
+    /// create and every later `up` -- `--recreate` included -- is built from the
+    /// file already there.
+    ///
+    /// So this `up` cannot change which profile is mounted, which is precisely
+    /// what the other profile notices promise a `recreate` does. Said in place of
+    /// [`Self::ClaudeProfileBound`] on a create or rebuild of such a workspace.
+    ///
+    /// It does not claim the mounted profile is the wrong one: nothing on this
+    /// side of the `up` knows which profile the container holds. The probe says
+    /// that afterwards, as [`Self::ClaudeProfileMountSwitched`].
+    ///
+    /// `override_path` is the directory holding the generated override, named
+    /// because it is the evidence for the claim -- and because its absence is
+    /// what the detection turns on
+    /// ([`crate::clients::devpod_home::sole_compose_override`]).
+    ClaudeProfileMountComposeFrozen {
+        name: String,
+        override_path: PathBuf,
     },
     /// A named profile was bound in as the container's Claude configuration.
     ///
@@ -3035,25 +3056,42 @@ fn up_under_stage(
             profiles_root,
             home,
         } if creating_container => {
-            let (extra, extra_binds_capped, extra_binds_refused) =
-                resolve_dangling_symlink_binds(source, profiles_root.as_deref(), home.as_deref());
-            let mut extra_binds = Vec::new();
-            let mut credential_bind = None;
-            for bind in extra {
-                if bind.readonly {
-                    extra_binds.push(bind.resolved);
-                } else {
-                    credential_bind = Some(bind.resolved);
+            // Asked only where a profile is actually being bound, because the
+            // answer costs a walk of devpod's contexts.
+            let composed = request
+                .naming
+                .identity()
+                .and_then(|identity| sole_compose_override(host.devpod_home.as_ref(), identity));
+            if let Some(override_path) = composed {
+                notices.say(LaunchNotice::ClaudeProfileMountComposeFrozen {
+                    name: name.clone(),
+                    override_path,
+                });
+            } else {
+                let (extra, extra_binds_capped, extra_binds_refused) =
+                    resolve_dangling_symlink_binds(
+                        source,
+                        profiles_root.as_deref(),
+                        home.as_deref(),
+                    );
+                let mut extra_binds = Vec::new();
+                let mut credential_bind = None;
+                for bind in extra {
+                    if bind.readonly {
+                        extra_binds.push(bind.resolved);
+                    } else {
+                        credential_bind = Some(bind.resolved);
+                    }
                 }
+                notices.say(LaunchNotice::ClaudeProfileBound {
+                    name: name.clone(),
+                    source: source.clone(),
+                    extra_binds,
+                    extra_binds_capped,
+                    extra_binds_refused,
+                    credential_bind,
+                });
             }
-            notices.say(LaunchNotice::ClaudeProfileBound {
-                name: name.clone(),
-                source: source.clone(),
-                extra_binds,
-                extra_binds_capped,
-                extra_binds_refused,
-                credential_bind,
-            });
         }
         ClaudeProfileMount::UnsafeSource { name, source } => {
             notices.say(LaunchNotice::ClaudeProfileSourceUnsafe {
@@ -7478,6 +7516,7 @@ mod tests {
 
     use devlaunch_test_support::{FakeRunner, Response, WorkspaceState};
 
+    use crate::clients::devpod_home::with_compose_override;
     use crate::clients::git::Git;
     use crate::domain::config::WorktreeConfig;
     use crate::domain::model::WorktreeInfo;
@@ -11561,6 +11600,63 @@ mod tests {
             up.iter().any(|arg| arg
                 == &format!("CLAUDE_CONFIG_DIR={}", provision::CLAUDE_CONFIG_TARGET)),
             "no CLAUDE_CONFIG_DIR pointed at the mount target: {up:?}"
+        );
+    }
+
+    /// MEASURED against devpod 0.26.1: `dl <ws> recreate --claude-profile X` on a
+    /// docker-compose devcontainer left the profile the container was created with
+    /// bound, because devpod rebuilds the project from the compose override it
+    /// generated at the create. So the one notice that promises "changing profile
+    /// is a `recreate`" must not be the notice such a workspace gets.
+    #[test]
+    fn a_compose_workspace_is_not_promised_a_profile_change_a_recreate_cannot_make() {
+        let scene = Scene::new().naming_a_claude_profile("bear", true);
+        let override_path = with_compose_override(
+            scene
+                .host
+                .devpod_home
+                .as_ref()
+                .expect("a scratch devpod home"),
+            "default",
+            "myws",
+        );
+        scene.runner.script(["devpod", "up"], Response::exited(0));
+
+        let mut context = CommandContext::new(&scene.runner);
+        let token = HostToken::new();
+        let request = UpRequest::new(
+            "myws",
+            Naming::Known {
+                workspace_id: "myws",
+            },
+        )
+        .with_rebuild(Rebuild::Recreate);
+        let mut notices = Vec::new();
+
+        let outcome = workspace_up(
+            &mut context,
+            &scene.host,
+            &token,
+            &ClaudeSeen::new(),
+            &NoProvisioning,
+            &request,
+            None,
+            &mut notices,
+        );
+
+        assert_eq!(outcome, Ok(UpOutcome::Started));
+        assert!(
+            notices.contains(&LaunchNotice::ClaudeProfileMountComposeFrozen {
+                name: "bear".to_owned(),
+                override_path,
+            }),
+            "{notices:?}"
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| matches!(notice, LaunchNotice::ClaudeProfileBound { .. })),
+            "{notices:?}"
         );
     }
 

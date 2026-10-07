@@ -3212,10 +3212,25 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
         } => format!(
             "Claude profile {}: this container's Claude configuration is still {}, not {} -- a \
              `--mount` only lands when devpod creates a container, so a profile named after \
-             this one was created keeps the old one. `recreate` is what moves it.",
+             this one was created keeps the old one. `recreate` is what moves it, except on a \
+             docker-compose devcontainer: devpod rebuilds those from the mount set it \
+             generated at create time, so there only a fresh workspace moves it.",
             python_repr(name),
             bound.display(),
             requested.display()
+        ),
+        LaunchNotice::ClaudeProfileMountComposeFrozen {
+            name,
+            override_path,
+        } => format!(
+            "Claude profile {}: this workspace is a docker-compose devcontainer, and devpod \
+             rebuilds it from the mount set it generated at create time ({}), so this launch \
+             cannot change which profile is mounted -- the container keeps whichever it was \
+             created with. If that is not {}, no `recreate` moves it: remove the workspace \
+             (`dl <workspace> rm`) and open it again with --claude-profile.",
+            python_repr(name),
+            override_path.display(),
+            python_repr(name)
         ),
         LaunchNotice::ClaudeProfileBound {
             name,
@@ -3229,7 +3244,8 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
                 "Claude profile {}: {} is now the container's Claude configuration, so \
                  `claude` there runs as that account and refreshes its own login in place. \
                  Changing profile is a `recreate`, since a mount lands only when the \
-                 container is created.",
+                 container is created -- but not on a docker-compose devcontainer, which \
+                 devpod rebuilds from the mount set it generated at create time.",
                 python_repr(name),
                 source.display()
             );
@@ -6025,9 +6041,42 @@ mod tests {
                 "Claude profile 'otter': this container's Claude configuration is still \
                  /home/me/.claude-profiles/bear, not /home/me/.claude-profiles/otter -- a \
                  `--mount` only lands when devpod creates a container, so a profile named after \
-                 this one was created keeps the old one. `recreate` is what moves it."
+                 this one was created keeps the old one. `recreate` is what moves it, except on \
+                 a docker-compose devcontainer: devpod rebuilds those from the mount set it \
+                 generated at create time, so there only a fresh workspace moves it."
                     .to_owned()
             )
+        );
+    }
+
+    /// The one place dl can see that a `recreate` will not move the profile, so
+    /// the line withdraws the promise the other profile notices make rather than
+    /// repeating it: it names the generated override it read that from, and the
+    /// one thing that does work.
+    #[test]
+    fn a_compose_workspace_is_told_a_recreate_will_not_move_its_profile() {
+        let line = launch_notice(&LaunchNotice::ClaudeProfileMountComposeFrozen {
+            name: "kinisi".to_owned(),
+            override_path: std::path::PathBuf::from("/home/me/.devpod/agent/ws/.docker-compose"),
+        })
+        .expect("a sentence");
+
+        assert!(line.contains("Claude profile 'kinisi'"), "{line}");
+        assert!(
+            line.contains("/home/me/.devpod/agent/ws/.docker-compose"),
+            "the evidence for the claim: {line}"
+        );
+        assert!(
+            line.contains("no `recreate` moves it"),
+            "the promise is withdrawn, not repeated: {line}"
+        );
+        assert!(
+            line.contains("`dl <workspace> rm`"),
+            "and what does work is named: {line}"
+        );
+        assert!(
+            !line.contains("is now the container's Claude configuration"),
+            "nothing was bound by this launch: {line}"
         );
     }
 

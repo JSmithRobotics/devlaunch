@@ -191,6 +191,13 @@ bind lands only when the container is created, so switching to a different
 profile on a workspace that already exists is a `recreate`; a `restart` keeps
 whichever profile the container was created with.
 
+A docker-compose devcontainer is the exception, and a `recreate` does not move
+the profile there. devpod generates that project's mount set once, at the create,
+and every later `up` builds from the file it generated, so the container keeps the
+profile it was created with and only a fresh workspace changes it. `dl` says that
+in place of the usual "now the container's Claude configuration" line whenever it
+can see the generated file, which is whenever the provider builds on this host.
+
 Pointing Claude Code at the bind takes more than the workspace environment devpod
 carries. That environment is applied where the devcontainer's own is, so a repo
 that declares `CLAUDE_CONFIG_DIR` for itself (a compose file's `environment:`

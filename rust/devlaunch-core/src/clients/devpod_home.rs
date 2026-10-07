@@ -125,13 +125,28 @@ impl DevpodHome {
     /// [`crate::domain::locks`] argues against at length. Naming only the safe one
     /// here is what keeps a caller from reaching for whichever it remembers.
     fn busy_marker(&self, context: &str, workspace_id: &str) -> PathBuf {
+        self.agent_workspace_dir(context, workspace_id)
+            .join("workspace.lock")
+    }
+
+    /// One workspace's directory under devpod's *agent* tree, which is a second
+    /// layout beside [`Self::workspace_dir`] and not a spelling of it: the agent's
+    /// copy lives on whichever machine builds the container, so it is under this
+    /// home only for a provider whose agent runs here.
+    fn agent_workspace_dir(&self, context: &str, workspace_id: &str) -> PathBuf {
         self.root
             .join("agent")
             .join("contexts")
             .join(context)
             .join("workspaces")
             .join(workspace_id)
-            .join("workspace.lock")
+    }
+
+    /// Where devpod generates this workspace's docker-compose overrides, which is
+    /// a directory only a compose devcontainer has.
+    fn compose_override(&self, context: &str, workspace_id: &str) -> PathBuf {
+        self.agent_workspace_dir(context, workspace_id)
+            .join(".docker-compose")
     }
 
     /// devpod's record of a *completed* create for one workspace.
@@ -330,6 +345,32 @@ pub(crate) fn sole_busy_marker(
     Some(home.busy_marker(&context, workspace_id))
 }
 
+/// The generated compose override devpod rebuilds this workspace from, if it has
+/// one.
+///
+/// Its presence is what tells a compose devcontainer from a single-container one
+/// with nothing running and nothing asked of devpod. devpod writes the override
+/// at the create and every later `up` -- `--recreate` included -- builds from the
+/// file already there, so a `--mount` added after the create never reaches the
+/// container. Measured against devpod 0.26.1: a `recreate --claude-profile`
+/// against a compose workspace left the profile it was created with bound, over
+/// an override file five days older than the container.
+///
+/// Nothing for every ambiguity [`sole_busy_marker`] answers nothing to, and for
+/// one case that is not an ambiguity: the agent tree is on whichever machine
+/// builds the container, so a workspace on a remote provider keeps it there. A
+/// caller must read `None` as "not known to be compose", never as "single
+/// container".
+pub(crate) fn sole_compose_override(
+    devpod_home: Option<&DevpodHome>,
+    workspace_id: &str,
+) -> Option<PathBuf> {
+    let home = devpod_home?;
+    let context = home.sole_context_holding(workspace_id)?;
+    let override_dir = home.compose_override(&context, workspace_id);
+    override_dir.is_dir().then_some(override_dir)
+}
+
 /// What removing devpod's busy marker for one workspace came to.
 ///
 /// Four ways and not a `Result`, because two of them are neither a success nor a
@@ -426,6 +467,24 @@ pub(crate) fn devpod_home_with(entries: &[(&str, &str, Option<()>)]) -> ScratchH
         }
     }
     ScratchHome { _dir: dir, home }
+}
+
+/// A record for this workspace plus the generated compose override beside it,
+/// for the tests that need one to read as a compose devcontainer. Spelled here
+/// with the rest of the layout rather than in the flow whose tests want it.
+#[cfg(test)]
+pub(crate) fn with_compose_override(
+    home: &DevpodHome,
+    context: &str,
+    workspace_id: &str,
+) -> PathBuf {
+    let record = home.record(context, workspace_id);
+    std::fs::create_dir_all(record.parent().expect("a record directory"))
+        .expect("a record directory");
+    std::fs::write(record, "{}").expect("a record");
+    let override_dir = home.compose_override(context, workspace_id);
+    std::fs::create_dir_all(&override_dir).expect("a compose override directory");
+    override_dir
 }
 
 /// The `flock` devpod blocks on, created empty, for the one test that has to
@@ -548,6 +607,26 @@ mod tests {
         assert_eq!(sole_busy_marker(Some(&home), "myws"), None);
         assert_eq!(sole_busy_marker(Some(&home), "other"), None);
         assert_eq!(sole_busy_marker(None, "myws"), None);
+    }
+
+    /// The one fact on this host that tells a compose devcontainer from a
+    /// single-container one, and the three ways of not having it: no generated
+    /// override, no record under any single context, and no devpod home at all.
+    /// Each of those must read the same as a single container's `None`, because
+    /// the caller's only use for an answer is to stop promising a `recreate`.
+    #[test]
+    fn a_compose_workspace_is_the_one_with_a_generated_compose_override() {
+        let home = devpod_home_with(&[("default", "plain", Some(()))]);
+
+        assert_eq!(sole_compose_override(Some(&home), "plain"), None);
+        assert_eq!(sole_compose_override(Some(&home), "unknown"), None);
+        assert_eq!(sole_compose_override(None, "composed"), None);
+
+        let override_dir = with_compose_override(&home, "default", "composed");
+        assert_eq!(
+            sole_compose_override(Some(&home), "composed"),
+            Some(override_dir)
+        );
     }
 
     #[test]
