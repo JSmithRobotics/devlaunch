@@ -2023,6 +2023,22 @@ impl ClaudeMountFacts {
     }
 }
 
+impl ClaudeMountFacts {
+    /// The one fact a host-side record carries, with every other left unknown.
+    ///
+    /// [`crate::flows::provision::verdict_cache::VerdictCache::remembered_claude_mounted`]
+    /// is the whole of what a launch that ran no probe can know, and it is enough
+    /// for the decision that needs it: the bind lands only at container creation
+    /// and the memo's anchor expires with the container, so "the target is mounted"
+    /// survives a warm attach where a uid or a source path would be a guess.
+    pub(crate) fn remembered(target_mounted: Option<bool>) -> Self {
+        Self {
+            target_mounted,
+            ..Self::default()
+        }
+    }
+}
+
 #[cfg(test)]
 impl ClaudeMountFacts {
     /// Build one directly, for a test that wants to name a row of the mount
@@ -3196,14 +3212,18 @@ fn provision(
         return Ok(Pass {
             provisioning: Provisioning::CachedProvisioned,
             claude: verdicts.remembered_claude(workspace),
-            // No probe ran, so no mount facts either -- only a live pass observes
-            // those. Consequence: `Switches` carries no profile name, so a
-            // relaunch that names a different `--claude-profile` against a warm,
-            // trusted cache has nothing here to notice the change with --
+            // No probe ran, so every mount fact but one comes back unknown. The one
+            // is whether the target is mounted at all, which the memo carries under
+            // the same anchor and which a container cannot change without being
+            // rebuilt. Consequence of the rest: `Switches` carries no profile name,
+            // so a relaunch that names a different `--claude-profile` against a
+            // warm, trusted cache has nothing here to notice the change with --
             // `claude_profile_mount_notice` never runs, because this pass never
             // ran the probe it needs. That is the headline case this gap costs:
             // a warm restart naming a new profile silently keeps the old mount.
-            claude_mount: ClaudeMountFacts::default(),
+            claude_mount: ClaudeMountFacts::remembered(
+                verdicts.remembered_claude_mounted(workspace),
+            ),
         });
     }
 
@@ -3271,7 +3291,7 @@ fn run_the_pass(
             // left the *previous* pass's answer standing. A container recreated with
             // a `~/.claude` mount plus one refused trip kept an `ours` that every
             // warm attach afterwards believed.
-            remember(verdicts, workspace, None, observed);
+            remember(verdicts, workspace, None, None, observed);
             return refused(workspace, refusal, events);
         }
     };
@@ -3280,7 +3300,13 @@ fn run_the_pass(
     // of them ends in a session and the answer does not depend on which. A pass that
     // could not tell writes that too, so a stale answer cannot outlive the container
     // it was true of.
-    remember(verdicts, workspace, found.claude, observed);
+    remember(
+        verdicts,
+        workspace,
+        found.claude,
+        found.claude_mount.target_mounted(),
+        observed,
+    );
 
     if let ToolsSwitch::Skip = switches.tools {
         events.say(ProvisionEvent::ProvisioningDisabled {
@@ -3442,10 +3468,11 @@ fn remember(
     verdicts: Option<&VerdictCache>,
     workspace: &str,
     claude: Option<ClaudeConfig>,
+    mounted: Option<bool>,
     observed: Option<Observed>,
 ) {
     if let (Some(verdicts), Some(observed)) = (verdicts, observed) {
-        verdicts.remember_claude(workspace, claude, observed);
+        verdicts.remember_claude(workspace, claude, mounted, observed);
     }
 }
 
@@ -7119,7 +7146,7 @@ fi
             Some(crate::clients::devpod_home::DevpodHome::at(home.path())),
         );
         let observed = verdicts.observe("myws").expect("an anchor");
-        verdicts.remember_claude("myws", Some(ClaudeConfig::Ours), observed);
+        verdicts.remember_claude("myws", Some(ClaudeConfig::Ours), None, observed);
         assert_eq!(
             verdicts.remembered_claude("myws"),
             Some(ClaudeConfig::Ours),

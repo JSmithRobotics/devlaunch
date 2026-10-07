@@ -2178,13 +2178,16 @@ impl ClaudeObservation {
         Self { config, mount }
     }
 
-    /// From [`Provision::remembered_claude`], which only ever answers the
-    /// ownership question -- a host-side record has no live mount to report, so
-    /// every mount fact reads "unknown" here rather than a guessed one.
-    fn remembered(config: Option<ClaudeConfig>) -> Self {
+    /// From [`Provision::remembered_claude`] and
+    /// [`Provision::remembered_claude_mounted`], which are the two facts a
+    /// host-side record keeps. Whether the target is mounted survives because the
+    /// bind cannot change without the container being rebuilt, which expires the
+    /// memo; every other mount fact describes a live directory nothing here has
+    /// looked at, and reads "unknown" rather than a guessed one.
+    fn remembered(config: Option<ClaudeConfig>, target_mounted: Option<bool>) -> Self {
         Self {
             config,
-            mount: ClaudeMountFacts::default(),
+            mount: ClaudeMountFacts::remembered(target_mounted),
         }
     }
 
@@ -2595,6 +2598,21 @@ pub trait Provision {
         None
     }
 
+    /// Whether the host's records say the profile target was mounted in the
+    /// container standing now.
+    ///
+    /// A second question beside [`Self::remembered_claude`] for
+    /// [`Self::last_claude_mount`]'s reason, and asked on the same fast-attach arm:
+    /// the warm `dl <ws> -- cmd` that runs no pass is the loop a script lives in,
+    /// and it is the launch that most needs
+    /// [`ClaudeConfigEnv`] to fire.
+    ///
+    /// `None` -- "no record, so leave the container's own answer standing" -- for
+    /// every implementation with nothing remembered.
+    fn remembered_claude_mounted(&self, _workspace_id: &str) -> Option<bool> {
+        None
+    }
+
     /// The raw mount facts the most recent [`Self::provision_tools`] call
     /// observed, alongside the [`ClaudeConfig`] it already returned there -- see
     /// [`ClaudeMountFacts`]. A second question beside `provision_tools` rather
@@ -2787,6 +2805,10 @@ impl Provision for ToolProvisioning<'_> {
 
     fn remembered_claude(&self, workspace_id: &str) -> Option<ClaudeConfig> {
         self.verdicts.remembered_claude(workspace_id)
+    }
+
+    fn remembered_claude_mounted(&self, workspace_id: &str) -> Option<bool> {
+        self.verdicts.remembered_claude_mounted(workspace_id)
     }
 
     fn last_claude_mount(&self) -> ClaudeMountFacts {
@@ -3662,8 +3684,63 @@ impl CodexLogin {
     }
 }
 
+/// Whether the payload sets `CLAUDE_CONFIG_DIR` for the command it wraps.
+///
+/// `--workspace-env` ([`ClaudeProfileMount::up_args`]) is not enough on its own,
+/// and that is the whole reason this exists. devpod's workspace environment is
+/// applied where the devcontainer's own is, so a repo that declares the variable
+/// itself beats it: `kinisi_ros`'s compose files pin
+/// `CLAUDE_CONFIG_DIR=/home/<user>/.claude`, and a container launched with
+/// `--claude-profile` there reports the host default while the profile sits bound
+/// and usable at [`provision::CLAUDE_CONFIG_TARGET`]. An assignment in the shell
+/// dl's own command runs in is applied last, so it wins over anything the image
+/// or the compose file declared.
+///
+/// It does not reach a session dl does not start a command for -- a bare
+/// interactive attach, or a `claude` somebody runs inside the workspace -- which
+/// is the same boundary the title variable's prefix keeps (`aid`'s `AGENTS`
+/// table) and for the same reason: a prefix is dl's own command, not a rewrite of
+/// anyone else's environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClaudeConfigEnv {
+    /// Leave whatever the container resolves, which is every launch that bound no
+    /// profile.
+    Leave,
+    /// Point it at [`provision::CLAUDE_CONFIG_TARGET`].
+    Set,
+}
+
+impl ClaudeConfigEnv {
+    /// What the probe's own facts license.
+    ///
+    /// The live `target_mounted` fact and not [`ClaudeProfileMount::ensure`]'s
+    /// request, because the two differ in exactly the case that costs something:
+    /// the mount lands only at container creation, so a launch can ask for a
+    /// profile against a container that never got one, and setting the variable
+    /// there would repoint Claude Code at a directory nothing bound anything into
+    /// -- the failure [`ClaudeProfileMount::up_args`] already refuses to cause.
+    /// `None` is "the probe could not say" and is not a negative, but it is not a
+    /// licence either: unknown leaves the container's own answer standing.
+    pub(crate) fn from_mount(mount: &ClaudeMountFacts) -> Self {
+        match mount.target_mounted() {
+            Some(true) => Self::Set,
+            Some(false) | None => Self::Leave,
+        }
+    }
+}
+
+/// A wrapped command, with the one decision a transport has to agree with the
+/// payload about.
+///
+/// `claude` is carried rather than re-derived: [`SessionContext::forwarded_claude`]
+/// has to answer for the directory the command will actually read, and a transport
+/// that asked [`ClaudeConfigEnv::from_mount`] a second time would be a second copy
+/// of a fact that is free to be one.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RemotePayload(String);
+pub(crate) struct RemotePayload {
+    line: String,
+    claude: ClaudeConfigEnv,
+}
 
 impl RemotePayload {
     /// Wrap `command` for the remote shell.
@@ -3671,6 +3748,7 @@ impl RemotePayload {
         command: &RemoteCommand,
         zellij: ZellijWrap,
         codex: CodexLogin,
+        claude: ClaudeConfigEnv,
     ) -> Result<Self, UnquotableCommand> {
         // `line()` is where argv becomes one command line, and the only place it
         // does. A `Script` is already one and is passed through untouched.
@@ -3679,15 +3757,34 @@ impl RemotePayload {
         // opens a pane beside it, and the login has to happen before the command
         // that needs it. Both are prefixes, so the order they are applied in is the
         // order they run in, and codex going on last puts it first.
-        let inner = with_codex_login(&with_zellij_session(&line, zellij), codex);
+        //
+        // The config directory goes on innermost, *inside* the zellij prefix rather
+        // than in front of it, so the export reaches the command and not the zellij
+        // server: a session created by this payload would otherwise hand
+        // `CLAUDE_CONFIG_DIR` to every pane opened in it afterwards, including
+        // interactive ones, and only when this payload happened to be the one that
+        // created it.
+        let inner = with_codex_login(
+            &with_zellij_session(&with_claude_config_dir(&line, claude), zellij),
+            codex,
+        );
         let quoted = posix_quote(&inner).ok_or_else(|| UnquotableCommand {
             command: line.into_owned(),
         })?;
-        Ok(Self(format!("bash -lc {quoted}")))
+        Ok(Self {
+            line: format!("bash -lc {quoted}"),
+            claude,
+        })
     }
 
     pub(crate) fn as_str(&self) -> &str {
-        &self.0
+        &self.line
+    }
+
+    /// Whether this payload names the bound profile as the config directory, which
+    /// is what decides whether a token is forwarded over it.
+    pub(crate) fn claude_config(&self) -> ClaudeConfigEnv {
+        self.claude
     }
 }
 
@@ -3773,6 +3870,31 @@ fn with_codex_login(command: &str, codex: CodexLogin) -> String {
                  (umask 077; printf %s \"${var}\" > \"$f\"); fi; }} \
                  >/dev/null 2>&1; {command}"
             )
+        }
+    }
+}
+
+/// `command`, with the bound profile named as the config directory first.
+///
+/// `export` rather than the `VAR=value cmd` prefix form `aid` uses for
+/// `IS_SANDBOX`: that form sets the variable for one simple command, and what it
+/// would be attached to here is whatever [`with_zellij_session`] and
+/// [`with_codex_login`] left in front -- or, for a `Script`, a line dl did not
+/// write and cannot assume is one command. An export is the environment of the
+/// whole payload, which is what a `make test` that shells out to `claude` needs
+/// too.
+///
+/// `;` and not `&&` for [`with_zellij_session`]'s reason: the payload's status is
+/// the command's.
+fn with_claude_config_dir(command: &str, claude: ClaudeConfigEnv) -> String {
+    match claude {
+        ClaudeConfigEnv::Leave => command.to_owned(),
+        ClaudeConfigEnv::Set => {
+            // A constant of safe characters, so quoting leaves it bare and cannot
+            // fail; the same call `with_zellij_session` makes about its session
+            // name.
+            let target = posix_quote(provision::CLAUDE_CONFIG_TARGET).unwrap_or_default();
+            format!("export CLAUDE_CONFIG_DIR={target}; {command}")
         }
     }
 }
@@ -4093,10 +4215,30 @@ impl<'a> SessionContext<'a> {
     /// to forward either way.
     fn forwarded_claude(
         &self,
+        claude: ClaudeConfigEnv,
         notices: &mut dyn Notices<LaunchNotice>,
     ) -> Result<Option<claude::Token>, SessionRefused> {
         let seen = self.claude_seen.get();
-        match seen.config() {
+        // What the session will actually read, which is the payload's export where
+        // there is one and the probe's classification otherwise. The two differ in
+        // exactly the case [`ClaudeConfigEnv`] exists for: a devcontainer that pins
+        // `CLAUDE_CONFIG_DIR` leaves the probe reporting `Ours` or `Foreign` over a
+        // mount that the export is about to make the effective one. Forwarding a
+        // token there would put a credential that cannot refresh over one that can,
+        // which is the whole reason the `Bound` arm forwards nothing.
+        //
+        // What this cannot yet tell apart is a bind the container's user cannot
+        // read: the probe reports writability and ownership for the directory the
+        // devcontainer pinned, never for the target, so a pinned container whose
+        // uid does not own the profile is pointed at an unreadable directory with
+        // no token to fall back on. Identical to what the same container gets today
+        // with no pin at all, so not a regression -- but it is why the target's own
+        // uid is worth probing.
+        let effective = match claude {
+            ClaudeConfigEnv::Set => Some(ClaudeConfig::Bound),
+            ClaudeConfigEnv::Leave => seen.config(),
+        };
+        match effective {
             Some(ClaudeConfig::Ours) => {}
             Some(ClaudeConfig::Bound) => {
                 if let Some(name) = self.host.claude.profile.as_deref() {
@@ -4263,7 +4405,20 @@ fn claude_profile_mount_notice(
             });
         }
     }
-    if mount.writable() == Some(false)
+    // Never when the writability and uid facts are known to be about some other
+    // directory. They describe whatever `cfg_dir` the probe resolved, which is the
+    // target on a container that reads it and the declared path on one whose
+    // devcontainer pins `CLAUDE_CONFIG_DIR` -- and [`ClaudeConfigEnv`] brings that
+    // second kind here too, where a mismatch reported from the pinned directory's
+    // uids would name the bind and quote numbers that have nothing to do with it.
+    //
+    // An unresolved `cfg_dir` passes, rather than being a third way to be unsure:
+    // the probe answers `claudewritable` with `unknown` whenever it has no
+    // directory to ask about, so `Some(false)` here already implies one.
+    if mount
+        .dir()
+        .is_none_or(|dir| dir == provision::CLAUDE_CONFIG_TARGET)
+        && mount.writable() == Some(false)
         && let (Some(container_uid), Some(dir_uid)) = (mount.container_uid(), mount.dir_uid())
     {
         return Some(LaunchNotice::ClaudeProfileMountUidMismatch {
@@ -4312,6 +4467,7 @@ pub(crate) fn workspace_ssh(
                 command,
                 ZellijWrap::from_host(session.host),
                 CodexLogin::from_agent(agent),
+                ClaudeConfigEnv::from_mount(session.claude_seen.get().mount()),
             )
             .map_err(SessionRefused::Unquotable)?,
         ),
@@ -4596,7 +4752,10 @@ fn devpod_session(
     // Resolved before the argv is built, so a refusal costs no process: `?` here
     // leaves devpod unrun rather than spawning a session that would forward the wrong
     // account.
-    let claude_token = session.forwarded_claude(notices)?;
+    let claude_token = session.forwarded_claude(
+        payload.map_or(ClaudeConfigEnv::Leave, RemotePayload::claude_config),
+        notices,
+    )?;
     let codex_token = session.forwarded_codex(visibility.agent, notices);
     let forwarding = codex::extend_ssh_forwarding(
         claude::extend_ssh_forwarding(
@@ -4657,7 +4816,7 @@ fn ssh_with_terminal(
     // permit list `Reuse::derive` keys the control socket on is the same list the
     // two credentials built (`clients::herdr`). The manager's coordinates, unlike
     // the name, do cross the transport and so do join that list.
-    let claude_token = session.forwarded_claude(notices)?;
+    let claude_token = session.forwarded_claude(payload.claude_config(), notices)?;
     let codex_token = session.forwarded_codex(visible.agent, notices);
     let forwarding = herdr::extend_openssh_forwarding(
         codex::extend_openssh_forwarding(
@@ -7024,6 +7183,8 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
         if self.claude_seen.get().config().is_none() {
             self.claude_seen.set(ClaudeObservation::remembered(
                 self.provision.remembered_claude(placement.workspace_id()),
+                self.provision
+                    .remembered_claude_mounted(placement.workspace_id()),
             ));
         }
         // Both names, from the one `placement.title()` and the one gate behind it,
@@ -7630,6 +7791,9 @@ mod tests {
         /// What the host's records say about a workspace no pass ran for, which is
         /// what `dl`'s real implementation reads out of its verdict cache.
         claude_remembered: Option<ClaudeConfig>,
+        /// What those same records say about the profile mount, which is the one
+        /// mount fact they carry.
+        claude_remembered_mounted: Option<bool>,
         /// The mount facts the same pass observed, alongside `claude_seen` --
         /// unknown by default, like every fact [`ClaudeMountFacts`] carries.
         claude_mount: ClaudeMountFacts,
@@ -7689,6 +7853,10 @@ mod tests {
 
         fn remembered_claude(&self, _workspace_id: &str) -> Option<ClaudeConfig> {
             self.claude_remembered
+        }
+
+        fn remembered_claude_mounted(&self, _workspace_id: &str) -> Option<bool> {
+            self.claude_remembered_mounted
         }
 
         fn last_claude_mount(&self) -> ClaudeMountFacts {
@@ -11547,6 +11715,7 @@ mod tests {
             &RemoteCommand::argv(&["echo", "hi"]),
             ZellijWrap::Off,
             CodexLogin::Off,
+            ClaudeConfigEnv::Leave,
         )
         .expect("quotable");
 
@@ -11560,6 +11729,7 @@ mod tests {
             &RemoteCommand::argv(&["claude", "fix the bug"]),
             ZellijWrap::Off,
             CodexLogin::Off,
+            ClaudeConfigEnv::Leave,
         )
         .expect("quotable");
 
@@ -11575,6 +11745,7 @@ mod tests {
             &RemoteCommand::argv(&["echo", "hi"]),
             ZellijWrap::Beside,
             CodexLogin::Off,
+            ClaudeConfigEnv::Leave,
         )
         .expect("quotable");
 
@@ -11591,6 +11762,7 @@ mod tests {
             &RemoteCommand::argv(&["codex", "--yolo"]),
             ZellijWrap::Off,
             CodexLogin::from_agent(Some("codex")),
+            ClaudeConfigEnv::Leave,
         )
         .expect("quotable");
         // The write, the guard that keeps it off somebody else's login, and the
@@ -11612,6 +11784,7 @@ mod tests {
                 &RemoteCommand::argv(&["claude"]),
                 ZellijWrap::Off,
                 CodexLogin::from_agent(other),
+                ClaudeConfigEnv::Leave,
             )
             .expect("quotable");
             assert_eq!(payload.as_str(), "bash -lc claude", "{other:?}");
@@ -11676,6 +11849,7 @@ mod tests {
             &RemoteCommand::argv(&["codex"]),
             ZellijWrap::Beside,
             CodexLogin::Before,
+            ClaudeConfigEnv::Leave,
         )
         .expect("quotable");
         let line = payload.as_str();
@@ -11684,6 +11858,48 @@ mod tests {
             .expect("a login");
         let zellij = line.find("zellij attach").expect("a session");
         assert!(login < zellij, "{line}");
+    }
+
+    /// A devcontainer that declares `CLAUDE_CONFIG_DIR` itself beats
+    /// `--workspace-env`, so the bound profile has to be named again in the shell
+    /// the payload runs in. Inside the zellij prefix and not in front of it: the
+    /// session this payload may create outlives it, and panes opened in it later
+    /// are nobody's command to rewrite.
+    #[test]
+    fn a_bound_claude_profile_is_exported_for_the_command_and_not_the_zellij_server() {
+        let mounted = ClaudeMountFacts::synthetic(Some(true), None, None, None, None);
+        let payload = RemotePayload::wrap(
+            &RemoteCommand::argv(&["make", "test"]),
+            ZellijWrap::Beside,
+            CodexLogin::Off,
+            ClaudeConfigEnv::from_mount(&mounted),
+        )
+        .expect("quotable");
+        let line = payload.as_str();
+        let export = line
+            .find(&format!(
+                "export CLAUDE_CONFIG_DIR={}",
+                provision::CLAUDE_CONFIG_TARGET
+            ))
+            .expect("the export");
+        let zellij = line.find("zellij attach").expect("a session");
+        let command = line.find("make test").expect("the command");
+        assert!(zellij < export && export < command, "{line}");
+    }
+
+    /// The probe's live fact licenses the export, never the request: a launch that
+    /// names a profile against a container the mount never landed in would
+    /// otherwise point Claude Code at an empty directory.
+    #[test]
+    fn an_unmounted_claude_profile_target_exports_nothing() {
+        for target_mounted in [Some(false), None] {
+            let facts = ClaudeMountFacts::synthetic(target_mounted, None, None, None, None);
+            assert_eq!(
+                ClaudeConfigEnv::from_mount(&facts),
+                ClaudeConfigEnv::Leave,
+                "{target_mounted:?}"
+            );
+        }
     }
 
     #[test]
@@ -12081,7 +12297,8 @@ mod tests {
             RemotePayload::wrap(
                 &RemoteCommand::argv(&["echo", "\0hi"]),
                 ZellijWrap::Off,
-                CodexLogin::Off
+                CodexLogin::Off,
+                ClaudeConfigEnv::Leave,
             ),
             Err(UnquotableCommand {
                 command: "echo '\0hi'".to_owned()
@@ -12262,6 +12479,7 @@ mod tests {
             &RemoteCommand::argv(&["claude"]),
             ZellijWrap::Off,
             CodexLogin::Off,
+            ClaudeConfigEnv::Leave,
         )
         .expect("quotable");
         assert_eq!(
@@ -12316,6 +12534,7 @@ mod tests {
             &RemoteCommand::argv(&["claude"]),
             ZellijWrap::Off,
             CodexLogin::Off,
+            ClaudeConfigEnv::Leave,
         )
         .expect("quotable");
         assert_eq!(
@@ -12356,6 +12575,7 @@ mod tests {
             &RemoteCommand::argv(&["claude"]),
             ZellijWrap::Off,
             CodexLogin::Off,
+            ClaudeConfigEnv::Leave,
         )
         .expect("quotable");
         assert_eq!(
@@ -12389,6 +12609,7 @@ mod tests {
             &RemoteCommand::argv(&["claude"]),
             ZellijWrap::Off,
             CodexLogin::Off,
+            ClaudeConfigEnv::Leave,
         )
         .expect("quotable");
         assert_eq!(
@@ -12449,11 +12670,22 @@ mod tests {
         command: Option<&RemoteCommand>,
         seen: Option<ClaudeConfig>,
     ) -> Vec<String> {
+        a_session_seeing_mount(scene, command, seen, None)
+    }
+
+    /// The same, naming the profile mount the host's records remember as well --
+    /// the warm attach's whole evidence for [`ClaudeConfigEnv`].
+    fn a_session_seeing_mount(
+        scene: &Scene,
+        command: Option<&RemoteCommand>,
+        seen: Option<ClaudeConfig>,
+        mounted: Option<bool>,
+    ) -> Vec<String> {
         let token = HostToken::new();
         let mut notices = no_notices();
         let mut said = Vec::new();
         let claude_seen = ClaudeSeen::new();
-        claude_seen.set(ClaudeObservation::remembered(seen));
+        claude_seen.set(ClaudeObservation::remembered(seen, mounted));
         let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
         let _ = workspace_ssh(
             &context,
@@ -12498,6 +12730,37 @@ mod tests {
         assert!(
             argv.contains(&"env:not-a-real-token".to_owned()),
             "{argv:?}"
+        );
+    }
+
+    /// The warm `dl <ws> -- cmd` runs no pass, so the host's own record of the
+    /// mount is the whole of its evidence. Without it the fix would cover only the
+    /// launch that created the container, and the "start once, then run many" loop
+    /// of docs/agents-using-dl.md would see the profile bound and unread on every
+    /// call after the first.
+    #[test]
+    fn a_warm_session_over_a_remembered_mount_exports_the_config_dir_and_forwards_nothing() {
+        let (scene, _home) =
+            with_claude_login(Scene::new().with_running("myws"), "not-a-real-secret-token");
+        let argv = a_session_seeing_mount(
+            &scene,
+            Some(&RemoteCommand::argv(&["make", "test"])),
+            Some(ClaudeConfig::Ours),
+            Some(true),
+        );
+        assert!(
+            argv.iter().any(|arg| arg.contains(&format!(
+                "export CLAUDE_CONFIG_DIR={}",
+                provision::CLAUDE_CONFIG_TARGET
+            ))),
+            "{argv:?}"
+        );
+        // The export makes the bind the directory Claude Code reads, so the token
+        // the `Ours` classification would have forwarded would sit over a credential
+        // that can refresh itself.
+        assert!(
+            argv.iter().any(|arg| arg == "env:"),
+            "a token was forwarded over the mount: {argv:?}"
         );
     }
 
@@ -12603,7 +12866,10 @@ mod tests {
         let token = HostToken::new();
         let mut notices = no_notices();
         let claude_seen = ClaudeSeen::new();
-        claude_seen.set(ClaudeObservation::remembered(Some(ClaudeConfig::Ours)));
+        claude_seen.set(ClaudeObservation::remembered(
+            Some(ClaudeConfig::Ours),
+            None,
+        ));
         let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
         workspace_ssh(&context, "myws", command, None, &mut |_| {}, &mut notices)
     }
@@ -15448,6 +15714,58 @@ mod tests {
                 .get(claude::TOKEN_VAR)
                 .map(String::as_str),
             Some("not-a-real-warm-token")
+        );
+    }
+
+    /// The same path, carrying the other fact the records keep: a container the
+    /// records say has the profile mounted gets the export, so the loop a script
+    /// runs after its one launch reads the bound profile rather than whatever the
+    /// devcontainer declared.
+    #[test]
+    fn a_warm_attach_exports_the_config_dir_the_host_remembers_a_mount_for() {
+        let workspace =
+            WorkspaceId::new("octocat", "Hello-World", "master").expect("a safe triple");
+        let scene = Scene::new().with_running(workspace.value());
+        let updater = SelfInvocation::new("dl");
+        let completion = scene.cache_dir().join("completion.json");
+        let mut parts = launching(&scene.runner, &updater, &completion);
+        parts.provision.claude_remembered = Some(ClaudeConfig::Ours);
+        parts.provision.claude_remembered_mounted = Some(true);
+        let mut cold = NeverCold;
+        let mut launch = Launch::new(
+            &mut parts.context,
+            &mut parts.refresh,
+            &mut cold,
+            &parts.provision,
+            &scene.host,
+            &mut parts.chatter,
+            &mut parts.said,
+        );
+
+        let launched = launch.run(
+            "octocat/Hello-World@master",
+            &LaunchVerb::Attach {
+                command: Some(RemoteCommand::argv(&["true"])),
+            },
+            None,
+        );
+        assert_eq!(
+            launched,
+            Ok(Launched::Session(Session::RemoteExit { status: 0 }))
+        );
+
+        let ssh = scene
+            .runner
+            .calls_to("devpod")
+            .into_iter()
+            .find(|call| call.args().first().map(String::as_str) == Some("ssh"))
+            .expect("a session");
+        assert!(
+            ssh.argv().iter().any(|arg| arg.contains(&format!(
+                "export CLAUDE_CONFIG_DIR={}",
+                provision::CLAUDE_CONFIG_TARGET
+            ))),
+            "{ssh:?}"
         );
     }
 

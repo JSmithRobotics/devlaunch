@@ -162,6 +162,7 @@ impl VerdictCache {
         &self,
         workspace_id: &str,
         claude: Option<ClaudeConfig>,
+        mounted: Option<bool>,
         observed: Observed,
     ) {
         let Observed(result_mtime) = observed;
@@ -176,6 +177,11 @@ impl VerdictCache {
                 None => MemoWord::Unknown,
             },
             result_mtime,
+            mounted: match mounted {
+                Some(true) => MemoMount::Mounted,
+                Some(false) => MemoMount::NotMounted,
+                None => MemoMount::Unknown,
+            },
         };
         let Ok(text) = serde_json::to_string(&memo) else {
             return;
@@ -191,7 +197,8 @@ impl VerdictCache {
     /// memo must not, or a workspace whose verdict was recorded before this existed
     /// would skip the pass forever and never acquire one.
     pub fn has_claude_memo(&self, workspace_id: &str) -> bool {
-        self.read_memo(workspace_id).is_some()
+        self.read_memo(workspace_id)
+            .is_some_and(|memo| memo.mounted != MemoMount::Unrecorded)
     }
 
     /// What the last pass saw of this workspace's Claude config directory.
@@ -205,11 +212,30 @@ impl VerdictCache {
     /// yet, a truncated write, a word this build has never heard of, a memo whose
     /// container is not the one standing, and the recorded `unknown` itself.
     pub fn remembered_claude(&self, workspace_id: &str) -> Option<ClaudeConfig> {
-        match self.read_memo(workspace_id)? {
+        match self.read_memo(workspace_id)?.claude {
             MemoWord::Ours => Some(ClaudeConfig::Ours),
             MemoWord::Foreign => Some(ClaudeConfig::Foreign),
             MemoWord::Bound => Some(ClaudeConfig::Bound),
             MemoWord::Unknown => None,
+        }
+    }
+
+    /// Whether the last pass found the profile target mounted in the container
+    /// standing now.
+    ///
+    /// Separate from [`Self::remembered_claude`] because the two answer different
+    /// questions and a memo can carry one without the other: a pass that could not
+    /// classify the directory may still have seen the mount, and a memo written
+    /// before this field existed carries the classification and not the mount.
+    ///
+    /// `None` for every doubt, on the same list as [`Self::remembered_claude`]'s,
+    /// and unknown is what leaves the container's own `CLAUDE_CONFIG_DIR` standing
+    /// ([`crate::flows::launch::ClaudeConfigEnv::from_mount`]).
+    pub fn remembered_claude_mounted(&self, workspace_id: &str) -> Option<bool> {
+        match self.read_memo(workspace_id)?.mounted {
+            MemoMount::Mounted => Some(true),
+            MemoMount::NotMounted => Some(false),
+            MemoMount::Unknown | MemoMount::Unrecorded => None,
         }
     }
 
@@ -219,11 +245,11 @@ impl VerdictCache {
     /// The anchor check is [`Self::trusted`]'s, deliberately spelled the same way:
     /// no `workspace_result.json` to compare against is itself a doubt, and doubt
     /// reads as no memo.
-    fn read_memo(&self, workspace_id: &str) -> Option<MemoWord> {
+    fn read_memo(&self, workspace_id: &str) -> Option<Memo> {
         let text = std::fs::read_to_string(self.memo(workspace_id)).ok()?;
         let memo: Memo = serde_json::from_str(&text).ok()?;
         let result = sole_workspace_result(self.devpod_home.as_ref(), workspace_id)?;
-        (Stamp::of(&result) == Some(memo.result_mtime)).then_some(memo.claude)
+        (Stamp::of(&result) == Some(memo.result_mtime)).then_some(memo)
     }
 
     /// Which container a pass is about to be about, read **before** it runs.
@@ -358,6 +384,16 @@ pub(crate) struct Observed(Stamp);
 struct Memo {
     claude: MemoWord,
     result_mtime: Stamp,
+    /// Whether the last pass found [`crate::flows::provision::CLAUDE_CONFIG_TARGET`]
+    /// itself mounted, which is the one mount fact a host-side record can carry
+    /// honestly: the bind lands only at container creation, and this file's anchor
+    /// already expires on a container that was rebuilt.
+    ///
+    /// Its own word rather than an `Option<Option<bool>>`, which cannot carry the
+    /// distinction: serde writes an inner `None` as `null` and reads `null` back as
+    /// the outer one, so the two absences collapse into each other on disk.
+    #[serde(default)]
+    mounted: MemoMount,
 }
 
 /// The four things a pass can have concluded about the config directory.
@@ -382,6 +418,27 @@ enum MemoWord {
     Bound,
     #[serde(rename = "unknown")]
     Unknown,
+}
+
+/// What a pass concluded about the profile mount, as the memo carries it.
+///
+/// [`Self::Unrecorded`] is the serde default and so is what a memo written before
+/// this field existed reads as. It is deliberately distinct from
+/// [`Self::Unknown`], which is a pass that ran and could not say: the first is
+/// worth one top-up to replace ([`VerdictCache::has_claude_memo`] refuses to call
+/// it a memo), the second is a settled answer and must not cost a trip every
+/// launch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+enum MemoMount {
+    #[default]
+    #[serde(rename = "unrecorded")]
+    Unrecorded,
+    #[serde(rename = "unknown")]
+    Unknown,
+    #[serde(rename = "yes")]
+    Mounted,
+    #[serde(rename = "no")]
+    NotMounted,
 }
 
 /// What one marker file says.
@@ -580,8 +637,18 @@ mod tests {
 
     /// Remember `seen` against the container standing now, as [`provision`] does.
     fn remembered_under(verdicts: &VerdictCache, workspace_id: &str, seen: Option<ClaudeConfig>) {
+        remembered_mount_under(verdicts, workspace_id, seen, None);
+    }
+
+    /// The same, naming the mount fact the memo carries beside the classification.
+    fn remembered_mount_under(
+        verdicts: &VerdictCache,
+        workspace_id: &str,
+        seen: Option<ClaudeConfig>,
+        mounted: Option<bool>,
+    ) {
         let observed = verdicts.observe(workspace_id).expect("an anchor");
-        verdicts.remember_claude(workspace_id, seen, observed);
+        verdicts.remember_claude(workspace_id, seen, mounted, observed);
     }
 
     #[test]
@@ -602,6 +669,37 @@ mod tests {
                 "a pass that could not tell still recorded an answer: {seen:?}"
             );
         }
+    }
+
+    /// The mount fact travels the same way the classification does, and a memo
+    /// written before the field existed reads as unknown rather than as no memo:
+    /// the launch that runs no pass at all is the one that needs this, and it must
+    /// not be sent back through a pass to relearn it.
+    #[test]
+    fn whether_the_profile_was_mounted_outlives_the_pass_too() {
+        for mounted in [Some(true), Some(false), None] {
+            let (_cache, _home, verdicts) = anchored();
+            remembered_mount_under(&verdicts, "ws", Some(ClaudeConfig::Ours), mounted);
+            assert_eq!(verdicts.remembered_claude_mounted("ws"), mounted);
+        }
+
+        let (_cache, _home, verdicts) = anchored();
+        let observed = verdicts.observe("ws").expect("an anchor");
+        let Observed(result_mtime) = observed;
+        write_atomically(
+            &verdicts.memo("ws"),
+            &serde_json::to_string(&serde_json::json!({
+                "claude": "ours",
+                "result_mtime": result_mtime,
+            }))
+            .expect("a memo"),
+        );
+        assert_eq!(verdicts.remembered_claude("ws"), Some(ClaudeConfig::Ours));
+        assert_eq!(verdicts.remembered_claude_mounted("ws"), None);
+        assert!(
+            !verdicts.has_claude_memo("ws"),
+            "a memo with no mount fact must cost one top-up to acquire one"
+        );
     }
 
     #[test]
