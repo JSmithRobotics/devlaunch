@@ -63,7 +63,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use super::{ClaudeConfig, ClaudeMountFacts, CodexSwitch, Switches, ToolsSwitch, ZellijSwitch};
+use super::{
+    CLAUDE_CONFIG_TARGET, ClaudeConfig, ClaudeMountFacts, CodexSwitch, Switches, ToolsSwitch,
+    ZellijSwitch,
+};
 
 use crate::clients::devpod_home::{DevpodHome, sole_workspace_result};
 
@@ -180,6 +183,12 @@ impl VerdictCache {
             dir: mount.dir().map(str::to_owned),
             source: mount.target_source().map(str::to_owned),
             binds: mount.target_binds().to_vec(),
+            unwritable_binds: mount
+                .target_binds()
+                .iter()
+                .filter(|bind| mount.bind_unwritable(bind))
+                .cloned()
+                .collect(),
             mounted: match mount.target_mounted() {
                 // Before the plain `Mounted` arm: a bind the container's user
                 // cannot write has to come back as the thing it is, or a launch
@@ -258,16 +267,31 @@ impl VerdictCache {
         // The source only where something is mounted to have one. A memo that says
         // the target is not mounted carries no bind to name.
         let source = memo.source;
-        let binds = memo.binds;
+        // A memo an older build wrote carries no bind list at all, and reading its
+        // emptiness as "there are none" would turn every container bound before
+        // this build into one nothing can be pointed at -- the single-profile
+        // layout, which is a bind at the target, read as no layout. The target is
+        // what a memo that says "mounted" and lists nothing can only have meant.
+        let unwritable = memo.unwritable_binds;
+        let binds = if memo.binds.is_empty() {
+            vec![CLAUDE_CONFIG_TARGET.to_owned()]
+        } else {
+            memo.binds
+        };
         match memo.mounted {
             MemoMount::Mounted => {
-                ClaudeMountFacts::remembered(Some(true), None, dir, source, binds)
+                ClaudeMountFacts::remembered(Some(true), None, dir, source, binds, unwritable)
             }
-            MemoMount::MountedUnwritable => {
-                ClaudeMountFacts::remembered(Some(true), Some(false), dir, source, binds)
-            }
+            MemoMount::MountedUnwritable => ClaudeMountFacts::remembered(
+                Some(true),
+                Some(false),
+                dir,
+                source,
+                binds,
+                unwritable,
+            ),
             MemoMount::NotMounted => {
-                ClaudeMountFacts::remembered(Some(false), None, dir, None, Vec::new())
+                ClaudeMountFacts::remembered(Some(false), None, dir, None, Vec::new(), Vec::new())
             }
             MemoMount::Unknown | MemoMount::Unrecorded => ClaudeMountFacts::default(),
         }
@@ -455,10 +479,23 @@ struct Memo {
     /// a bound set turns on: without it a warm attach asking for one of them would
     /// export `CLAUDE_CONFIG_DIR` at a path it never checked was mounted.
     ///
-    /// Empty on a memo an older build wrote, which reads back as "the probe could
-    /// not say" -- never as "there are none", for [`Self::source`]'s reason.
+    /// Empty on a memo an older build wrote, which reads back as the target
+    /// itself -- never as "there are none", for [`Self::source`]'s reason: the
+    /// single-profile layout is a bind there, and reading no list as no binds
+    /// would strand every container bound before this field existed
+    /// ([`VerdictCache::remembered_claude_mount`]).
     #[serde(default)]
     binds: Vec<String>,
+    /// Which of [`Self::binds`] the container's user could not write, which is what
+    /// says whether a warm attach may point `CLAUDE_CONFIG_DIR` at one of them. A
+    /// bind that cannot be written cannot keep a refreshed credential, and the
+    /// launch that would otherwise export it forwards no host token either.
+    ///
+    /// Empty on a memo an older build wrote, which reads back as "none known
+    /// unwritable" -- the same treatment an unexamined bind had before this
+    /// existed, and the one the probe's own absent answer gets.
+    #[serde(default)]
+    unwritable_binds: Vec<String>,
 }
 
 /// The four things a pass can have concluded about the config directory.
@@ -829,6 +866,37 @@ mod tests {
             !verdicts.has_claude_memo("ws"),
             "a memo with no mount fact must cost one top-up to acquire one"
         );
+    }
+
+    /// Every container bound before the bind list existed is read by this, and an
+    /// empty list read as "there are none" takes the export away from all of them:
+    /// a single profile *is* a bind at the target, and the memo outlives nothing
+    /// short of the container, so no later pass would correct it.
+    #[test]
+    fn a_memo_from_before_the_bind_list_still_names_the_one_bind_it_had() {
+        let (_cache, _home, verdicts) = anchored();
+        let Observed(result_mtime) = verdicts.observe("ws").expect("an anchor");
+        write_atomically(
+            &verdicts.memo("ws"),
+            &serde_json::to_string(&serde_json::json!({
+                "claude": "bound",
+                "result_mtime": result_mtime,
+                "mounted": "yes",
+                "dir": CLAUDE_CONFIG_TARGET,
+                "source": "/home/me/.claude-profiles/bear",
+            }))
+            .expect("a memo"),
+        );
+
+        let remembered = verdicts.remembered_claude_mount("ws");
+        assert_eq!(remembered.target_binds(), [CLAUDE_CONFIG_TARGET.to_owned()]);
+        for selected in [Some("bear"), None] {
+            assert_eq!(
+                crate::flows::launch::ClaudeConfigEnv::from_mount(&remembered, selected),
+                crate::flows::launch::ClaudeConfigEnv::Set(CLAUDE_CONFIG_TARGET.to_owned()),
+                "{selected:?}"
+            );
+        }
     }
 
     #[test]

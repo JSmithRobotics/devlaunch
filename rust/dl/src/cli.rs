@@ -738,9 +738,10 @@ pub(crate) struct Cli {
     /// directory the same way, read-write, so the login reaches the container
     /// through that bind rather than through forwarding. Several names bind one
     /// directory each under `/var/tmp/devlaunch-claude/`, run as the first, and
-    /// switch with `CLAUDE_CONFIG_DIR` and no rebuild; `all` is every profile on
-    /// this host, which puts every one of those logins in the container and runs
-    /// as none of them. Per launch: unlike `--devcontainer` it is not stored with
+    /// switch with `CLAUDE_CONFIG_DIR` and no rebuild; `all` is every logged-in
+    /// profile present at launch, which puts every one of those logins in the
+    /// container and runs as none of them. The set is fixed when the container is
+    /// created, so a profile made later needs a `recreate`. Per launch: unlike `--devcontainer` it is not stored with
     /// the workspace, so a workspace never forwards an account chosen weeks ago.
     #[arg(long = "claude-profile", value_name = "NAME[,NAME...]|all")]
     claude_profile: Option<String>,

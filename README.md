@@ -391,8 +391,9 @@ runs as the first name given, and any of the others is one `CLAUDE_CONFIG_DIR` a
 `CLAUDE_CONFIG_DIR=/var/tmp/devlaunch-claude/work claude` inside the workspace, or
 `dl <workspace> --claude-profile work -- claude` from outside, which sets it for you. `dl` prints
 which profiles it bound, because every one of those logins is then readable from inside that
-container. `--claude-profile all` is every profile on the host, bound the same way, and selects
-none of them: that container holds all of your Claude logins, so it is worth typing deliberately.
+container. `--claude-profile all` is every logged-in profile present at launch, bound the same way, and
+selects none of them: that container holds all of those Claude logins, so it is worth typing
+deliberately.
 A name that was not bound at creation is still a `recreate`, and `dl` says so rather than pointing
 at an empty directory. Depth, and what a docker-compose devcontainer can and cannot do here, is in
 [docs/workspace-tools.md](docs/workspace-tools.md).

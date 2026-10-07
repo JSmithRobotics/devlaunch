@@ -3343,15 +3343,23 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
                 Some(selected) => {
                     message.push_str(&format!(" This session runs as {}.", python_repr(selected)))
                 }
-                None if !bound.is_empty() => message.push_str(
+                None if !bound.is_empty() && unbound.is_empty() => message.push_str(
                     " No profile was selected, so `claude` here runs as your host's \
                      unnamed login until CLAUDE_CONFIG_DIR names one of them.",
+                ),
+                // A set with something unbound and no selection is the first name
+                // typed having failed to bind, which refuses the session outright
+                // rather than running it as anything.
+                None if !bound.is_empty() => message.push_str(
+                    " The first name given is not among them, so this session is \
+                     refused rather than run as some other account.",
                 ),
                 None => {}
             }
             if !unbound.is_empty() {
                 message.push_str(&format!(
-                    " Not bound: {} -- no login found under that name.",
+                    " Not bound: {}. A name binds once, `default` is never part of a set, \
+                     and a name with no login under it has nothing to bind.",
                     unbound.join(", ")
                 ));
             }
@@ -3396,8 +3404,9 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
         LaunchNotice::ClaudeProfileNotInBoundSet { name, bound } => format!(
             "Claude profile {} is not one this container has: it was created with {} bound, \
              and a `--mount` only lands when devpod creates a container. Nothing was pointed \
-             at {}, so `claude` here runs as whatever login the container already had. A \
-             `recreate` naming the full set is what adds it.",
+             at {}, so `claude` here runs as whichever profile the container already reads, \
+             or, where it reads none of them, as that name's own login forwarded from the \
+             host. A `recreate` naming the full set is what adds it.",
             python_repr(name),
             bound.join(", "),
             python_repr(name),
@@ -6229,9 +6238,9 @@ mod tests {
         );
     }
 
-    /// The owner's condition on binding more than one account at a time: the
-    /// launch that does it says which logins are now inside the container, and how
-    /// to move between them, every time.
+    /// Binding more than one account at a time is never silent: the launch that
+    /// does it says which logins are now inside the container, and how to move
+    /// between them.
     #[test]
     fn a_bound_claude_profile_set_names_every_login_it_put_in_the_container() {
         let line = launch_notice(&LaunchNotice::ClaudeProfileSetBound {

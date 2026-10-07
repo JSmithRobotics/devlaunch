@@ -239,7 +239,6 @@ pub(crate) struct HostEnv {
 }
 
 impl HostEnv {
-    /// What [`Self::profile`] asked for.
     pub(crate) fn profile_request(&self) -> ProfileRequest {
         ProfileRequest::parse(self.profile.as_deref())
     }

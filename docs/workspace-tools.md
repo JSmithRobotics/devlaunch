@@ -209,11 +209,14 @@ dl <workspace> --claude-profile work -- claude            # from outside, which 
 aid <workspace> --claude-profile work                     # the agent, likewise
 ```
 
-`--claude-profile all` is the same shape, over every profile on the host that has a
-login. It selects none of them: `claude` runs as your host's unnamed login until
-something names one. Every one of those credentials is readable from inside that
-container, which is the thing named profiles exist to prevent, so it is deliberate
-and `dl` prints what it bound on every launch that does it.
+`--claude-profile all` is the same shape, over the profiles that have a login at the
+moment of launch. It is expanded to those names there and then, not bound as a whole
+root, so the set is as fixed as any other: a profile logged in to afterwards, or made
+afterwards, is reachable only through a `recreate`. It selects none of them: `claude`
+runs as your host's unnamed login until something names one. Every one of those
+credentials is readable from inside that container, which is the thing named profiles
+exist to prevent, so it is deliberate and `dl` prints what it bound on every launch
+that does it.
 
 Two routes that look simpler are dead ends, and the code says so where it does
 this:

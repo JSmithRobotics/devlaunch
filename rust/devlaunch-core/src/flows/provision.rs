@@ -256,6 +256,23 @@ const CLAUDE_DIR_UID_KEY: &str = "claudediruid";
 const CLAUDE_TARGET_WRITABLE_KEY: &str = "claudetargetwritable";
 const CLAUDE_TARGET_UID_KEY: &str = "claudetargetuid";
 
+/// Which of [`CLAUDE_TARGET_BINDS_KEY`]'s mount points the container's user cannot
+/// write, space-joined -- the pair above asked of every bind rather than of the
+/// one the session happens to read.
+///
+/// The pair above describes the anchor, which is the bind the session reads now. A
+/// container that bound a set can be pointed at any of the others at the next
+/// invocation, and that one was never examined: without this key a profile whose
+/// directory the container's user cannot write would be exported anyway, with no
+/// host token forwarded either, which is the credential-refresh dead end
+/// [`ClaudeMountFacts::target_unusable`] already refuses to walk into for a single
+/// profile. See [`crate::flows::launch::ClaudeConfigEnv::from_mount`].
+///
+/// Only the unwritable ones, so the everyday answer is empty. Absent -- an older
+/// memo, a probe that could not run -- is unknown and not "all writable", the
+/// reading every fact here holds to.
+const CLAUDE_TARGET_UNWRITABLE_KEY: &str = "claudetargetunwritable";
+
 /// The three literal values a tri-state probe fact travels as: known-true,
 /// known-false, and "the probe could not say" -- never printed as anything else,
 /// so a missing or garbled key and this literal are the only two spellings of
@@ -1542,11 +1559,13 @@ const CLAUDE_TARGET_SOURCE_AWK: &str = "$5 == t { p = $4\n  gsub(/\\\\040/, \" \
 /// it, which is the whole of what [`CLAUDE_TARGET_BINDS_KEY`] carries.
 ///
 /// No unescaping, where its two neighbours above do it: a mount point this key is
-/// about is one `dl` itself wrote, and `dl` only ever writes the target or the
-/// target joined with a [`crate::clients::claude::ProfileName`], whose character
-/// set has no space and no tab in it. Unescaping here would instead make the
-/// escaped and unescaped spellings of a *foreign* mount point under the target
-/// both match, which is a wider claim than the key makes.
+/// about is one `dl` itself wrote, and what `dl` writes here is the target, the
+/// target joined with a [`crate::clients::claude::ProfileName`], or either of
+/// those joined with the name of a top-level entry of the profile whose outward
+/// symlink it shadows ([`crate::flows::launch::dangling_symlink_binds`]).
+/// Unescaping here would instead make the escaped and unescaped spellings of a
+/// *foreign* mount point under the target both match, which is a wider claim than
+/// the key makes.
 const CLAUDE_TARGET_BINDS_AWK: &str = "$5 == t || index($5, t \"/\") == 1 { print $5 }";
 
 /// The lines that describe the container's Claude config directory.
@@ -1619,6 +1638,21 @@ const CLAUDE_TARGET_BINDS_AWK: &str = "$5 == t || index($5, t \"/\") == 1 { prin
 /// mount at its own directory and fails the other way, towards
 /// [`ClaudeConfig::Ours`]. Both are pre-existing and out of scope here; this
 /// sentence only says which is which.
+/// The `case` that picks the anchor out of `$cfg_dir`, verbatim -- no surrounding
+/// script -- so [`claude_config_lines`] splices it in and the differential test on
+/// [`ClaudeMountFacts::target_anchor`] runs the very same string, for the reason
+/// [`CLAUDE_MOUNT_SCAN_AWK`] is a constant of its own. Reads `cfg_dir`, sets
+/// `cfg_anchor`.
+fn claude_anchor_case() -> String {
+    [
+        "case \"$cfg_dir\" in".to_owned(),
+        format!("  \"{CLAUDE_CONFIG_TARGET}\"|\"{CLAUDE_CONFIG_TARGET}\"/*) cfg_anchor=$cfg_dir;;"),
+        format!("  *) cfg_anchor=\"{CLAUDE_CONFIG_TARGET}\";;"),
+        "esac".to_owned(),
+    ]
+    .join("\n")
+}
+
 fn claude_config_lines() -> Vec<String> {
     vec![
         "cfg_home=$(readlink -f \"${HOME-}\" 2>/dev/null || true)".to_owned(),
@@ -1650,11 +1684,13 @@ fn claude_config_lines() -> Vec<String> {
         format!("echo \"{PROBE_MARK} {CLAUDE_MOUNTS_KEY} $cfg_mounts\""),
         // Every mount point at or under `CLAUDE_CONFIG_TARGET`, which is the whole
         // of what `dl` bound there: one profile at the target itself, or one per
-        // name under it. See [`CLAUDE_TARGET_BINDS_KEY`]. Space-joined for
+        // name under it, plus one per outward top-level symlink each of those
+        // shadows. See [`CLAUDE_TARGET_BINDS_KEY`]. Space-joined for
         // `CLAUDE_MOUNTS_KEY`'s reason -- a report is a map, so a repeated key
-        // would keep only the last -- and the paths cannot carry a space to split
-        // on, because `dl` writes no mount point here that is not the target or
-        // the target joined with a `ProfileName`.
+        // would keep only the last. A profile name carries no space; a shadowed
+        // link's name may, and such a bind splits into fragments, which name no
+        // profile and so are dropped rather than mistaken for one
+        // ([`crate::flows::launch::bound_profiles`]).
         "cfg_target_binds=".to_owned(),
         "if [ -r /proc/self/mountinfo ]; then".to_owned(),
         format!(
@@ -1678,10 +1714,7 @@ fn claude_config_lines() -> Vec<String> {
         // is the shape every one of these facts was written for; they come apart
         // when a launch binds a set, one directory per name, and `CLAUDE_CONFIG_DIR`
         // picks one of them.
-        format!("case \"$cfg_dir\" in"),
-        format!("  \"{CLAUDE_CONFIG_TARGET}\"|\"{CLAUDE_CONFIG_TARGET}\"/*) cfg_anchor=$cfg_dir;;"),
-        format!("  *) cfg_anchor=\"{CLAUDE_CONFIG_TARGET}\";;"),
-        "esac".to_owned(),
+        claude_anchor_case(),
         // The mount's source -- the fact `ClaudeConfig::Bound` alone cannot carry,
         // and the one a switched `--claude-profile` needs: see
         // [`CLAUDE_TARGET_SOURCE_KEY`]. Only asked when something is bound there,
@@ -1738,6 +1771,15 @@ fn claude_config_lines() -> Vec<String> {
         "fi".to_owned(),
         format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_WRITABLE_KEY} $cfg_target_writable\""),
         format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_UID_KEY} $cfg_target_uid\""),
+        // The same writability question asked of every bind, not just the anchor:
+        // see [`CLAUDE_TARGET_UNWRITABLE_KEY`]. Unquoted on purpose -- the list is
+        // whitespace-joined and word splitting is how it is read back.
+        "cfg_target_unwritable=".to_owned(),
+        "for cfg_bind in $cfg_target_binds; do".to_owned(),
+        "  if [ ! -w \"$cfg_bind\" ]; then cfg_target_unwritable=\"$cfg_target_unwritable$cfg_bind \"; fi"
+            .to_owned(),
+        "done".to_owned(),
+        format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_UNWRITABLE_KEY} $cfg_target_unwritable\""),
     ]
 }
 
@@ -2054,6 +2096,7 @@ pub struct ClaudeMountFacts {
     dir_uid: Option<u32>,
     target_writable: Option<bool>,
     target_uid: Option<u32>,
+    unwritable_binds: Vec<String>,
 }
 
 impl ClaudeMountFacts {
@@ -2085,6 +2128,10 @@ impl ClaudeMountFacts {
             target_uid: found
                 .get(CLAUDE_TARGET_UID_KEY)
                 .and_then(|uid| uid.parse().ok()),
+            unwritable_binds: found
+                .get(CLAUDE_TARGET_UNWRITABLE_KEY)
+                .map(|binds| binds.split_whitespace().map(str::to_owned).collect())
+                .unwrap_or_default(),
         }
     }
 
@@ -2175,6 +2222,16 @@ impl ClaudeMountFacts {
     /// `false` unless the probe said so outright. Unknown is not a negative here
     /// any more than anywhere else in this struct: a bind no probe examined keeps
     /// the treatment it would have had.
+    /// Whether the probe found this particular bind unwritable by the container's
+    /// user -- [`Self::target_unusable`] asked of a bind the session is not
+    /// reading yet, which is every profile of a set but the current one.
+    ///
+    /// `false` unless the probe said so outright, for [`Self::target_unusable`]'s
+    /// reason.
+    pub(crate) fn bind_unwritable(&self, bind: &str) -> bool {
+        self.unwritable_binds.iter().any(|known| known == bind)
+    }
+
     pub(crate) fn target_unusable(&self) -> bool {
         self.target_mounted == Some(true) && self.target_writable == Some(false)
     }
@@ -2222,6 +2279,7 @@ impl ClaudeMountFacts {
         dir: Option<String>,
         target_source: Option<String>,
         target_binds: Vec<String>,
+        unwritable_binds: Vec<String>,
     ) -> Self {
         Self {
             dir,
@@ -2229,6 +2287,7 @@ impl ClaudeMountFacts {
             target_binds,
             target_source,
             target_writable,
+            unwritable_binds,
             ..Self::default()
         }
     }
@@ -2261,6 +2320,7 @@ impl ClaudeMountFacts {
             dir_uid: None,
             target_writable,
             target_uid,
+            unwritable_binds: Vec::new(),
         }
     }
 
@@ -2271,6 +2331,11 @@ impl ClaudeMountFacts {
 
     pub(crate) fn with_binds(mut self, binds: &[&str]) -> Self {
         self.target_binds = binds.iter().map(|bind| (*bind).to_owned()).collect();
+        self
+    }
+
+    pub(crate) fn with_unwritable_binds(mut self, binds: &[&str]) -> Self {
+        self.unwritable_binds = binds.iter().map(|bind| (*bind).to_owned()).collect();
         self
     }
 }
@@ -2317,19 +2382,6 @@ fn parse_tri(value: Option<&String>) -> Option<bool> {
 /// that could not say where its home is cannot be shown to own the directory
 /// either, and `Foreign` costs a login prompt where the other reading costs the
 /// host's credential.
-/// The mount points [`CLAUDE_TARGET_BINDS_KEY`] carries, as a list.
-///
-/// Read from the report in two places -- [`ClaudeConfig::parse`] and
-/// [`ClaudeMountFacts::parse`] -- so the split lives here rather than twice.
-/// Nothing is unescaped, for [`CLAUDE_TARGET_BINDS_AWK`]'s reason: a bind this key
-/// is about is one `dl` wrote, and no path `dl` writes here can hold a space.
-fn target_binds(found: &BTreeMap<String, String>) -> Vec<String> {
-    found
-        .get(CLAUDE_TARGET_BINDS_KEY)
-        .map(|binds| binds.split_whitespace().map(str::to_owned).collect())
-        .unwrap_or_default()
-}
-
 fn cfg_dir_is_foreign(container_home: &str, host_home: Option<&str>, mount_roots: &str) -> bool {
     mount_roots.split_whitespace().any(|root| {
         let root = unescape_mount(root);
@@ -2338,6 +2390,20 @@ fn cfg_dir_is_foreign(container_home: &str, host_home: Option<&str>, mount_roots
             && (!is_under(&root, container_home)
                 || host_home.is_some_and(|host_home| is_under(&root, host_home)))
     })
+}
+
+/// The mount points [`CLAUDE_TARGET_BINDS_KEY`] carries, as a list.
+///
+/// Read from the report by both [`ClaudeConfig::parse`] and
+/// [`ClaudeMountFacts::parse`], so the split lives here rather than twice.
+/// Nothing is unescaped, for [`CLAUDE_TARGET_BINDS_AWK`]'s reason. Split on
+/// whitespace, which a profile's own path cannot hold; a shadowed symlink's name
+/// can, and [`CLAUDE_TARGET_BINDS_KEY`] says what that costs.
+fn target_binds(found: &BTreeMap<String, String>) -> Vec<String> {
+    found
+        .get(CLAUDE_TARGET_BINDS_KEY)
+        .map(|binds| binds.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default()
 }
 
 /// A `mountinfo` path with the kernel's octal escapes undone.
@@ -4015,7 +4081,12 @@ if [ -n "$cfg_target_source" ]; then
   cfg_target_uid=$(stat -c %u "$cfg_anchor" 2>/dev/null || true)
 fi
 echo "devlaunch-probe claudetargetwritable $cfg_target_writable"
-echo "devlaunch-probe claudetargetuid $cfg_target_uid""#;
+echo "devlaunch-probe claudetargetuid $cfg_target_uid"
+cfg_target_unwritable=
+for cfg_bind in $cfg_target_binds; do
+  if [ ! -w "$cfg_bind" ]; then cfg_target_unwritable="$cfg_target_unwritable$cfg_bind "; fi
+done
+echo "devlaunch-probe claudetargetunwritable $cfg_target_unwritable""#;
 
     const PYTHON_TRANSFER_SCRIPT: &str = r#"set -eu
 exec >&2
@@ -6113,17 +6184,45 @@ fi
             };
             facts.target_anchor().to_owned()
         };
-        assert_eq!(anchored(None), CLAUDE_CONFIG_TARGET);
-        assert_eq!(anchored(Some(CLAUDE_CONFIG_TARGET)), CLAUDE_CONFIG_TARGET);
-        assert_eq!(
-            anchored(Some(&format!("{CLAUDE_CONFIG_TARGET}/bear"))),
-            format!("{CLAUDE_CONFIG_TARGET}/bear")
+        let bear = format!("{CLAUDE_CONFIG_TARGET}/bear");
+        let sibling = format!("{CLAUDE_CONFIG_TARGET}-evil");
+        for dir in [
+            "",
+            CLAUDE_CONFIG_TARGET,
+            bear.as_str(),
+            "/home/dev/.claude",
+            sibling.as_str(),
+        ] {
+            let typed = (!dir.is_empty()).then_some(dir);
+            let want = match typed {
+                Some(dir) if dir == CLAUDE_CONFIG_TARGET || dir == bear => dir,
+                _ => CLAUDE_CONFIG_TARGET,
+            };
+            assert_eq!(anchored(typed), want, "host side, for {dir:?}");
+            assert_eq!(shell_anchor(dir), want, "the probe's own case, for {dir:?}");
+        }
+    }
+
+    /// The probe's `cfg_anchor` run standalone over a `cfg_dir`, so the shell half
+    /// of the anchor rule is diffed against its Rust twin rather than asserted
+    /// about -- the same bargain the three awks have.
+    fn shell_anchor(cfg_dir: &str) -> String {
+        let script = format!(
+            "cfg_dir=\"$1\"\n{}\nprintf '%s' \"$cfg_anchor\"",
+            claude_anchor_case()
         );
-        assert_eq!(anchored(Some("/home/dev/.claude")), CLAUDE_CONFIG_TARGET);
-        assert_eq!(
-            anchored(Some(&format!("{CLAUDE_CONFIG_TARGET}-evil"))),
-            CLAUDE_CONFIG_TARGET
+        let answered = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .arg("sh") // $0, unused by the script but conventional to supply
+            .arg(cfg_dir)
+            .output()
+            .expect("sh ran");
+        assert!(
+            answered.status.success(),
+            "the case exited nonzero: {answered:?}"
         );
+        String::from_utf8_lossy(&answered.stdout).into_owned()
     }
 
     #[test]
