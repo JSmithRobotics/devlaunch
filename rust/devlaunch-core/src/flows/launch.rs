@@ -659,14 +659,21 @@ pub enum LaunchNotice {
     /// refresh is the whole of the damage only while the session is on the bind
     /// the notice names; on a set whose anchor is the unwritable one, on a bare
     /// attach that carries no export, and on a container that pins its own
-    /// directory, the session is somewhere else entirely and `claude` does not run
-    /// as this profile at all. See
+    /// directory, the session is somewhere else entirely. See
     /// `a_profile_the_session_is_not_reading_forwards_no_token_and_says_so`.
+    ///
+    /// `forwarded_login` is the other half of that, and only `reading` being a
+    /// different directory does not settle it: on a container whose own Claude
+    /// configuration is this host's, the profile's credential travels as a token
+    /// and `claude` does run as that account, over a configuration directory that
+    /// is not the profile's. Saying it does not run as the profile at all would be
+    /// false there, which is the account the forwarded token authenticates as.
     ClaudeProfileMountUnwritable {
         name: String,
         target: PathBuf,
         uids_compared: bool,
         reading: Option<PathBuf>,
+        forwarded_login: bool,
     },
     /// A named profile is mounted and usable at the target, but this session
     /// reads a different Claude configuration directory, so the mount goes
@@ -4911,6 +4918,10 @@ fn claude_profile_mount_notice(
     // a different account's directory where it is not. `None` is the probe not
     // saying, which leaves the claim the notice made before this was carried.
     let read_instead = |target: &str| reading.filter(|dir| *dir != target).map(PathBuf::from);
+    // And whether the account still agrees where the directory does not:
+    // [`SessionContext::forwarded_claude`] forwards this profile's own credential
+    // on `Ours`, so `claude` runs as it over whatever directory the container pins.
+    let forwarded_login = matches!(effective, Some(ClaudeConfig::Ours));
     // A container that bound a set answers a different question first, and the
     // arms below cannot answer it: with one directory per profile, "is the profile
     // this launch named reachable here" is about which binds exist, not about
@@ -4941,6 +4952,7 @@ fn claude_profile_mount_notice(
                     target: PathBuf::from(&bind),
                     uids_compared: false,
                     reading: read_instead(&bind),
+                    forwarded_login,
                 }
             });
         }
@@ -5015,6 +5027,7 @@ fn claude_profile_mount_notice(
                 target: PathBuf::from(mount.target_anchor()),
                 uids_compared: matches!(uids, (Some(_), Some(_))),
                 reading: read_instead(mount.target_anchor()),
+                forwarded_login,
             },
         });
     }
@@ -11136,6 +11149,7 @@ mod tests {
                 target: PathBuf::from(&work),
                 uids_compared: false,
                 reading: None,
+                forwarded_login: false,
             })
         );
         assert_eq!(
@@ -11151,6 +11165,9 @@ mod tests {
         // is read by nobody and the profile's credential travels as a token
         // instead. The lost refresh is still true of the bind; "this session still
         // reads that profile" is not, and that is the sentence `reading` picks.
+        // `forwarded_login` is the rest of it: the account does not change with the
+        // directory here, so "does not run as that profile at all" would be false
+        // of the very token this session carries.
         let facts = ClaudeMountFacts::synthetic(
             Some(true),
             Some("/host/me/.claude-profiles/work"),
@@ -11172,6 +11189,7 @@ mod tests {
                 target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
                 uids_compared: true,
                 reading: Some(PathBuf::from("/home/dev/.claude-pinned")),
+                forwarded_login: true,
             })
         );
     }
@@ -11230,6 +11248,7 @@ mod tests {
                 target: PathBuf::from(&bear),
                 uids_compared: true,
                 reading: None,
+                forwarded_login: false,
             }),
             "a bind this launch does read is still examined, and named by its own path"
         );
@@ -14160,6 +14179,7 @@ mod tests {
                 target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
                 uids_compared,
                 reading: None,
+                forwarded_login: false,
             };
         let mismatch = |name: &str| LaunchNotice::ClaudeProfileMountUidMismatch {
             name: name.to_owned(),
@@ -14400,6 +14420,7 @@ mod tests {
                     target: PathBuf::from(&work),
                     uids_compared: false,
                     reading: None,
+                    forwarded_login: false,
                 }]
             };
             assert_eq!(
@@ -14508,6 +14529,7 @@ mod tests {
                     target: PathBuf::from(&work),
                     uids_compared: false,
                     reading: Some(PathBuf::from(&bear)),
+                    forwarded_login: false,
                 }],
                 "{row}: {notices:?}"
             );

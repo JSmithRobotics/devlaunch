@@ -3203,12 +3203,18 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             target,
             uids_compared,
             reading,
+            forwarded_login,
         } => format!(
             "Claude profile {}: {} is bound in, but this container's user cannot write to it, so \
              a refreshed Claude login cannot be saved. {} {}",
             python_repr(name),
             target.display(),
             match reading {
+                Some(dir) if *forwarded_login => format!(
+                    "And this session reads {} rather than that bind, so `claude` here runs on \
+                     that profile's forwarded login over a different configuration directory.",
+                    dir.display()
+                ),
                 Some(dir) => format!(
                     "And this session reads {} rather than that bind, so `claude` here does not \
                      run as that profile at all.",
@@ -6189,6 +6195,7 @@ mod tests {
             target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
             uids_compared: true,
             reading: None,
+            forwarded_login: false,
         });
         assert_eq!(
             line,
@@ -6211,6 +6218,7 @@ mod tests {
             target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
             uids_compared: false,
             reading: None,
+            forwarded_login: false,
         });
         assert_eq!(
             line,
@@ -6234,6 +6242,7 @@ mod tests {
             target: std::path::PathBuf::from("/var/tmp/devlaunch-claude/bear"),
             uids_compared: false,
             reading: Some(std::path::PathBuf::from("/var/tmp/devlaunch-claude/work")),
+            forwarded_login: false,
         });
         assert_eq!(
             line,
@@ -6244,6 +6253,29 @@ mod tests {
                  bind, so `claude` here does not run as that profile at all. This session did \
                  not read the directory's owner, so what blocks the write is not known here; \
                  `dl <workspace> up` looks again."
+                    .to_owned()
+            )
+        );
+
+        // And the half of that scene the directory alone cannot tell apart: the
+        // profile's own credential is forwarded, so `claude` does run as that
+        // account, over a configuration directory that is not the profile's.
+        let line = launch_notice(&LaunchNotice::ClaudeProfileMountUnwritable {
+            name: "bear".to_owned(),
+            target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
+            uids_compared: true,
+            reading: Some(std::path::PathBuf::from("/home/dev/.claude-pinned")),
+            forwarded_login: true,
+        });
+        assert_eq!(
+            line,
+            Some(
+                "Claude profile 'bear': /var/tmp/devlaunch-claude is bound in, but this \
+                 container's user cannot write to it, so a refreshed Claude login cannot be \
+                 saved. And this session reads /home/dev/.claude-pinned rather than that bind, \
+                 so `claude` here runs on that profile's forwarded login over a different \
+                 configuration directory. A read-only mount, or a mode the directory's own \
+                 owner cannot write, is what is left once the uids match."
                     .to_owned()
             )
         );
