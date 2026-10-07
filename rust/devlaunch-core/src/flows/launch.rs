@@ -4746,15 +4746,29 @@ impl<'a> SessionContext<'a> {
                 // short-circuits on before it reaches the set arm; and a probe that
                 // could not name the directory -- and each would otherwise pair one
                 // account's live token with another account's bind.
+                //
+                // With nothing selected there is no profile for the token to
+                // belong to: `resolve_token` falls back to this host's unnamed
+                // login, which is nobody's profile of the set, while the session
+                // reads whichever bind `from_mount` kept it on -- the ordinary
+                // state of a set container launched with no `--claude-profile`,
+                // since the workspace bakes the export in at creation. A container
+                // that bound no set is unaffected either way: `bound_profiles`
+                // yields nothing both for an empty bind list and for one bind at
+                // the target itself, so neither arm can be true.
                 let unwritable = match &claude {
                     ClaudeConfigEnv::Set(dir) => mount.bind_unwritable(dir),
                     ClaudeConfigEnv::Leave => mount.target_unusable(),
                 };
-                let another_profiles_directory =
-                    self.host.claude.selected_profile().is_some_and(|name| {
+                let another_profiles_directory = match self.host.claude.selected_profile() {
+                    Some(name) => {
                         bound_profiles(mount).any(|bound| bound == name)
                             && reading.is_none_or(|dir| dir != profile_target(name))
-                    });
+                    }
+                    None => reading.is_some_and(|dir| {
+                        bound_profiles(mount).any(|bound| dir == profile_target(bound))
+                    }),
+                };
                 if !unwritable || another_profiles_directory {
                     return Ok(None);
                 }
@@ -14522,6 +14536,74 @@ mod tests {
                 "{row}"
             );
         }
+    }
+
+    #[test]
+    fn a_set_read_with_no_profile_named_forwards_no_unnamed_host_login() {
+        // Nothing named, so there is no profile the forwarded credential could
+        // belong to: `resolve_token` falls back to this host's unnamed login, which
+        // is none of the accounts the set binds, while the session reads one of
+        // their directories. That pairing is the one the named rows above refuse,
+        // and it is reachable without naming anything: a set container carries the
+        // export from its creation, so an ordinary `dl <ws> -- claude` lands on a
+        // bind the container may not be able to write.
+        //
+        // The silence is asserted with it. Every notice in this table names a
+        // profile this launch asked for, and this launch asked for none.
+        let target = provision::CLAUDE_CONFIG_TARGET;
+        let bear = format!("{target}/bear");
+        let work = format!("{target}/work");
+        let (scene, _home) = with_claude_login(
+            Scene::new().with_running("myws"),
+            "not-a-real-host-default-token",
+        );
+        let mount =
+            ClaudeMountFacts::synthetic(Some(true), None, Some(true), Some(1000), Some(1000))
+                .with_binds(&[&bear, &work])
+                .with_dir(&bear)
+                .with_unwritable_binds(&[&bear]);
+        let token = HostToken::new();
+        let mut notices = Vec::new();
+        let claude_seen = ClaudeSeen::new();
+        claude_seen.set(ClaudeObservation::from_pass(
+            Some(ClaudeConfig::Bound),
+            mount,
+        ));
+        let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
+        let command = RemoteCommand::argv(&["claude"]);
+        let opened = workspace_ssh(
+            &context,
+            "myws",
+            Some(&command),
+            None,
+            &mut |_| {},
+            &mut notices,
+        );
+        assert!(opened.is_ok(), "{opened:?}");
+        assert_eq!(claude_profile_mount_notices(&notices), Vec::new());
+
+        let calls = scene.runner.calls_to("devpod");
+        let session = calls
+            .iter()
+            .find(|call| call.args().first().map(String::as_str) == Some("ssh"))
+            .expect("a session");
+        assert!(
+            session
+                .args()
+                .iter()
+                .any(|arg| arg.contains(&format!("export CLAUDE_CONFIG_DIR={bear};"))),
+            "{:?}",
+            session.args()
+        );
+        assert_eq!(
+            session
+                .invocation()
+                .env
+                .entries
+                .get(claude::TOKEN_VAR)
+                .map(String::as_str),
+            None,
+        );
     }
 
     #[test]
