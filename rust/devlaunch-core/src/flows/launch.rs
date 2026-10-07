@@ -641,7 +641,10 @@ pub enum LaunchNotice {
     ///
     /// `dir` is the directory the probe saw in effect. Said only where this
     /// launch's command carries no `CLAUDE_CONFIG_DIR` export of its own, which
-    /// is the one place a bound mount can sit idle.
+    /// is the one place a bound mount can sit idle, and only where nothing else
+    /// carries the profile either: a container whose own configuration is the
+    /// host's gets the profile's credential forwarded as a token, so `claude`
+    /// there does run as that account.
     ClaudeProfileMountIgnored { name: String, dir: PathBuf },
     /// A named profile was bound in, but the probe found a *different* source
     /// mounted at the target than the one this launch asked to bind.
@@ -12902,7 +12905,7 @@ mod tests {
         let claude_seen = ClaudeSeen::new();
         claude_seen.set(ClaudeObservation::remembered(
             seen,
-            ClaudeMountFacts::remembered(mounted, None),
+            ClaudeMountFacts::remembered(mounted, None, None),
         ));
         let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
         let _ = workspace_ssh(
@@ -16051,7 +16054,8 @@ mod tests {
         let completion = scene.cache_dir().join("completion.json");
         let mut parts = launching(&scene.runner, &updater, &completion);
         parts.provision.claude_remembered = Some(ClaudeConfig::Ours);
-        parts.provision.claude_remembered_mount = ClaudeMountFacts::remembered(Some(true), None);
+        parts.provision.claude_remembered_mount =
+            ClaudeMountFacts::remembered(Some(true), None, None);
         let mut cold = NeverCold;
         let mut launch = Launch::new(
             &mut parts.context,
@@ -16090,11 +16094,68 @@ mod tests {
         );
     }
 
-    /// The other half of the same fact, and the one a memo carrying only "mounted"
-    /// got wrong on every launch after the first: a bind this container's user
-    /// cannot write must keep the treatment the probe withheld, which is the
-    /// container's own `CLAUDE_CONFIG_DIR` left alone and the profile's token
-    /// forwarded instead.
+    /// A bare attach runs no command, so nothing exports `CLAUDE_CONFIG_DIR` and a
+    /// devcontainer that pins it keeps the directory it named. The records carry
+    /// what the probe saw of the mount and of that directory, so every warm attach
+    /// names the profile the same way the launch that probed did.
+    #[test]
+    fn a_warm_bare_attach_names_the_claude_profile_mount_its_container_reads_past() {
+        let workspace =
+            WorkspaceId::new("octocat", "Hello-World", "master").expect("a safe triple");
+        let scene = Scene::new()
+            .with_running(workspace.value())
+            .naming_a_claude_profile("work", true);
+        let updater = SelfInvocation::new("dl");
+        let completion = scene.cache_dir().join("completion.json");
+        let mut parts = launching(&scene.runner, &updater, &completion);
+        parts.provision.claude_remembered = Some(ClaudeConfig::Foreign);
+        parts.provision.claude_remembered_mount = ClaudeMountFacts::remembered(
+            Some(true),
+            None,
+            Some("/home/dev/.claude-pinned".to_owned()),
+        );
+        let mut cold = NeverCold;
+        let mut launch = Launch::new(
+            &mut parts.context,
+            &mut parts.refresh,
+            &mut cold,
+            &parts.provision,
+            &scene.host,
+            &mut parts.chatter,
+            &mut parts.said,
+        );
+
+        let launched = launch.run(
+            "octocat/Hello-World@master",
+            &LaunchVerb::Attach { command: None },
+            None,
+        );
+        assert!(launched.is_ok(), "{launched:?}");
+        drop(launch);
+        assert!(
+            parts
+                .said
+                .contains(&LaunchNotice::ClaudeProfileMountIgnored {
+                    name: "work".to_owned(),
+                    dir: PathBuf::from("/home/dev/.claude-pinned"),
+                }),
+            "{:?}",
+            parts.said
+        );
+        assert!(
+            !parts
+                .said
+                .iter()
+                .any(|notice| matches!(notice, LaunchNotice::ClaudeProfileNotForwarded { .. })),
+            "{:?}",
+            parts.said
+        );
+    }
+
+    /// The other half of the same fact, on the launches that run no probe: a bind
+    /// this container's user cannot write keeps the treatment the probe withholds,
+    /// which is the container's own `CLAUDE_CONFIG_DIR` left alone and the
+    /// profile's token forwarded instead.
     #[test]
     fn a_warm_attach_over_a_claude_profile_mount_nobody_can_write_forwards_the_token_instead() {
         let workspace =
@@ -16107,7 +16168,7 @@ mod tests {
         let mut parts = launching(&scene.runner, &updater, &completion);
         parts.provision.claude_remembered = Some(ClaudeConfig::Ours);
         parts.provision.claude_remembered_mount =
-            ClaudeMountFacts::remembered(Some(true), Some(false));
+            ClaudeMountFacts::remembered(Some(true), Some(false), None);
         let mut cold = NeverCold;
         let mut launch = Launch::new(
             &mut parts.context,

@@ -2103,8 +2103,20 @@ impl ClaudeMountFacts {
     /// `target_writable` is `Some(false)` or unknown and never `Some(true)`: the
     /// memo records the unusable bind as the state it is and everything else as
     /// plain "mounted", so a true here would be a fact nothing wrote down.
-    pub(crate) fn remembered(target_mounted: Option<bool>, target_writable: Option<bool>) -> Self {
+    ///
+    /// `dir` is the effective config directory, which belongs here for the same
+    /// reason the other two do: it comes from the image and the devcontainer's
+    /// environment, so it cannot move without the container being rebuilt. Without
+    /// it a warm attach cannot tell a mount the session reads past from one it
+    /// reads, and says the wrong thing about the profile on every launch but the
+    /// one that probed.
+    pub(crate) fn remembered(
+        target_mounted: Option<bool>,
+        target_writable: Option<bool>,
+        dir: Option<String>,
+    ) -> Self {
         Self {
+            dir,
             target_mounted,
             target_writable,
             ..Self::default()

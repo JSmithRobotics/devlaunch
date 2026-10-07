@@ -177,11 +177,12 @@ impl VerdictCache {
                 None => MemoWord::Unknown,
             },
             result_mtime,
+            dir: mount.dir().map(str::to_owned),
             mounted: match mount.target_mounted() {
-                // Before the plain `Mounted` arm, so a bind the container's user
-                // cannot write is remembered as the thing it is. Remembering it as
-                // mounted alone is what sent every later warm attach back to the
-                // `Bound` treatment the probe had just withheld.
+                // Before the plain `Mounted` arm: a bind the container's user
+                // cannot write has to come back as the thing it is, or a launch
+                // that runs no probe reads it as a working one and makes the export
+                // the probe withheld.
                 Some(true) if mount.target_unusable() => MemoMount::MountedUnwritable,
                 Some(true) => MemoMount::Mounted,
                 Some(false) => MemoMount::NotMounted,
@@ -246,10 +247,13 @@ impl VerdictCache {
         let Some(memo) = self.read_memo(workspace_id) else {
             return ClaudeMountFacts::default();
         };
+        let dir = memo.dir;
         match memo.mounted {
-            MemoMount::Mounted => ClaudeMountFacts::remembered(Some(true), None),
-            MemoMount::MountedUnwritable => ClaudeMountFacts::remembered(Some(true), Some(false)),
-            MemoMount::NotMounted => ClaudeMountFacts::remembered(Some(false), None),
+            MemoMount::Mounted => ClaudeMountFacts::remembered(Some(true), None, dir),
+            MemoMount::MountedUnwritable => {
+                ClaudeMountFacts::remembered(Some(true), Some(false), dir)
+            }
+            MemoMount::NotMounted => ClaudeMountFacts::remembered(Some(false), None, dir),
             MemoMount::Unknown | MemoMount::Unrecorded => ClaudeMountFacts::default(),
         }
     }
@@ -395,7 +399,7 @@ pub(crate) struct Observed(Stamp);
 /// Its own file rather than a field on [`Marker`], for the reason
 /// [`VerdictCache::remember_claude`] gives, and its own anchor because a memo that
 /// outlives its container is the one misreading that costs something.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 struct Memo {
     claude: MemoWord,
     result_mtime: Stamp,
@@ -409,6 +413,12 @@ struct Memo {
     /// the outer one, so the two absences collapse into each other on disk.
     #[serde(default)]
     mounted: MemoMount,
+    /// The effective `CLAUDE_CONFIG_DIR` the last pass saw, which is what says
+    /// whether the session reads the bind or reads past it. Carried for the same
+    /// reason [`Self::mounted`] is: it comes from the image and the devcontainer's
+    /// environment, and this file's anchor already expires on a rebuilt container.
+    #[serde(default)]
+    dir: Option<String>,
 }
 
 /// The four things a pass can have concluded about the config directory.
@@ -682,6 +692,7 @@ mod tests {
             Some(1000),
             Some(1001),
         )
+        .with_dir("/home/dev/.claude-pinned")
     }
 
     #[test]
@@ -729,6 +740,11 @@ mod tests {
             );
             let remembered = verdicts.remembered_claude_mount("ws");
             assert_eq!(remembered.target_mounted(), mounted, "{mounted:?}");
+            assert_eq!(
+                remembered.dir(),
+                mounted.is_some().then_some("/home/dev/.claude-pinned"),
+                "{mounted:?}"
+            );
             assert_eq!(
                 remembered.target_unusable(),
                 mounted == Some(true) && writable == Some(false),
