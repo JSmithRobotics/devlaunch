@@ -3204,7 +3204,9 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             uids_compared,
         } => format!(
             "Claude profile {}: {} is bound in, but this container's user cannot write to it, so \
-             a refreshed Claude login cannot be saved. {}",
+             a refreshed Claude login cannot be saved. That is the whole of it: this session \
+             still reads that profile and runs as it, unless this container's own Claude \
+             configuration is one dl does not forward into, which gets its own notice. {}",
             python_repr(name),
             target.display(),
             if *uids_compared {
@@ -3353,7 +3355,11 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
                 // typed is `unbound`'s first. `default` is the one name that
                 // fails to bind by design and still has a login behind it:
                 // `resolve_token` skips it and forwards the host's own, where
-                // every other name there is refused.
+                // every other name there is refused. Forwards it only past the
+                // `ClaudeConfig` gate, though: a container whose own
+                // configuration dl does not forward into gets
+                // `ClaudeProfileNotForwarded` and no token at all, which is what
+                // the hedge is for.
                 None if !bound.is_empty()
                     && unbound.first().map(String::as_str)
                         == Some(claude_profiles::DEFAULT_PROFILE) =>
@@ -3361,7 +3367,9 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
                     message.push_str(
                         " The first name given is `default`, which is never bound into a \
                          set, so this session runs on your host's ordinary Claude login \
-                         rather than on any of these.",
+                         rather than on any of these, unless this container's own Claude \
+                         configuration is one dl does not forward into, which gets its own \
+                         notice.",
                     )
                 }
                 None if !bound.is_empty() => message.push_str(
@@ -6176,8 +6184,10 @@ mod tests {
             Some(
                 "Claude profile 'bear': /var/tmp/devlaunch-claude is bound in, but this \
                  container's user cannot write to it, so a refreshed Claude login cannot be \
-                 saved. A read-only mount, or a mode the directory's own owner cannot write, is \
-                 what is left once the uids match."
+                 saved. That is the whole of it: this session still reads that profile and runs \
+                 as it, unless this container's own Claude configuration is one dl does not \
+                 forward into, which gets its own notice. A read-only mount, or a mode the \
+                 directory's own owner cannot write, is what is left once the uids match."
                     .to_owned()
             )
         );
@@ -6195,8 +6205,11 @@ mod tests {
             Some(
                 "Claude profile 'bear': /var/tmp/devlaunch-claude is bound in, but this \
                  container's user cannot write to it, so a refreshed Claude login cannot be \
-                 saved. This session did not read the directory's owner, so what blocks the \
-                 write is not known here; `dl <workspace> up` looks again."
+                 saved. That is the whole of it: this session still reads that profile and runs \
+                 as it, unless this container's own Claude configuration is one dl does not \
+                 forward into, which gets its own notice. This session did not read the \
+                 directory's owner, so what blocks the write is not known here; \
+                 `dl <workspace> up` looks again."
                     .to_owned()
             )
         );
@@ -6317,6 +6330,15 @@ mod tests {
         assert!(
             !default_first.contains("refused"),
             "nothing is refused here: {default_first}"
+        );
+        // The forward is gated on the container's own Claude configuration, so a
+        // devcontainer that pins `CLAUDE_CONFIG_DIR` elsewhere forwards nothing
+        // and says so separately. Promising the host login outright there is a
+        // claim the next line contradicts.
+        assert!(
+            default_first.contains("which gets its own notice"),
+            "the host login is not guaranteed, and the hedge says where to look: \
+             {default_first}"
         );
 
         let otter_first = notice("otter");

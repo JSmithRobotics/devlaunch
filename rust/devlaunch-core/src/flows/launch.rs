@@ -4100,12 +4100,20 @@ impl ClaudeConfigEnv {
     /// A bind the container's user cannot write
     /// ([`ClaudeMountFacts::target_unusable`]) is not a licence either, and for
     /// the same reason the unmounted target is not: repointing Claude Code at it
-    /// buys a directory it cannot keep a credential in. Withholding the export
-    /// leaves the container's own `CLAUDE_CONFIG_DIR` standing, which is a
-    /// different account from the one asked for whenever a set is bound, so
+    /// buys a directory it cannot keep a credential in, where leaving the
+    /// container's own answer standing at least lets a forwarded token be the
+    /// login.
+    ///
+    /// A *set* is the exception, because there the container's own answer is
+    /// another profile's directory. Withholding the export there would leave
+    /// `CLAUDE_CONFIG_DIR` on the anchor while
     /// [`SessionContext::forwarded_claude`] forwards the named profile's host
-    /// token in exactly those cases rather than letting the session run as the
-    /// anchor in silence.
+    /// token, so a session authenticated as one account would write its
+    /// transcripts, `.claude.json` and `settings.local.json` through the other's
+    /// bind and run under the other's `settings.json`. The export lands instead:
+    /// the directory and the authenticated account agree, and the one thing the
+    /// unwritable bind costs is persisting a refreshed login, which
+    /// [`LaunchNotice::ClaudeProfileMountUnwritable`] already says.
     pub(crate) fn from_mount(mount: &ClaudeMountFacts, selected: Option<&str>) -> Self {
         if mount.target_mounted() != Some(true) || mount.target_unusable() {
             return Self::Leave;
@@ -4115,20 +4123,18 @@ impl ClaudeConfigEnv {
             // this container whether or not it is the one the container was
             // created to read, which is what makes switching cost a variable
             // rather than a rebuild.
-            // A bind the container's user cannot write is refused here exactly as
-            // the single-profile one is above, and the probe answers for every
-            // bind rather than only the one it read
-            // ([`ClaudeMountFacts::bind_unwritable`]): without that, a profile of
-            // a set the container cannot write would be exported over a directory
-            // no refreshed credential can be written to, which is the
-            // credential-refresh dead end the `target_unusable` gate exists to
-            // avoid. Withholding it here hands the session the anchor's account
-            // instead, so [`SessionContext::forwarded_claude`] forwards the named
-            // profile's host token over the top of it.
-            Some(name)
-                if bound_profiles(mount).any(|bound| bound == name)
-                    && !mount.bind_unwritable(&profile_target(name)) =>
-            {
+            //
+            // `profile_target` is built from the raw flag value, so this
+            // membership test is the only thing standing between a `../..` and a
+            // path under the target: `bound_profiles` leaves can hold no `/`, so
+            // no traversal string can be one of them. A refactor that loosens the
+            // test has to parse the name first ([`claude::ProfileName`]).
+            Some(name) if bound_profiles(mount).any(|bound| bound == name) => {
+                // Including a bind the container's user cannot write, where the
+                // single-profile gate above declines: with a set bound, declining
+                // leaves `CLAUDE_CONFIG_DIR` on another profile's directory while
+                // [`SessionContext::forwarded_claude`] forwards this one's token.
+                // See this item's own doc.
                 Self::Set(profile_target(name))
             }
             // A name on a container that holds a bind at the target itself.
@@ -4709,10 +4715,10 @@ impl<'a> SessionContext<'a> {
                 // premise that forwarding nothing is harmless is gone and the
                 // host's token is the only login this session can get.
                 //
-                // The same fact asked of a set: the export was withheld over a
-                // bind of the *selected* profile that the container cannot write,
-                // so `CLAUDE_CONFIG_DIR` still names the anchor and the session
-                // would otherwise run as that other account without a word.
+                // The same fact asked of a set, where the export does land on the
+                // unwritable bind ([`ClaudeConfigEnv::from_mount`]): the session
+                // reads that profile's own directory, and the token is what makes
+                // the account it authenticates as the same one.
                 let switched_to_unwritable =
                     self.host.claude.selected_profile().is_some_and(|name| {
                         bound_profiles(mount).any(|bound| bound == name)
@@ -11032,12 +11038,14 @@ mod tests {
     }
 
     #[test]
-    fn a_profile_of_a_set_the_container_cannot_write_is_not_exported_silently() {
+    fn a_profile_of_a_set_the_container_cannot_write_is_still_exported_and_named() {
         // The bind this launch is about to point at is not the one the probe read,
         // so its uid and writability are not in `target_writable` at all -- they
-        // are in the per-bind list. Without it the export lands over a directory
-        // no refreshed credential can be written to, with no token forwarded
-        // either and nothing said, which is what the single-profile gate refuses.
+        // are in the per-bind list. Declining the export over it would leave
+        // `CLAUDE_CONFIG_DIR` on the anchor, a *different profile's* directory,
+        // while `forwarded_claude` forwards this profile's token: the session
+        // would write one account's work through the other's bind. So the export
+        // lands, and the unwritable bind is said rather than exported silently.
         let target = provision::CLAUDE_CONFIG_TARGET;
         let bear = format!("{target}/bear");
         let work = format!("{target}/work");
@@ -11054,7 +11062,7 @@ mod tests {
 
         assert_eq!(
             ClaudeConfigEnv::from_mount(&facts, Some("work")),
-            ClaudeConfigEnv::Leave
+            ClaudeConfigEnv::Set(work.clone())
         );
         assert_eq!(
             claude_profile_mount_notice("work", None, &facts, Some(ClaudeConfig::Bound)),
@@ -14226,13 +14234,15 @@ mod tests {
 
     #[test]
     fn a_set_profile_the_container_cannot_write_runs_on_the_host_token() {
-        // `ClaudeConfigEnv::from_mount` withholds the export over a bind the
-        // container cannot write, and on a bound set that leaves the container's
-        // own `CLAUDE_CONFIG_DIR` naming the anchor -- a different account from the
-        // one asked for. `Bound` forwards nothing on the premise that the mounted
-        // directory refreshes its own credential; the unwritable bind is exactly
-        // where that premise is gone, so the host token is what makes the session
-        // run as the profile named rather than as the set's first.
+        // `Bound` forwards nothing on the premise that the mounted directory
+        // refreshes its own credential; a bind the container cannot write is
+        // exactly where that premise is gone, so the host token is what makes the
+        // session run as the profile named rather than as the set's first.
+        //
+        // The directory is asserted beside the token because the pair is the
+        // property: the export names the same profile the forwarded credential
+        // authenticates as, so no session writes one account's transcripts,
+        // `.claude.json` or `settings.local.json` through another's bind.
         let target = provision::CLAUDE_CONFIG_TARGET;
         let bear = format!("{target}/bear");
         let work = format!("{target}/work");
@@ -14273,6 +14283,14 @@ mod tests {
                 .iter()
                 .find(|call| call.args().first().map(String::as_str) == Some("ssh"))
                 .expect("a session");
+            assert!(
+                session
+                    .args()
+                    .iter()
+                    .any(|arg| arg.contains(&format!("export CLAUDE_CONFIG_DIR={work};"))),
+                "{writable}: {:?}",
+                session.args()
+            );
             let forwarded = session
                 .invocation()
                 .env

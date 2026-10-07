@@ -1770,11 +1770,13 @@ fn claude_config_lines() -> Vec<String> {
         //
         // The escapes the kernel wrote are still in those words, so a bind whose
         // name holds a space is `-w`-tested at a path that does not exist and is
-        // therefore always listed here. Harmless: the list is only ever consulted
-        // by [`ClaudeMountFacts::bind_unwritable`] for a
+        // therefore always listed here. Harmless: the only question asked of the
+        // list is [`ClaudeMountFacts::bind_unwritable`], whose caller passes a
         // [`crate::flows::launch::profile_target`] of a
         // [`crate::clients::claude::ProfileName`], which can hold no backslash, so
-        // no such entry is ever matched.
+        // no such entry is ever matched. `verdict_cache` asks it of every raw
+        // bind when it writes the memo, which copies such an entry back out
+        // unchanged and so cannot make it match anything either.
         "cfg_target_unwritable=".to_owned(),
         "for cfg_bind in $cfg_target_binds; do".to_owned(),
         "  if [ ! -w \"$cfg_bind\" ]; then cfg_target_unwritable=\"$cfg_target_unwritable$cfg_bind \"; fi"
