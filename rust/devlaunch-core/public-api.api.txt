@@ -71,7 +71,7 @@ pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUidMismatch::target: st
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable
-pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable::forwarded_login: bool
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable::login: devlaunch_core::flows::launch::SessionLogin
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable::reading: core::option::Option<std::path::PathBuf>
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable::target: std::path::PathBuf
@@ -340,6 +340,19 @@ pub fn devlaunch_core::flows::lifecycle::RemoveOutcome::eq(&self, &devlaunch_cor
 impl core::fmt::Debug for devlaunch_core::flows::lifecycle::RemoveOutcome
 pub fn devlaunch_core::flows::lifecycle::RemoveOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for devlaunch_core::flows::lifecycle::RemoveOutcome
+pub enum devlaunch_core::api::SessionLogin
+pub devlaunch_core::api::SessionLogin::Directory
+pub devlaunch_core::api::SessionLogin::OwnerUnnamed
+pub devlaunch_core::api::SessionLogin::Profile
+impl core::clone::Clone for devlaunch_core::flows::launch::SessionLogin
+pub fn devlaunch_core::flows::launch::SessionLogin::clone(&self) -> devlaunch_core::flows::launch::SessionLogin
+impl core::cmp::Eq for devlaunch_core::flows::launch::SessionLogin
+impl core::cmp::PartialEq for devlaunch_core::flows::launch::SessionLogin
+pub fn devlaunch_core::flows::launch::SessionLogin::eq(&self, &devlaunch_core::flows::launch::SessionLogin) -> bool
+impl core::fmt::Debug for devlaunch_core::flows::launch::SessionLogin
+pub fn devlaunch_core::flows::launch::SessionLogin::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for devlaunch_core::flows::launch::SessionLogin
+impl core::marker::StructuralPartialEq for devlaunch_core::flows::launch::SessionLogin
 pub enum devlaunch_core::api::SpecIdentity<'a>
 pub devlaunch_core::api::SpecIdentity::ExistingName(&'a str)
 pub devlaunch_core::api::SpecIdentity::PathLeaf(&'a str)
@@ -720,7 +733,7 @@ pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUidMismatch::
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable
-pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable::forwarded_login: bool
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable::login: devlaunch_core::flows::launch::SessionLogin
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable::reading: core::option::Option<std::path::PathBuf>
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable::target: std::path::PathBuf
@@ -856,6 +869,19 @@ impl core::fmt::Debug for devlaunch_core::flows::launch::MemoryCap
 pub fn devlaunch_core::flows::launch::MemoryCap::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for devlaunch_core::flows::launch::MemoryCap
 impl core::marker::StructuralPartialEq for devlaunch_core::flows::launch::MemoryCap
+pub enum devlaunch_core::flows::launch::SessionLogin
+pub devlaunch_core::flows::launch::SessionLogin::Directory
+pub devlaunch_core::flows::launch::SessionLogin::OwnerUnnamed
+pub devlaunch_core::flows::launch::SessionLogin::Profile
+impl core::clone::Clone for devlaunch_core::flows::launch::SessionLogin
+pub fn devlaunch_core::flows::launch::SessionLogin::clone(&self) -> devlaunch_core::flows::launch::SessionLogin
+impl core::cmp::Eq for devlaunch_core::flows::launch::SessionLogin
+impl core::cmp::PartialEq for devlaunch_core::flows::launch::SessionLogin
+pub fn devlaunch_core::flows::launch::SessionLogin::eq(&self, &devlaunch_core::flows::launch::SessionLogin) -> bool
+impl core::fmt::Debug for devlaunch_core::flows::launch::SessionLogin
+pub fn devlaunch_core::flows::launch::SessionLogin::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for devlaunch_core::flows::launch::SessionLogin
+impl core::marker::StructuralPartialEq for devlaunch_core::flows::launch::SessionLogin
 pub struct devlaunch_core::flows::launch::Cold<'a, 'r>
 pub devlaunch_core::flows::launch::Cold::clones: &'a devlaunch_core::flows::workspace_clone::WorkspaceCloneManager<'r>
 pub devlaunch_core::flows::launch::Cold::storage: &'a mut devlaunch_core::domain::metadata::MetadataStorage

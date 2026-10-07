@@ -483,6 +483,28 @@ fn switched_on(value: Option<&str>) -> bool {
 // the notices
 // ===========================================================================
 
+/// Which account `claude` runs as in this session, as the notices report it.
+///
+/// Read off the one value that decides it ([`ForwardedLogin`]) rather than
+/// derived a second time, which is the whole point of carrying it: the sentence
+/// a notice prints and the credential the session actually gets are then the same
+/// fact. Four review rounds found them disagreeing, each time because a second
+/// site re-derived the account from the directory and failed open where the first
+/// failed closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionLogin {
+    /// The named profile's own credential travels with this session, so `claude`
+    /// runs as that account whatever directory it opens.
+    Profile,
+    /// Nothing travels, and `claude` runs as whatever login the directory this
+    /// session opens already holds.
+    Directory,
+    /// Nothing travels, and nothing this launch saw names the account that owns
+    /// the directory this session opens. The withholding is that unknown: see
+    /// [`ForwardedLogin`].
+    OwnerUnnamed,
+}
+
 /// Something the launch did that the `dl` binary may want to report.
 ///
 /// One vocabulary for the whole flow, because a single launch produces notices
@@ -662,18 +684,24 @@ pub enum LaunchNotice {
     /// directory, the session is somewhere else entirely. See
     /// `a_profile_the_session_is_not_reading_forwards_no_token_and_says_so`.
     ///
-    /// `forwarded_login` is the other half of that, and only `reading` being a
-    /// different directory does not settle it: on a container whose own Claude
-    /// configuration is this host's, the profile's credential travels as a token
-    /// and `claude` does run as that account, over a configuration directory that
-    /// is not the profile's. Saying it does not run as the profile at all would be
-    /// false there, which is the account the forwarded token authenticates as.
+    /// `login` is the other half of that, and only `reading` being a different
+    /// directory does not settle it: on a container whose own Claude configuration
+    /// is this host's, the profile's credential travels as a token and `claude`
+    /// does run as that account, over a configuration directory that is not the
+    /// profile's. Saying it does not run as the profile at all would be false
+    /// there, which is the account the forwarded token authenticates as.
+    ///
+    /// It is read off [`ForwardedLogin`], the one value
+    /// [`SessionContext::forwarded_claude`] acts on, rather than derived here. A
+    /// `reading` of `None` used to read as "the session is on this bind" while the
+    /// forwarder read the same unknown as "the session is somewhere else", which
+    /// is one fact answered two opposite ways by two call sites.
     ClaudeProfileMountUnwritable {
         name: String,
         target: PathBuf,
         uids_compared: bool,
         reading: Option<PathBuf>,
-        forwarded_login: bool,
+        login: SessionLogin,
     },
     /// A named profile is mounted and usable at the target, but this session
     /// reads a different Claude configuration directory, so the mount goes
@@ -4187,6 +4215,222 @@ impl ClaudeConfigEnv {
     }
 }
 
+/// The account that owns the Claude configuration directory a session will read.
+///
+/// Stated positively on purpose. The question this answers used to be asked as
+/// "is this somebody else's directory", and a negation answers "no" whenever no
+/// owner can be named -- which is fail-open by construction and is how the same
+/// defect arrived four times. Naming the owner is a claim, so the absence of one
+/// is [`Self::Unnamed`] and nothing travels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DirectoryOwner {
+    /// A bind of this profile, named by the container's own mount facts.
+    Profile(String),
+    /// The container's own configuration directory, which is no profile's: the
+    /// host may put whichever of its own accounts it was asked for there.
+    ContainerOwn,
+    /// Nothing this launch saw names an owner.
+    Unnamed,
+}
+
+/// The account this session will run as, and the account that owns the directory
+/// it will read, as one value.
+///
+/// Built once from `(effective, reading, selection, mount)` and read by both
+/// consumers -- [`SessionContext::forwarded_claude`], which acts on it, and
+/// [`claude_profile_mount_notice`], which reports it. The invariant it carries is
+/// positive: **the account the forwarded credential authenticates owns the
+/// directory the session opens.** A launch that cannot name that owner cannot
+/// establish the invariant, so it withholds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ForwardedLogin {
+    /// The directory read is this profile's own, or is nobody's; its credential
+    /// may travel.
+    Profile(String),
+    /// Nothing was named and the directory read is the container's own: the
+    /// host's unnamed login may travel.
+    ContainerOwn,
+    /// Nothing travels, and the notice says the same thing.
+    Withheld(WithheldBecause),
+}
+
+/// Why [`ForwardedLogin::Withheld`].
+///
+/// Four reasons rather than one bool, because three of them are ordinary and the
+/// fourth is the one the notice has to be honest about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WithheldBecause {
+    /// The mounted directory is writable, so it keeps and refreshes its own
+    /// credential and a short-lived host token over the top of it would be the
+    /// regression [`ClaudeConfig::Bound`] exists to avoid.
+    MountKeepsItsOwn,
+    /// This session's configuration directory is not the host's to forward into.
+    ConfigNotOurs,
+    /// The directory read belongs to a different account from the one a forwarded
+    /// credential would authenticate.
+    AnotherAccount,
+    /// No account can be named as the owner of the directory read.
+    OwnerUnnamed,
+}
+
+impl ForwardedLogin {
+    /// How the notices should describe this.
+    fn reported(&self) -> SessionLogin {
+        match self {
+            Self::Profile(_) | Self::ContainerOwn => SessionLogin::Profile,
+            Self::Withheld(WithheldBecause::OwnerUnnamed) => SessionLogin::OwnerUnnamed,
+            Self::Withheld(_) => SessionLogin::Directory,
+        }
+    }
+}
+
+/// Who owns the directory `reading` names, from the container's own mount facts.
+///
+/// Two container shapes, and telling them apart is the dimension whose absence
+/// hid the worst of the four defects. **One bind at the target itself** is one
+/// profile standing in for the whole configuration directory, so everything at or
+/// under the target is that profile's and [`ClaudeMountFacts::target_source`] is
+/// the only thing that names it -- a shape-blind helper keyed on
+/// [`bound_profiles`] sees an empty iterator here and concludes nobody owns
+/// anything. **Binds under the target** are one directory per profile, and there
+/// the leaf of the directory read is the name.
+///
+/// `reading` of `None` is the probe not saying, which names no owner.
+fn directory_owner(mount: &ClaudeMountFacts, reading: Option<&str>) -> DirectoryOwner {
+    let whole = mount
+        .target_binds()
+        .iter()
+        .any(|bind| bind == provision::CLAUDE_CONFIG_TARGET);
+    if whole {
+        // The leaf of the source actually mounted, which is the profile name:
+        // `claude_profile_mount_notice` compares the same component for the same
+        // reason, and a source the probe could not read names nobody.
+        return match mount
+            .target_source()
+            .and_then(|source| Path::new(source).file_name())
+            .and_then(|leaf| leaf.to_str())
+        {
+            Some(leaf) => DirectoryOwner::Profile(leaf.to_owned()),
+            None => DirectoryOwner::Unnamed,
+        };
+    }
+    let Some(dir) = reading else {
+        return DirectoryOwner::Unnamed;
+    };
+    match dir.strip_prefix(&format!("{}/", provision::CLAUDE_CONFIG_TARGET)) {
+        // A path deeper than one component under the target is a bind of a
+        // profile's own extras ([`dangling_symlink_binds`]) or something nothing
+        // here bound; either way no name falls out of it.
+        Some(leaf) => match bound_profiles(mount).any(|bound| bound == leaf) {
+            true => DirectoryOwner::Profile(leaf.to_owned()),
+            false => DirectoryOwner::Unnamed,
+        },
+        None if dir == provision::CLAUDE_CONFIG_TARGET => DirectoryOwner::Unnamed,
+        None => DirectoryOwner::ContainerOwn,
+    }
+}
+
+/// Resolve, once, what this session may run as.
+///
+/// `effective` is the classification of the directory the session ends up on,
+/// `reading` is that directory's path, `selection` is the `--claude-profile` this
+/// launch named, and `unwritable` is whether the bind the session's own answer
+/// rests on is one this container's user can write.
+///
+/// The order is the order of the claims. A configuration that is not the host's
+/// is nobody's to forward into whatever else is true. A writable bind keeps its
+/// own credential, so nothing has to travel and no owner has to be named. Only
+/// once the bind cannot refresh itself is a credential worth forwarding, and that
+/// is where the invariant bites: the account it authenticates has to own the
+/// directory the session opens.
+fn forwarded_login(
+    effective: Option<ClaudeConfig>,
+    reading: Option<&str>,
+    selection: Option<&str>,
+    mount: &ClaudeMountFacts,
+    unwritable: bool,
+) -> ForwardedLogin {
+    let named = |selection: Option<&str>| match selection {
+        Some(name) => ForwardedLogin::Profile(name.to_owned()),
+        None => ForwardedLogin::ContainerOwn,
+    };
+    match effective {
+        Some(ClaudeConfig::Foreign) | None => {
+            return ForwardedLogin::Withheld(WithheldBecause::ConfigNotOurs);
+        }
+        Some(ClaudeConfig::Ours) | Some(ClaudeConfig::Bound) => {}
+    }
+    if !unwritable {
+        return match effective {
+            Some(ClaudeConfig::Bound) => {
+                ForwardedLogin::Withheld(WithheldBecause::MountKeepsItsOwn)
+            }
+            _ => named(selection),
+        };
+    }
+    match directory_owner(mount, reading) {
+        // The whole of the licence. `selection` is the account
+        // [`claude::resolve_token`] will authenticate as, and with nothing
+        // selected that is this host's unnamed login, which is nobody's profile.
+        DirectoryOwner::Profile(owner) if selection == Some(owner.as_str()) => named(selection),
+        DirectoryOwner::Profile(_) => ForwardedLogin::Withheld(WithheldBecause::AnotherAccount),
+        DirectoryOwner::ContainerOwn => named(selection),
+        DirectoryOwner::Unnamed => ForwardedLogin::Withheld(WithheldBecause::OwnerUnnamed),
+    }
+}
+
+/// Everything this session's Claude decision rests on, resolved together.
+///
+/// The three were computed at five sites between them, and the four review rounds
+/// that preceded this all found two of those sites disagreeing. They are derived
+/// here, once, from the payload's own export and the probe's facts, and every
+/// consumer reads the result.
+struct SessionClaude<'a> {
+    /// The classification of the directory the session ends up on: the payload's
+    /// export where there is one, and the probe's own answer where there is not.
+    /// The two differ in exactly the case [`ClaudeConfigEnv`] exists for -- a
+    /// devcontainer that pins `CLAUDE_CONFIG_DIR` leaves the probe reporting
+    /// `Ours` or `Foreign` over a mount the export is about to make effective.
+    effective: Option<ClaudeConfig>,
+    /// The same question asked of the path rather than the classification: which
+    /// directory `claude` will open. `None` is the probe not saying, which is the
+    /// half a bare attach over an older memo has.
+    reading: Option<&'a str>,
+    /// The one decision.
+    login: ForwardedLogin,
+}
+
+impl<'a> SessionClaude<'a> {
+    fn resolve(
+        claude: &'a ClaudeConfigEnv,
+        config: Option<ClaudeConfig>,
+        mount: &'a ClaudeMountFacts,
+        selection: Option<&str>,
+    ) -> Self {
+        let effective = match claude {
+            ClaudeConfigEnv::Set(_) => Some(ClaudeConfig::Bound),
+            ClaudeConfigEnv::Leave => config,
+        };
+        let reading = match claude {
+            ClaudeConfigEnv::Set(dir) => Some(dir.as_str()),
+            ClaudeConfigEnv::Leave => mount.dir(),
+        };
+        // Asked of the bind the session's own answer rests on: the exported one
+        // where a payload carries an export, and the anchor where it does not.
+        // [`ClaudeConfigEnv::from_mount`] short-circuits on an unwritable anchor
+        // before it reaches the set arm, so the two are the same bind there.
+        let unwritable = match claude {
+            ClaudeConfigEnv::Set(dir) => mount.bind_unwritable(dir),
+            ClaudeConfigEnv::Leave => mount.target_unusable(),
+        };
+        Self {
+            effective,
+            reading,
+            login: forwarded_login(effective, reading, selection, mount, unwritable),
+        }
+    }
+}
+
 /// A wrapped command, with the one decision a transport has to agree with the
 /// payload about.
 ///
@@ -4347,13 +4591,16 @@ fn with_codex_login(command: &str, codex: CodexLogin) -> String {
 fn with_claude_config_dir(command: &str, claude: &ClaudeConfigEnv) -> String {
     match claude {
         ClaudeConfigEnv::Leave => command.to_owned(),
-        ClaudeConfigEnv::Set(dir) => {
-            // The constant, or the constant joined with a `ProfileName`: safe
-            // characters either way, so quoting leaves it bare and cannot fail --
-            // the same call `with_zellij_session` makes about its session name.
-            let target = posix_quote(dir).unwrap_or_default();
-            format!("export CLAUDE_CONFIG_DIR={target}; {command}")
-        }
+        // The constant, or the constant joined with a `ProfileName`: safe
+        // characters either way, so quoting leaves it bare and cannot fail -- the
+        // same call `with_zellij_session` makes about its session name. A path it
+        // refuses anyway leaves the container's own answer standing, because the
+        // alternative an empty quoting produced was `export CLAUDE_CONFIG_DIR=;`,
+        // an empty configuration directory paired with a forwarded credential.
+        ClaudeConfigEnv::Set(dir) => match posix_quote(dir) {
+            Some(target) => format!("export CLAUDE_CONFIG_DIR={target}; {command}"),
+            None => command.to_owned(),
+        },
     }
 }
 
@@ -4680,29 +4927,24 @@ impl<'a> SessionContext<'a> {
     ) -> Result<Option<claude::Token>, SessionRefused> {
         let seen = self.claude_seen.get();
         let mount = seen.mount();
-        // What the session will actually read, which is the payload's export where
-        // there is one and the probe's classification otherwise. The two differ in
-        // exactly the case [`ClaudeConfigEnv`] exists for: a devcontainer that pins
-        // `CLAUDE_CONFIG_DIR` leaves the probe reporting `Ours` or `Foreign` over a
-        // mount that the export is about to make the effective one. Forwarding a
-        // token there would put a credential that cannot refresh over one that can,
-        // which is the whole reason the `Bound` arm forwards nothing.
-        //
         // Before the mount's own notice, which is read from it: which directory the
         // session ends up on is what decides whether a mount nothing points at is
         // worth a word.
-        let effective = match claude {
-            ClaudeConfigEnv::Set(_) => Some(ClaudeConfig::Bound),
-            ClaudeConfigEnv::Leave => seen.config(),
-        };
-        // The same question asked of the path rather than the classification: which
-        // directory `claude` will open. The export where there is one, and the
-        // directory the probe found the container reading where there is not --
-        // which is the half a bare attach has, since it carries no export at all.
-        let reading = match &claude {
-            ClaudeConfigEnv::Set(dir) => Some(dir.as_str()),
-            ClaudeConfigEnv::Leave => mount.dir(),
-        };
+        //
+        // The one decision, resolved before anything reads it: which account this
+        // session runs as, and which account owns the directory it opens. Both
+        // consumers below take it from here rather than deriving it again, which
+        // is what keeps the notice from contradicting the forwarder.
+        let SessionClaude {
+            effective,
+            reading,
+            login,
+        } = SessionClaude::resolve(
+            &claude,
+            seen.config(),
+            mount,
+            self.host.claude.selected_profile(),
+        );
         // Said for the bind itself, not from inside whichever arm below claims the
         // session. A devcontainer that pins `CLAUDE_CONFIG_DIR` leaves the probe
         // classifying the pinned directory, and the bind the user asked for earns
@@ -4723,64 +4965,22 @@ impl<'a> SessionContext<'a> {
                     .map(|profile| profile.source.clone()),
                 _ => None,
             };
-            if let Some(notice) =
-                claude_profile_mount_notice(name, requested.as_deref(), mount, effective, reading)
-            {
+            if let Some(notice) = claude_profile_mount_notice(
+                name,
+                requested.as_deref(),
+                mount,
+                effective,
+                reading,
+                login.reported(),
+            ) {
                 said_the_mount_is_idle =
                     matches!(notice, LaunchNotice::ClaudeProfileMountIgnored { .. });
                 notices.say(notice);
             }
         }
-        match effective {
-            Some(ClaudeConfig::Ours) => {}
-            Some(ClaudeConfig::Bound) => {
-                // The one exception, and it is the same fact `ClaudeConfigEnv`
-                // already withheld the export over: a directory the container's
-                // user cannot write cannot refresh the credential it holds, so the
-                // premise that forwarding nothing is harmless is gone and the
-                // host's token is the only login this session can get.
-                //
-                // The same fact asked of a set, where the export does land on the
-                // unwritable bind ([`ClaudeConfigEnv::from_mount`]): the session
-                // reads that profile's own directory, and the token is what makes
-                // the account it authenticates as the same one.
-                //
-                // Which is the whole of the licence, and `reading` is what holds it
-                // to that: a profile's token is forwarded only where the directory
-                // this session opens is that profile's own. Three ways it is not --
-                // a bare attach, which builds no payload and so exports nothing; a
-                // set whose anchor is itself unwritable, which `from_mount`
-                // short-circuits on before it reaches the set arm; and a probe that
-                // could not name the directory -- and each would otherwise pair one
-                // account's live token with another account's bind.
-                //
-                // With nothing selected there is no profile for the token to
-                // belong to: `resolve_token` falls back to this host's unnamed
-                // login, which is nobody's profile of the set, while the session
-                // reads whichever bind `from_mount` kept it on -- the ordinary
-                // state of a set container launched with no `--claude-profile`,
-                // since the workspace bakes the export in at creation. A container
-                // that bound no set is unaffected either way: `bound_profiles`
-                // yields nothing both for an empty bind list and for one bind at
-                // the target itself, so neither arm can be true.
-                let unwritable = match &claude {
-                    ClaudeConfigEnv::Set(dir) => mount.bind_unwritable(dir),
-                    ClaudeConfigEnv::Leave => mount.target_unusable(),
-                };
-                let another_profiles_directory = match self.host.claude.selected_profile() {
-                    Some(name) => {
-                        bound_profiles(mount).any(|bound| bound == name)
-                            && reading.is_none_or(|dir| dir != profile_target(name))
-                    }
-                    None => reading.is_some_and(|dir| {
-                        bound_profiles(mount).any(|bound| dir == profile_target(bound))
-                    }),
-                };
-                if !unwritable || another_profiles_directory {
-                    return Ok(None);
-                }
-            }
-            Some(ClaudeConfig::Foreign) | None => {
+        match &login {
+            ForwardedLogin::Profile(_) | ForwardedLogin::ContainerOwn => {}
+            ForwardedLogin::Withheld(WithheldBecause::ConfigNotOurs) => {
                 // Unless the mount notice already said this launch's session reads
                 // a different directory, which is the one notice that contradicts
                 // this one: it names the profile as mounted and unread, where this
@@ -4797,6 +4997,7 @@ impl<'a> SessionContext<'a> {
                 }
                 return Ok(None);
             }
+            ForwardedLogin::Withheld(_) => return Ok(None),
         }
         match claude::resolve_token(
             self.host.home.as_deref(),
@@ -4899,6 +5100,10 @@ impl<'a> SessionContext<'a> {
 /// profile is actually there rather than the one asked for, which would be a
 /// confusing thing to name as the cause.
 ///
+/// `login` is not derived here. It is [`SessionContext::forwarded_claude`]'s own
+/// resolved answer, passed in, so the account this reports and the credential that
+/// actually travels cannot come apart.
+///
 /// `None` on success and on every fact the probe could not resolve -- a mount
 /// this cannot back up with evidence is not reported as broken, the same
 /// standard [`ClaudeConfig::parse`] itself holds to. `requested` is `None` when
@@ -4912,16 +5117,13 @@ fn claude_profile_mount_notice(
     mount: &ClaudeMountFacts,
     effective: Option<ClaudeConfig>,
     reading: Option<&str>,
+    login: SessionLogin,
 ) -> Option<LaunchNotice> {
     // The directory this session ends up on, which decides how much of the damage
     // an unwritable bind is: a lost refresh where the session is on that bind, and
     // a different account's directory where it is not. `None` is the probe not
     // saying, which leaves the claim the notice made before this was carried.
     let read_instead = |target: &str| reading.filter(|dir| *dir != target).map(PathBuf::from);
-    // And whether the account still agrees where the directory does not:
-    // [`SessionContext::forwarded_claude`] forwards this profile's own credential
-    // on `Ours`, so `claude` runs as it over whatever directory the container pins.
-    let forwarded_login = matches!(effective, Some(ClaudeConfig::Ours));
     // A container that bound a set answers a different question first, and the
     // arms below cannot answer it: with one directory per profile, "is the profile
     // this launch named reachable here" is about which binds exist, not about
@@ -4952,7 +5154,7 @@ fn claude_profile_mount_notice(
                     target: PathBuf::from(&bind),
                     uids_compared: false,
                     reading: read_instead(&bind),
-                    forwarded_login,
+                    login,
                 }
             });
         }
@@ -5027,7 +5229,7 @@ fn claude_profile_mount_notice(
                 target: PathBuf::from(mount.target_anchor()),
                 uids_compared: matches!(uids, (Some(_), Some(_))),
                 reading: read_instead(mount.target_anchor()),
-                forwarded_login,
+                login,
             },
         });
     }
@@ -11097,14 +11299,18 @@ mod tests {
             ClaudeConfigEnv::Set(target.to_owned())
         );
         assert_eq!(
-            claude_profile_mount_notice(
+            resolved_mount_notice(
                 "bear",
                 None,
                 &facts,
                 Some(ClaudeConfig::Bound),
-                Some(target)
+                &ClaudeConfigEnv::Set(target.to_owned()),
+                Some("bear"),
             ),
-            None,
+            (
+                ForwardedLogin::Withheld(WithheldBecause::MountKeepsItsOwn),
+                None
+            ),
             "nothing is wrong with this container"
         );
     }
@@ -11137,20 +11343,24 @@ mod tests {
             ClaudeConfigEnv::Set(work.clone())
         );
         assert_eq!(
-            claude_profile_mount_notice(
+            resolved_mount_notice(
                 "work",
                 None,
                 &facts,
                 Some(ClaudeConfig::Bound),
-                Some(work.as_str()),
+                &ClaudeConfigEnv::Set(work.clone()),
+                Some("work"),
             ),
-            Some(LaunchNotice::ClaudeProfileMountUnwritable {
-                name: "work".to_owned(),
-                target: PathBuf::from(&work),
-                uids_compared: false,
-                reading: None,
-                forwarded_login: false,
-            })
+            (
+                ForwardedLogin::Profile("work".to_owned()),
+                Some(LaunchNotice::ClaudeProfileMountUnwritable {
+                    name: "work".to_owned(),
+                    target: PathBuf::from(&work),
+                    uids_compared: false,
+                    reading: None,
+                    login: SessionLogin::Profile,
+                })
+            )
         );
         assert_eq!(
             ClaudeConfigEnv::from_mount(&facts, Some("bear")),
@@ -11177,20 +11387,24 @@ mod tests {
         )
         .with_dir("/home/dev/.claude-pinned");
         assert_eq!(
-            claude_profile_mount_notice(
+            resolved_mount_notice(
                 "work",
                 None,
                 &facts,
                 Some(ClaudeConfig::Ours),
-                Some("/home/dev/.claude-pinned"),
+                &ClaudeConfigEnv::Leave,
+                Some("work"),
             ),
-            Some(LaunchNotice::ClaudeProfileMountUnwritable {
-                name: "work".to_owned(),
-                target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
-                uids_compared: true,
-                reading: Some(PathBuf::from("/home/dev/.claude-pinned")),
-                forwarded_login: true,
-            })
+            (
+                ForwardedLogin::Profile("work".to_owned()),
+                Some(LaunchNotice::ClaudeProfileMountUnwritable {
+                    name: "work".to_owned(),
+                    target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+                    uids_compared: true,
+                    reading: Some(PathBuf::from("/home/dev/.claude-pinned")),
+                    login: SessionLogin::Profile,
+                })
+            )
         );
     }
 
@@ -11212,44 +11426,54 @@ mod tests {
         .with_binds(&[&bear, &format!("{target}/work")])
         .with_dir(&bear);
         assert_eq!(
-            claude_profile_mount_notice(
+            resolved_mount_notice(
                 "otter",
                 None,
                 &facts,
                 Some(ClaudeConfig::Ours),
-                Some(&bear)
-            ),
+                &ClaudeConfigEnv::Leave,
+                Some("otter"),
+            )
+            .1,
             Some(LaunchNotice::ClaudeProfileNotInBoundSet {
                 name: "otter".to_owned(),
                 bound: vec!["bear".to_owned(), "work".to_owned()],
             })
         );
         assert_eq!(
-            claude_profile_mount_notice(
+            resolved_mount_notice(
                 "work",
                 None,
                 &facts,
                 Some(ClaudeConfig::Bound),
-                Some(&bear)
+                &ClaudeConfigEnv::Leave,
+                Some("work"),
             ),
-            None,
-            "the facts describe bear's bind, not work's"
+            (
+                ForwardedLogin::Withheld(WithheldBecause::AnotherAccount),
+                None
+            ),
+            "the facts describe bear's bind, not work's, and bear's is what this session reads"
         );
         assert_eq!(
-            claude_profile_mount_notice(
+            resolved_mount_notice(
                 "bear",
                 None,
                 &facts,
                 Some(ClaudeConfig::Bound),
-                Some(&bear)
+                &ClaudeConfigEnv::Leave,
+                Some("bear"),
             ),
-            Some(LaunchNotice::ClaudeProfileMountUnwritable {
-                name: "bear".to_owned(),
-                target: PathBuf::from(&bear),
-                uids_compared: true,
-                reading: None,
-                forwarded_login: false,
-            }),
+            (
+                ForwardedLogin::Profile("bear".to_owned()),
+                Some(LaunchNotice::ClaudeProfileMountUnwritable {
+                    name: "bear".to_owned(),
+                    target: PathBuf::from(&bear),
+                    uids_compared: true,
+                    reading: None,
+                    login: SessionLogin::Profile,
+                })
+            ),
             "a bind this launch does read is still examined, and named by its own path"
         );
     }
@@ -12969,6 +13193,28 @@ mod tests {
         assert!(zellij < export && export < command, "{line}");
     }
 
+    #[test]
+    fn a_config_directory_no_shell_word_can_hold_is_not_exported_as_an_empty_one() {
+        // The directory comes from the probe on the no-selection set path, so it
+        // is not always a path dl built. Quoting it used to fall back to the empty
+        // string, which emits `export CLAUDE_CONFIG_DIR=;` -- an empty
+        // configuration directory paired with whatever credential this session
+        // forwards. Leaving the container's own answer standing is the lesser of
+        // the two, and it is what every other unknown here does.
+        let payload = RemotePayload::wrap(
+            &RemoteCommand::argv(&["claude"]),
+            ZellijWrap::Off,
+            CodexLogin::Off,
+            ClaudeConfigEnv::Set("/var/tmp/holds\u{0}a nul".to_owned()),
+        )
+        .expect("quotable");
+        assert!(
+            !payload.as_str().contains("CLAUDE_CONFIG_DIR"),
+            "{}",
+            payload.as_str()
+        );
+    }
+
     /// The probe's live facts license the export, never the request: a launch that
     /// names a profile against a container the mount never landed in would
     /// otherwise point Claude Code at an empty directory, and one against a bind
@@ -14100,6 +14346,33 @@ mod tests {
         }
     }
 
+    /// The pair this flow has to keep together: the login
+    /// [`SessionContext::forwarded_claude`] resolves, and the notice built from
+    /// that same value.
+    ///
+    /// Every unit case goes through this rather than handing
+    /// [`claude_profile_mount_notice`] a login of its own, because a second
+    /// derivation of the account is the defect this table exists to catch.
+    fn resolved_mount_notice(
+        name: &str,
+        requested: Option<&Path>,
+        facts: &ClaudeMountFacts,
+        config: Option<ClaudeConfig>,
+        claude: &ClaudeConfigEnv,
+        selection: Option<&str>,
+    ) -> (ForwardedLogin, Option<LaunchNotice>) {
+        let resolved = SessionClaude::resolve(claude, config, facts, selection);
+        let notice = claude_profile_mount_notice(
+            name,
+            requested,
+            facts,
+            resolved.effective,
+            resolved.reading,
+            resolved.login.reported(),
+        );
+        (resolved.login, notice)
+    }
+
     /// Only the notices [`claude_profile_mount_notice`] can produce, in order --
     /// `workspace_ssh` says plenty else along the way (an `SshCommand` among
     /// them), and none of that is this table's business.
@@ -14179,7 +14452,7 @@ mod tests {
                 target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
                 uids_compared,
                 reading: None,
-                forwarded_login: false,
+                login: SessionLogin::Profile,
             };
         let mismatch = |name: &str| LaunchNotice::ClaudeProfileMountUidMismatch {
             name: name.to_owned(),
@@ -14240,13 +14513,16 @@ mod tests {
                 // A memo written before the source was recorded. The notices here
                 // name the profile as the thing bound, and with no source to check
                 // that against the bind may be another profile's -- the same reason
-                // the ignored notice is gated on one.
+                // the ignored notice is gated on one. The token goes the same way:
+                // one bind at the target is one profile standing in for the whole
+                // configuration directory, and the source is the only thing that
+                // names which. Unnamed is not this profile, so nothing travels.
                 "bound, unwritable, source nothing could identify",
                 ClaudeConfig::Bound,
                 (Some(1000), Some(1001)),
                 false,
                 vec![],
-                Some("not-a-real-token-from-the-profile"),
+                None,
             ),
         ] {
             let scene = Scene::new()
@@ -14420,7 +14696,7 @@ mod tests {
                     target: PathBuf::from(&work),
                     uids_compared: false,
                     reading: None,
-                    forwarded_login: false,
+                    login: SessionLogin::Profile,
                 }]
             };
             assert_eq!(
@@ -14529,7 +14805,7 @@ mod tests {
                     target: PathBuf::from(&work),
                     uids_compared: false,
                     reading: Some(PathBuf::from(&bear)),
-                    forwarded_login: false,
+                    login: SessionLogin::Directory,
                 }],
                 "{row}: {notices:?}"
             );
@@ -14625,6 +14901,414 @@ mod tests {
                 .get(claude::TOKEN_VAR)
                 .map(String::as_str),
             None,
+        );
+    }
+
+    #[test]
+    fn the_account_a_forwarded_credential_authenticates_owns_the_directory_the_session_reads() {
+        // The invariant, stated positively and crossed with the dimension whose
+        // absence hid the worst of the four defects it replaces: **container
+        // shape**. One bind *at* the target is one profile standing in for the
+        // whole configuration directory, and the only thing that names which
+        // profile is the source mounted there; binds *under* the target are one
+        // directory per profile, and there the leaf of the directory read is the
+        // name. A helper keyed on the second shape reads the first as "no profiles
+        // are bound", which answers "nobody else owns this" for exactly the
+        // container a plain `dl repo --claude-profile bear` creates.
+        //
+        // Crossed with: a command or a bare attach (an export or none), each
+        // classification, a selection or none, and each bind writable or not. One
+        // row pins one resolved value, and the resolved value is what both the
+        // forwarder and the notice read -- so a row covers the pair rather than
+        // half of it.
+        let target = provision::CLAUDE_CONFIG_TARGET;
+        let bear = format!("{target}/bear");
+        let work = format!("{target}/work");
+        let whole = |source: Option<&str>, writable: bool, dir: &str| {
+            ClaudeMountFacts::synthetic(Some(true), source, Some(writable), Some(1000), Some(1000))
+                .with_dir(dir)
+        };
+        let set = |dir: Option<&str>, anchor_writable: bool, unwritable: &[&str]| {
+            let facts = ClaudeMountFacts::synthetic(
+                Some(true),
+                None,
+                Some(anchor_writable),
+                Some(1000),
+                Some(1000),
+            )
+            .with_binds(&[&bear, &work])
+            .with_unwritable_binds(unwritable);
+            match dir {
+                Some(dir) => facts.with_dir(dir),
+                None => facts,
+            }
+        };
+        let mounted = "/host/me/.claude-profiles/bear";
+        for (row, facts, config, selection, command, expected) in [
+            // --- one bind at the target: the whole directory is one profile's
+            (
+                "whole bind of bear, writable, bear named",
+                whole(Some(mounted), true, target),
+                Some(ClaudeConfig::Bound),
+                Some("bear"),
+                true,
+                ForwardedLogin::Withheld(WithheldBecause::MountKeepsItsOwn),
+            ),
+            (
+                "whole bind of bear, unwritable, bear named",
+                whole(Some(mounted), false, target),
+                Some(ClaudeConfig::Bound),
+                Some("bear"),
+                true,
+                ForwardedLogin::Profile("bear".to_owned()),
+            ),
+            (
+                // devlaunch#592's first medium: created with bear, launched
+                // naming otter. otter's live token into bear's `settings.json`,
+                // hooks and plugins is what the old guard let through.
+                "whole bind of bear, unwritable, otter named",
+                whole(Some(mounted), false, target),
+                Some(ClaudeConfig::Bound),
+                Some("otter"),
+                true,
+                ForwardedLogin::Withheld(WithheldBecause::AnotherAccount),
+            ),
+            (
+                // devlaunch#592's high: the profile flag is not re-applied on
+                // attach, so this is the ordinary second launch of a container
+                // created with one. The host's unnamed login is nobody's profile.
+                "whole bind of bear, unwritable, nothing named",
+                whole(Some(mounted), false, target),
+                Some(ClaudeConfig::Bound),
+                None,
+                true,
+                ForwardedLogin::Withheld(WithheldBecause::AnotherAccount),
+            ),
+            (
+                "whole bind nothing could identify, unwritable, bear named",
+                whole(None, false, target),
+                Some(ClaudeConfig::Bound),
+                Some("bear"),
+                true,
+                ForwardedLogin::Withheld(WithheldBecause::OwnerUnnamed),
+            ),
+            (
+                "whole bind of bear, unwritable, bear named, bare attach",
+                whole(Some(mounted), false, target),
+                Some(ClaudeConfig::Bound),
+                Some("bear"),
+                false,
+                ForwardedLogin::Profile("bear".to_owned()),
+            ),
+            (
+                // The container pins a `CLAUDE_CONFIG_DIR` of its own, so the bind
+                // is read by nobody and the directory is no profile's: the host
+                // may put whichever of its own accounts it was asked for there.
+                "whole bind of bear, unwritable, container pins its own, bear named",
+                whole(Some(mounted), false, "/home/dev/.claude-pinned"),
+                Some(ClaudeConfig::Ours),
+                Some("bear"),
+                false,
+                ForwardedLogin::Profile("bear".to_owned()),
+            ),
+            (
+                "whole bind of bear, unwritable, container pins somebody else's",
+                whole(Some(mounted), false, "/home/dev/.claude-pinned"),
+                Some(ClaudeConfig::Foreign),
+                Some("bear"),
+                false,
+                ForwardedLogin::Withheld(WithheldBecause::ConfigNotOurs),
+            ),
+            (
+                "whole bind of bear, unwritable, nothing classified",
+                whole(Some(mounted), false, target),
+                None,
+                Some("bear"),
+                false,
+                ForwardedLogin::Withheld(WithheldBecause::ConfigNotOurs),
+            ),
+            // --- one bind per profile under the target: a set
+            (
+                "set, work named, work's bind writable",
+                set(Some(&bear), true, &[]),
+                Some(ClaudeConfig::Bound),
+                Some("work"),
+                true,
+                ForwardedLogin::Withheld(WithheldBecause::MountKeepsItsOwn),
+            ),
+            (
+                "set, work named, work's bind unwritable",
+                set(Some(&bear), true, &[&work]),
+                Some(ClaudeConfig::Bound),
+                Some("work"),
+                true,
+                ForwardedLogin::Profile("work".to_owned()),
+            ),
+            (
+                "set, work named, anchor unwritable so nothing is exported",
+                set(Some(&bear), false, &[&bear, &work]),
+                Some(ClaudeConfig::Bound),
+                Some("work"),
+                true,
+                ForwardedLogin::Withheld(WithheldBecause::AnotherAccount),
+            ),
+            (
+                "set, work named, bare attach stays on bear",
+                set(Some(&bear), false, &[&work]),
+                Some(ClaudeConfig::Bound),
+                Some("work"),
+                false,
+                ForwardedLogin::Withheld(WithheldBecause::AnotherAccount),
+            ),
+            (
+                "set, nothing named, reads bear's unwritable bind",
+                set(Some(&bear), true, &[&bear]),
+                Some(ClaudeConfig::Bound),
+                None,
+                true,
+                ForwardedLogin::Withheld(WithheldBecause::AnotherAccount),
+            ),
+            (
+                // devlaunch#592's second medium: the warm-attach cell, where the
+                // memo carries no directory at all. The forwarder read that
+                // unknown as "the session is somewhere else" and the notice read
+                // it as "the session is on the bind"; one value answers both.
+                "set, work named, nothing says which directory is read",
+                set(None, false, &[&work]),
+                Some(ClaudeConfig::Bound),
+                Some("work"),
+                false,
+                ForwardedLogin::Withheld(WithheldBecause::OwnerUnnamed),
+            ),
+            (
+                "set, a name the container never bound, anchor unwritable",
+                set(Some(&bear), false, &[&bear]),
+                Some(ClaudeConfig::Bound),
+                Some("otter"),
+                false,
+                ForwardedLogin::Withheld(WithheldBecause::AnotherAccount),
+            ),
+            (
+                // A path under a bind rather than a bind: a profile's own outward
+                // symlink is mounted at `<target>/<profile>/<link>`, and a
+                // devcontainer free to pin `CLAUDE_CONFIG_DIR` is free to pin it
+                // there. No single component names a profile, so no owner does.
+                "set, work named, the pinned directory is deeper than a bind",
+                set(Some(&format!("{work}/skills")), false, &[&work]),
+                Some(ClaudeConfig::Bound),
+                Some("work"),
+                false,
+                ForwardedLogin::Withheld(WithheldBecause::OwnerUnnamed),
+            ),
+            // --- no mount at all: the container's own configuration
+            (
+                "no mount, the container's configuration is this host's, bear named",
+                ClaudeMountFacts::default(),
+                Some(ClaudeConfig::Ours),
+                Some("bear"),
+                true,
+                ForwardedLogin::Profile("bear".to_owned()),
+            ),
+            (
+                "no mount, the container's configuration is this host's, nothing named",
+                ClaudeMountFacts::default(),
+                Some(ClaudeConfig::Ours),
+                None,
+                true,
+                ForwardedLogin::ContainerOwn,
+            ),
+            (
+                "no mount, somebody else's configuration",
+                ClaudeMountFacts::default(),
+                Some(ClaudeConfig::Foreign),
+                Some("bear"),
+                true,
+                ForwardedLogin::Withheld(WithheldBecause::ConfigNotOurs),
+            ),
+        ] {
+            let claude = match command {
+                true => ClaudeConfigEnv::from_mount(&facts, selection),
+                false => ClaudeConfigEnv::Leave,
+            };
+            let resolved = SessionClaude::resolve(&claude, config, &facts, selection);
+            assert_eq!(resolved.login, expected, "{row}");
+            // The invariant itself, over every row: a credential travels only
+            // where the directory this session opens has an owner and that owner
+            // is the account the credential authenticates. `ContainerOwn` is a
+            // directory no profile owns, which is the one place the host may put
+            // an account of its choosing.
+            let owner = directory_owner(&facts, resolved.reading);
+            match &resolved.login {
+                ForwardedLogin::Profile(account) => assert!(
+                    owner == DirectoryOwner::Profile(account.clone())
+                        || owner == DirectoryOwner::ContainerOwn
+                        || !matches!(config, Some(ClaudeConfig::Bound)),
+                    "{row}: {account} over {owner:?}"
+                ),
+                ForwardedLogin::ContainerOwn => assert!(
+                    owner == DirectoryOwner::ContainerOwn || selection.is_none(),
+                    "{row}: the host's unnamed login over {owner:?}"
+                ),
+                ForwardedLogin::Withheld(_) => {}
+            }
+        }
+    }
+
+    #[test]
+    fn a_bind_nothing_says_is_read_withholds_the_token_and_the_notice_says_the_same() {
+        // devlaunch#592's second medium: the warm-attach cell, where the memo
+        // carries the binds and their writability but no effective directory. The
+        // forwarder read that unknown as "the session is somewhere else" and
+        // withheld; the notice read the same unknown as "the session is on the
+        // bind" and said it still reads that profile and runs as it. One fact, two
+        // call sites, opposite defaults.
+        //
+        // Asserted as a pair on purpose: the resolved value and the notice built
+        // from it, which is what makes a contradiction unrepresentable rather than
+        // merely absent today.
+        let target = provision::CLAUDE_CONFIG_TARGET;
+        let bear = format!("{target}/bear");
+        let work = format!("{target}/work");
+        let facts = ClaudeMountFacts::synthetic(Some(true), None, Some(false), None, None)
+            .with_binds(&[&bear, &work])
+            .with_unwritable_binds(&[&work]);
+        assert_eq!(
+            resolved_mount_notice(
+                "work",
+                None,
+                &facts,
+                Some(ClaudeConfig::Bound),
+                &ClaudeConfigEnv::Leave,
+                Some("work"),
+            ),
+            (
+                ForwardedLogin::Withheld(WithheldBecause::OwnerUnnamed),
+                Some(LaunchNotice::ClaudeProfileMountUnwritable {
+                    name: "work".to_owned(),
+                    target: PathBuf::from(&work),
+                    uids_compared: false,
+                    reading: None,
+                    login: SessionLogin::OwnerUnnamed,
+                })
+            )
+        );
+    }
+
+    #[test]
+    fn a_whole_bind_nobody_named_a_profile_of_withholds_the_hosts_unnamed_login() {
+        // devlaunch#592's high, end to end on the shape a plain
+        // `dl repo --claude-profile bear` creates: one bind at the target, which
+        // the container's user cannot write. The profile flag is not re-applied on
+        // attach and the export is baked in at creation, so the second launch
+        // names nothing -- and the login the host would fall back to is its own
+        // unnamed one, which is not the account whose configuration directory that
+        // bind is.
+        let target = provision::CLAUDE_CONFIG_TARGET;
+        let (scene, _home) = with_claude_login(
+            Scene::new().with_running("myws"),
+            "not-a-real-host-default-token",
+        );
+        let mount = ClaudeMountFacts::synthetic(
+            Some(true),
+            Some("/home/host/.claude-profiles/bear"),
+            Some(false),
+            Some(1000),
+            Some(1000),
+        )
+        .with_dir(target)
+        .with_unwritable_binds(&[target]);
+        let token = HostToken::new();
+        let mut notices = Vec::new();
+        let claude_seen = ClaudeSeen::new();
+        claude_seen.set(ClaudeObservation::from_pass(
+            Some(ClaudeConfig::Bound),
+            mount,
+        ));
+        let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
+        let command = RemoteCommand::argv(&["claude"]);
+        let opened = workspace_ssh(
+            &context,
+            "myws",
+            Some(&command),
+            None,
+            &mut |_| {},
+            &mut notices,
+        );
+        assert!(opened.is_ok(), "{opened:?}");
+        // Nothing named, so nothing names a profile to report it under: the
+        // silence here is the same one the set path keeps.
+        assert_eq!(claude_profile_mount_notices(&notices), Vec::new());
+
+        let calls = scene.runner.calls_to("devpod");
+        let session = calls
+            .iter()
+            .find(|call| call.args().first().map(String::as_str) == Some("ssh"))
+            .expect("a session");
+        assert_eq!(
+            session
+                .invocation()
+                .env
+                .entries
+                .get(claude::TOKEN_VAR)
+                .map(String::as_str),
+            None,
+            "{:?}",
+            session.args()
+        );
+    }
+
+    #[test]
+    fn a_whole_bind_of_one_profile_withholds_the_token_of_the_profile_named_instead() {
+        // devlaunch#592's first medium, end to end: created with bear, launched
+        // `--claude-profile otter`, and the one bind at the target is one the
+        // container's user cannot write. Forwarding otter's token here puts a live
+        // credential in the environment of a session reading bear's configuration
+        // directory, so bear's `settings.json`, hooks and plugins run with it
+        // available. The `Switched` notice says the mount is bear's and says
+        // nothing about the token, which is why the notice is not the guard.
+        let target = provision::CLAUDE_CONFIG_TARGET;
+        let scene = Scene::new()
+            .with_running("myws")
+            .naming_a_claude_profile("otter", true);
+        let root = scene.host.claude_profiles_root.clone().unwrap();
+        std::fs::create_dir_all(root.join("bear")).expect("a sibling profile directory");
+        let bear = root.join("bear");
+        let mount = ClaudeMountFacts::synthetic(
+            Some(true),
+            Some(bear.to_str().expect("a utf-8 fixture path")),
+            Some(false),
+            Some(1000),
+            Some(1000),
+        )
+        .with_dir(target)
+        .with_unwritable_binds(&[target]);
+        let (opened, notices) =
+            a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Bound), mount);
+        assert!(opened.is_ok(), "{opened:?}");
+        assert_eq!(
+            claude_profile_mount_notices(&notices),
+            vec![LaunchNotice::ClaudeProfileMountSwitched {
+                name: "otter".to_owned(),
+                requested: root.join("otter"),
+                bound: bear,
+            }]
+        );
+
+        let calls = scene.runner.calls_to("devpod");
+        let session = calls
+            .iter()
+            .find(|call| call.args().first().map(String::as_str) == Some("ssh"))
+            .expect("a session");
+        assert_eq!(
+            session
+                .invocation()
+                .env
+                .entries
+                .get(claude::TOKEN_VAR)
+                .map(String::as_str),
+            None,
+            "{:?}",
+            session.args()
         );
     }
 
@@ -17481,10 +18165,15 @@ mod tests {
 
     /// The other half of the same fact, on the launches that run no probe: a bind
     /// this container's user cannot write keeps the treatment the probe withholds,
-    /// which is the container's own `CLAUDE_CONFIG_DIR` left alone and the
-    /// profile's token forwarded instead.
+    /// which is the container's own `CLAUDE_CONFIG_DIR` left alone.
+    ///
+    /// The credential stays behind with it. This memo carries neither the
+    /// directory the session reads nor the source bound at the target, so nothing
+    /// here names the account that owns what `claude` will open -- and a profile's
+    /// live token into a directory that may be another account's is the whole of
+    /// what the invariant refuses. It was forwarded before devlaunch#592.
     #[test]
-    fn a_warm_attach_over_a_claude_profile_mount_nobody_can_write_forwards_the_token_instead() {
+    fn a_warm_attach_over_a_claude_profile_mount_nobody_can_name_the_owner_of_withholds_it() {
         let workspace =
             WorkspaceId::new("octocat", "Hello-World", "master").expect("a safe triple");
         let scene = Scene::new()
@@ -17543,7 +18232,7 @@ mod tests {
                 .entries
                 .get(claude::TOKEN_VAR)
                 .map(String::as_str),
-            Some("not-a-real-token-from-the-profile"),
+            None,
             "{ssh:?}"
         );
     }

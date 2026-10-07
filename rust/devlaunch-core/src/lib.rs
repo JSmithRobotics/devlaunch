@@ -174,8 +174,13 @@ pub mod api {
     // (`NoColdPath`'s shape, for a caller that has established the workspace is
     // warm) instead of the implementations here, and it cannot do that without
     // naming what it is implementing.
+    //
+    // `SessionLogin` travels with the notices because one of them carries it: a
+    // field of a promised type that an external caller cannot name is a match arm
+    // it cannot write.
     pub use crate::flows::launch::{
-        Cold, ColdMachinery, ColdPath, ColdRefused, Host, LaunchNotice, Provision, ToolProvisioning,
+        Cold, ColdMachinery, ColdPath, ColdRefused, Host, LaunchNotice, Provision, SessionLogin,
+        ToolProvisioning,
     };
     // What `Host::with_memory_cap` takes, and the two constants a caller needs to
     // say anything about it: the default it would otherwise get, and the word that

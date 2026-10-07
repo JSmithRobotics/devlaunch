@@ -41,7 +41,7 @@ use devlaunch_core::flows::kill::{
 };
 use devlaunch_core::flows::launch::{
     BranchNotNamed, ClaudeProfileProblem, ColdRefused, LaunchAborted, LaunchNotice, LaunchRefusal,
-    NotPrepared, SessionRefused,
+    NotPrepared, SessionLogin, SessionRefused,
 };
 use devlaunch_core::flows::lifecycle::{
     Insistence, KeptBecause, LifecycleNotice, LockKeptBecause, NotAdopted, Promotion, PrunePlan,
@@ -3203,27 +3203,46 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             target,
             uids_compared,
             reading,
-            forwarded_login,
+            login,
         } => format!(
             "Claude profile {}: {} is bound in, but this container's user cannot write to it, so \
              a refreshed Claude login cannot be saved. {} {}",
             python_repr(name),
             target.display(),
-            match reading {
-                Some(dir) if *forwarded_login => format!(
+            match (reading, login) {
+                (Some(dir), SessionLogin::Profile) => format!(
                     "And this session reads {} rather than that bind, so `claude` here runs on \
                      that profile's forwarded login over a different configuration directory.",
                     dir.display()
                 ),
-                Some(dir) => format!(
+                (Some(dir), SessionLogin::Directory) => format!(
                     "And this session reads {} rather than that bind, so `claude` here does not \
                      run as that profile at all.",
                     dir.display()
                 ),
-                None => "That is the whole of it: this session still reads that profile and runs \
-                         as it, unless this container's own Claude configuration is one dl does \
-                         not forward into, which gets its own notice."
-                    .to_owned(),
+                // The withheld half of the same sentence: nothing travelled, and
+                // the reason is that nothing here could say whose configuration
+                // this session opens. Saying it reads the profile would be the
+                // guess that forwarding refused to make.
+                (Some(dir), SessionLogin::OwnerUnnamed) => format!(
+                    "And this session reads {} rather than that bind. Nothing here names the \
+                     account that directory belongs to, so no login was forwarded into it and \
+                     `claude` runs as whatever it already holds.",
+                    dir.display()
+                ),
+                (None, SessionLogin::Profile) =>
+                    "That is the whole of it: this profile's own login travels with this \
+                     session, so `claude` here runs as it."
+                        .to_owned(),
+                (None, SessionLogin::Directory) =>
+                    "That is the whole of it: this session reads that bind and runs as whatever \
+                     login it already holds."
+                        .to_owned(),
+                (None, SessionLogin::OwnerUnnamed) =>
+                    "And nothing here says which Claude configuration directory this session \
+                     opens, so no login was forwarded into it: `claude` runs as whatever that \
+                     directory already holds."
+                        .to_owned(),
             },
             if *uids_compared {
                 "A read-only mount, or a mode the directory's own owner cannot write, is what is \
@@ -6195,16 +6214,15 @@ mod tests {
             target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
             uids_compared: true,
             reading: None,
-            forwarded_login: false,
+            login: SessionLogin::Profile,
         });
         assert_eq!(
             line,
             Some(
                 "Claude profile 'bear': /var/tmp/devlaunch-claude is bound in, but this \
                  container's user cannot write to it, so a refreshed Claude login cannot be \
-                 saved. That is the whole of it: this session still reads that profile and runs \
-                 as it, unless this container's own Claude configuration is one dl does not \
-                 forward into, which gets its own notice. A read-only mount, or a mode the \
+                 saved. That is the whole of it: this profile's own login travels with this \
+                 session, so `claude` here runs as it. A read-only mount, or a mode the \
                  directory's own owner cannot write, is what is left once the uids match."
                     .to_owned()
             )
@@ -6218,16 +6236,15 @@ mod tests {
             target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
             uids_compared: false,
             reading: None,
-            forwarded_login: false,
+            login: SessionLogin::Profile,
         });
         assert_eq!(
             line,
             Some(
                 "Claude profile 'bear': /var/tmp/devlaunch-claude is bound in, but this \
                  container's user cannot write to it, so a refreshed Claude login cannot be \
-                 saved. That is the whole of it: this session still reads that profile and runs \
-                 as it, unless this container's own Claude configuration is one dl does not \
-                 forward into, which gets its own notice. This session did not read the \
+                 saved. That is the whole of it: this profile's own login travels with this \
+                 session, so `claude` here runs as it. This session did not read the \
                  directory's owner, so what blocks the write is not known here; \
                  `dl <workspace> up` looks again."
                     .to_owned()
@@ -6242,7 +6259,7 @@ mod tests {
             target: std::path::PathBuf::from("/var/tmp/devlaunch-claude/bear"),
             uids_compared: false,
             reading: Some(std::path::PathBuf::from("/var/tmp/devlaunch-claude/work")),
-            forwarded_login: false,
+            login: SessionLogin::Directory,
         });
         assert_eq!(
             line,
@@ -6265,7 +6282,7 @@ mod tests {
             target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
             uids_compared: true,
             reading: Some(std::path::PathBuf::from("/home/dev/.claude-pinned")),
-            forwarded_login: true,
+            login: SessionLogin::Profile,
         });
         assert_eq!(
             line,
@@ -6276,6 +6293,30 @@ mod tests {
                  so `claude` here runs on that profile's forwarded login over a different \
                  configuration directory. A read-only mount, or a mode the directory's own \
                  owner cannot write, is what is left once the uids match."
+                    .to_owned()
+            )
+        );
+
+        // And the cell the pair above could not express at all: nothing read the
+        // directory, so nothing names the account that owns it and no login
+        // travelled. "Still reads that profile and runs as it" is the guess the
+        // forwarder refused to make, and the line must not make it either.
+        let line = launch_notice(&LaunchNotice::ClaudeProfileMountUnwritable {
+            name: "bear".to_owned(),
+            target: std::path::PathBuf::from("/var/tmp/devlaunch-claude/bear"),
+            uids_compared: false,
+            reading: None,
+            login: SessionLogin::OwnerUnnamed,
+        });
+        assert_eq!(
+            line,
+            Some(
+                "Claude profile 'bear': /var/tmp/devlaunch-claude/bear is bound in, but this \
+                 container's user cannot write to it, so a refreshed Claude login cannot be \
+                 saved. And nothing here says which Claude configuration directory this session \
+                 opens, so no login was forwarded into it: `claude` runs as whatever that \
+                 directory already holds. This session did not read the directory's owner, so \
+                 what blocks the write is not known here; `dl <workspace> up` looks again."
                     .to_owned()
             )
         );
