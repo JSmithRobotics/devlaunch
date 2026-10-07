@@ -268,7 +268,8 @@ pub(crate) fn dispatch(
 }
 
 fn started_agent(verb: &Verb) -> Option<crate::herdr_editor::AgentKind> {
-    let Verb::Run(words, _) = verb else {
+    let (Verb::Run(words, _) | Verb::Recreate(Some(words)) | Verb::Reset(Some(words))) = verb
+    else {
         return None;
     };
     words

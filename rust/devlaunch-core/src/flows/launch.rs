@@ -2799,10 +2799,7 @@ impl<'e> ToolProvisioning<'e> {
     /// command — `up`, `code`, a bare attach — asks for nothing and leaves the switch
     /// at [`provision::CodexSwitch::Skip`].
     pub fn for_verb(self, verb: &LaunchVerb) -> Self {
-        let agent = match verb {
-            LaunchVerb::Attach { command } => command.as_ref().and_then(RemoteCommand::agent),
-            _ => None,
-        };
+        let agent = verb.command().and_then(RemoteCommand::agent);
         Self {
             switches: self.switches.for_agent(agent),
             ..self
@@ -6386,10 +6383,12 @@ pub enum LaunchVerb {
     Up,
     /// `dl <spec> code`: bring it up with the IDE open, and do not attach.
     Code,
-    /// `dl <spec> recreate`: rebuild the container, then attach.
-    Recreate,
-    /// `dl <spec> reset`: clean slate, then attach.
-    Reset,
+    /// `dl <spec> recreate`, or `--recreate` with an optional `-- <cmd>`: rebuild the
+    /// container, then attach or run the command.
+    Recreate { command: Option<RemoteCommand> },
+    /// `dl <spec> reset`, or `--reset` with an optional `-- <cmd>`: clean slate, then
+    /// attach or run the command.
+    Reset { command: Option<RemoteCommand> },
     /// `dl <spec> restart`: stop and start without rebuilding, then attach.
     Restart,
     /// `dl <spec> dotfiles`: make sure it is running, then refresh the dotfiles.
@@ -6400,8 +6399,8 @@ impl LaunchVerb {
     /// What this verb asks devpod to rebuild.
     fn rebuild(&self) -> Rebuild {
         match self {
-            Self::Recreate => Rebuild::Recreate,
-            Self::Reset => Rebuild::Reset,
+            Self::Recreate { .. } => Rebuild::Recreate,
+            Self::Reset { .. } => Rebuild::Reset,
             Self::Attach { .. } | Self::Up | Self::Code | Self::Restart | Self::Dotfiles => {
                 Rebuild::Reuse
             }
@@ -6414,8 +6413,8 @@ impl LaunchVerb {
             Self::Code => Ide::Named("vscode"),
             Self::Attach { .. }
             | Self::Up
-            | Self::Recreate
-            | Self::Reset
+            | Self::Recreate { .. }
+            | Self::Reset { .. }
             | Self::Restart
             | Self::Dotfiles => Ide::NoIde,
         }
@@ -6424,8 +6423,10 @@ impl LaunchVerb {
     /// The command the session runs, if this verb ends in a session.
     fn command(&self) -> Option<&RemoteCommand> {
         match self {
-            Self::Attach { command } => command.as_ref(),
-            Self::Recreate | Self::Reset | Self::Restart => None,
+            Self::Attach { command } | Self::Recreate { command } | Self::Reset { command } => {
+                command.as_ref()
+            }
+            Self::Restart => None,
             Self::Up | Self::Code | Self::Dotfiles => None,
         }
     }
@@ -6444,7 +6445,7 @@ impl LaunchVerb {
     fn attaches(&self) -> bool {
         matches!(
             self,
-            Self::Attach { .. } | Self::Recreate | Self::Reset | Self::Restart
+            Self::Attach { .. } | Self::Recreate { .. } | Self::Reset { .. } | Self::Restart
         )
     }
 }
@@ -6907,7 +6908,7 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
             LaunchVerb::Up => self.run_up_verb(&placement, devcontainer),
             LaunchVerb::Restart => self.run_restart(verb, devcontainer, &placement),
             LaunchVerb::Attach { .. } => self.run_attach(raw_spec, verb, devcontainer, &placement),
-            LaunchVerb::Code | LaunchVerb::Recreate | LaunchVerb::Reset => {
+            LaunchVerb::Code | LaunchVerb::Recreate { .. } | LaunchVerb::Reset { .. } => {
                 self.run_rebuild(verb, devcontainer, &placement)
             }
         }
@@ -17937,7 +17938,7 @@ mod tests {
             &mut parts.said,
         );
 
-        let launched = launch.run("myws", &LaunchVerb::Recreate, None);
+        let launched = launch.run("myws", &LaunchVerb::Recreate { command: None }, None);
 
         assert_eq!(
             launched,
@@ -17968,7 +17969,7 @@ mod tests {
             &mut parts.said,
         );
 
-        let launched = launch.run("myws", &LaunchVerb::Reset, None);
+        let launched = launch.run("myws", &LaunchVerb::Reset { command: None }, None);
 
         assert_eq!(
             launched,
@@ -17993,8 +17994,8 @@ mod tests {
             (LaunchVerb::Up, true),
             (LaunchVerb::Code, true),
             (LaunchVerb::Attach { command: None }, false),
-            (LaunchVerb::Recreate, false),
-            (LaunchVerb::Reset, false),
+            (LaunchVerb::Recreate { command: None }, false),
+            (LaunchVerb::Reset { command: None }, false),
         ] {
             let scene = Scene::new().with_stopped("myws");
             scene
@@ -18043,8 +18044,8 @@ mod tests {
             LaunchVerb::Attach { command: None },
             LaunchVerb::Up,
             LaunchVerb::Code,
-            LaunchVerb::Recreate,
-            LaunchVerb::Reset,
+            LaunchVerb::Recreate { command: None },
+            LaunchVerb::Reset { command: None },
             LaunchVerb::Restart,
         ] {
             let scene = Scene::new().with_stopped("myws");

@@ -165,9 +165,9 @@ impl VerbWord {
                 after: AfterRemoval::HangUpTheShell,
             },
             Self::Code => Verb::Code,
-            Self::Recreate => Verb::Recreate,
+            Self::Recreate => Verb::Recreate(None),
             Self::Restart => Verb::Restart,
-            Self::Reset => Verb::Reset,
+            Self::Reset => Verb::Reset(None),
             Self::Dotfiles => Verb::Dotfiles,
         }
     }
@@ -269,9 +269,12 @@ pub(crate) enum Verb {
         after: AfterRemoval,
     },
     Code,
-    Recreate,
+    /// `recreate`, or `--recreate` on the attach family, which is what carries a
+    /// command: `dl <ws> --recreate -- <cmd>`. The word form never has one.
+    Recreate(Option<NonEmpty<String>>),
     Restart,
-    Reset,
+    /// `reset`, or `--reset` on the attach family; see [`Verb::Recreate`].
+    Reset(Option<NonEmpty<String>>),
     Dotfiles,
 }
 
@@ -313,9 +316,11 @@ impl Verb {
             | Verb::Remove { .. }
             | Verb::Code
             | Verb::Dotfiles => true,
-            Verb::Attach { .. } | Verb::Run(..) | Verb::Recreate | Verb::Restart | Verb::Reset => {
-                false
-            }
+            Verb::Attach { .. }
+            | Verb::Run(..)
+            | Verb::Recreate(_)
+            | Verb::Restart
+            | Verb::Reset(_) => false,
         }
     }
 
@@ -334,9 +339,9 @@ impl Verb {
                 AfterRemoval::HangUpTheShell => "rme",
             },
             Verb::Code => "code",
-            Verb::Recreate => "recreate",
+            Verb::Recreate(_) => "recreate",
             Verb::Restart => "restart",
-            Verb::Reset => "reset",
+            Verb::Reset(_) => "reset",
             Verb::Dotfiles => "dotfiles",
         }
     }
@@ -356,9 +361,9 @@ impl Verb {
             | Verb::Stop
             | Verb::Kill
             | Verb::Code
-            | Verb::Recreate
+            | Verb::Recreate(_)
             | Verb::Restart
-            | Verb::Reset
+            | Verb::Reset(_)
             | Verb::Dotfiles => AfterRemoval::LeaveTheShell,
         }
     }
@@ -516,6 +521,8 @@ pub(crate) enum GrammarError {
     },
     /// `-- <command>` beside a verb that does not run one.
     CommandNotAllowed { verb: &'static str },
+    /// `--recreate` and `--reset` on one line: two different rebuilds.
+    RebuildBoth,
     /// `--devcontainer` on a command that opens no workspace.
     DevcontainerNotAllowed { command: &'static str },
     /// `--claude-profile` on a command that opens no workspace.
@@ -755,6 +762,15 @@ pub(crate) struct Cli {
     /// Stops at work that is nowhere else, exactly as the `rm` verb does.
     #[arg(long)]
     rm: bool,
+    /// Rebuild the container from its devcontainer config before attaching, as
+    /// `devpod up --recreate`. For `dl <ws>` and `dl <ws> -- <command>`; the
+    /// `recreate` verb is the same rebuild without a command.
+    #[arg(long)]
+    recreate: bool,
+    /// Rebuild the container and its volumes from scratch before attaching, as
+    /// `devpod up --reset`. Same forms as `--recreate`, and not with it.
+    #[arg(long)]
+    reset: bool,
 }
 
 /// The half of the grammar clap's own argument list cannot show: the verbs are
@@ -811,6 +827,10 @@ Workspace commands (dl <workspace> <verb>, or dl <verb> <workspace>):
                                      verb that refreshes git state
   dotfiles                           Refresh dotfiles (chezmoi update)
   -- <command>                       Run one command inside it
+
+--recreate and --reset are the recreate and reset verbs for a line that carries a
+command: dl <ws> --recreate and dl <ws> --reset -- <cmd> rebuild the container, then
+attach or run it. Not together, not with --rm, and not beside another verb.
 
 A verb with no workspace named picks interactively. For up, stop, kill, rm, rme,
 code and dotfiles, TAB marks several rows and the verb applies to each in turn — dl
@@ -1048,6 +1068,14 @@ fn global_command(cli: &Cli, chosen: Chosen) -> Result<Command, GrammarError> {
     if cli.rm {
         return Err(GrammarError::RmNotAllowed { command: name });
     }
+    for (given, modifier) in [(cli.recreate, "--recreate"), (cli.reset, "--reset")] {
+        if given {
+            return Err(GrammarError::ModifierNotAllowed {
+                modifier,
+                command: name,
+            });
+        }
+    }
     if !cli.command.is_empty() {
         return Err(GrammarError::CommandNotAllowed { verb: name });
     }
@@ -1207,9 +1235,12 @@ fn workspace_command(cli: Cli, argv: &[String]) -> Result<Command, GrammarError>
                     target: "--force".to_owned(),
                     // `RmOnExit::No` by the check above, not by choice: a line
                     // holding both flags was refused before it got here.
-                    verb: Verb::Attach {
-                        rm: rm_on_exit_of(&cli),
-                    },
+                    verb: with_rebuild(
+                        &cli,
+                        Verb::Attach {
+                            rm: rm_on_exit_of(&cli),
+                        },
+                    )?,
                     devcontainer,
                     claude_profile,
                     from,
@@ -1304,6 +1335,7 @@ fn workspace_command(cli: Cli, argv: &[String]) -> Result<Command, GrammarError>
             command: verb.word(),
         });
     }
+    let verb = with_rebuild(&cli, verb)?;
     Ok(match target {
         None => Command::Select {
             verb,
@@ -1321,6 +1353,34 @@ fn workspace_command(cli: Cli, argv: &[String]) -> Result<Command, GrammarError>
             memory,
         },
     })
+}
+
+/// Folds `--recreate` / `--reset` into the attach family's verb.
+///
+/// Only the two forms that hand over a session can take one, so any other verb
+/// is refused rather than left to ignore it. `--rm` is refused beside either:
+/// `RmOnExit` is not carried by the rebuild verbs, and a throwaway workspace
+/// does not need rebuilding.
+type RebuildVerb = fn(Option<NonEmpty<String>>) -> Verb;
+
+fn with_rebuild(cli: &Cli, verb: Verb) -> Result<Verb, GrammarError> {
+    let (modifier, make): (&'static str, RebuildVerb) = match (cli.recreate, cli.reset) {
+        (false, false) => return Ok(verb),
+        (true, true) => return Err(GrammarError::RebuildBoth),
+        (true, false) => ("--recreate", Verb::Recreate),
+        (false, true) => ("--reset", Verb::Reset),
+    };
+    match verb {
+        Verb::Attach { rm: RmOnExit::No } => Ok(make(None)),
+        Verb::Run(words, RmOnExit::No) => Ok(make(Some(words))),
+        Verb::Attach { .. } | Verb::Run(..) => {
+            Err(GrammarError::RmNotAllowed { command: modifier })
+        }
+        other => Err(GrammarError::ModifierNotAllowed {
+            modifier,
+            command: other.word(),
+        }),
+    }
 }
 
 /// Whether this line asked for the workspace to go when the session does.
@@ -1622,9 +1682,9 @@ mod tests {
             Verb::Stop,
             Verb::Kill,
             Verb::Code,
-            Verb::Recreate,
+            Verb::Recreate(None),
             Verb::Restart,
-            Verb::Reset,
+            Verb::Reset(None),
             Verb::Dotfiles,
         ] {
             assert_eq!(
@@ -2447,6 +2507,48 @@ mod tests {
                 memory: None,
             })
         );
+    }
+
+    #[test]
+    fn rebuild_flags_ride_the_attach_family_and_nothing_else() {
+        let words = |w: &[&str]| NonEmpty::of(w.iter().map(|x| (*x).to_owned())).unwrap();
+        let cases: Vec<(&[&str], Result<Command, GrammarError>)> = vec![
+            (
+                &["ws", "--recreate"],
+                Ok(workspace("ws", Verb::Recreate(None))),
+            ),
+            (
+                &["ws", "--reset", "--", "make", "test"],
+                Ok(workspace("ws", Verb::Reset(Some(words(&["make", "test"]))))),
+            ),
+            (
+                &["ws", "--recreate", "--reset"],
+                Err(GrammarError::RebuildBoth),
+            ),
+            (
+                &["ws", "--recreate", "--rm"],
+                Err(GrammarError::RmNotAllowed {
+                    command: "--recreate",
+                }),
+            ),
+            (
+                &["ws", "up", "--reset"],
+                Err(GrammarError::ModifierNotAllowed {
+                    modifier: "--reset",
+                    command: "up",
+                }),
+            ),
+            (
+                &["--ls", "--recreate"],
+                Err(GrammarError::ModifierNotAllowed {
+                    modifier: "--recreate",
+                    command: "--ls",
+                }),
+            ),
+        ];
+        for (argv, expected) in cases {
+            assert_eq!(parse(argv), expected, "{argv:?}");
+        }
     }
 
     #[test]

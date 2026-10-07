@@ -712,6 +712,9 @@ fn grammar_refusal(refused: &cli::GrammarError) -> String {
             "A shell command can only be run by 'dl <workspace> -- <command>', not with \
              '{verb}'."
         ),
+        cli::GrammarError::RebuildBoth => {
+            "--recreate and --reset are two different rebuilds: give one of them.".to_owned()
+        }
         cli::GrammarError::DevcontainerNotAllowed { command } => {
             format!("--devcontainer means nothing for {command}: it opens no workspace.")
         }

@@ -116,9 +116,19 @@ pub(crate) fn family(verb: &Verb) -> Family {
         ),
         Verb::Up => (LaunchVerb::Up, RmOnExit::No),
         Verb::Code => (LaunchVerb::Code, RmOnExit::No),
-        Verb::Recreate => (LaunchVerb::Recreate, RmOnExit::No),
+        Verb::Recreate(words) => (
+            LaunchVerb::Recreate {
+                command: words.clone().map(RemoteCommand::Argv),
+            },
+            RmOnExit::No,
+        ),
         Verb::Restart => (LaunchVerb::Restart, RmOnExit::No),
-        Verb::Reset => (LaunchVerb::Reset, RmOnExit::No),
+        Verb::Reset(words) => (
+            LaunchVerb::Reset {
+                command: words.clone().map(RemoteCommand::Argv),
+            },
+            RmOnExit::No,
+        ),
         Verb::Dotfiles => (LaunchVerb::Dotfiles, RmOnExit::No),
     };
     Family::Launch { verb: launched, rm }
@@ -361,6 +371,21 @@ mod tests {
                 ..
             } => command.line().into_owned(),
             _ => panic!("`-- <cmd>` is a launch that attaches with a command"),
+        }
+    }
+
+    #[test]
+    fn a_rebuild_with_a_command_keeps_the_command() {
+        let words = NonEmpty::of(["make".to_owned(), "test".to_owned()]).expect("a command");
+        match family(&Verb::Reset(Some(words))) {
+            Family::Launch {
+                verb:
+                    LaunchVerb::Reset {
+                        command: Some(command),
+                    },
+                ..
+            } => assert_eq!(command.line(), "make test"),
+            _ => panic!("`--reset -- <cmd>` is a reset that runs the command"),
         }
     }
 

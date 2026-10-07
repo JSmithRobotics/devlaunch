@@ -264,6 +264,7 @@ there to answer. [docs/cli.md](docs/cli.md) has the rest.
 | `dl <ws> dotfiles` | Refresh dotfiles (`chezmoi update`) |
 | `dl <ws> -- <cmd>` | Run one command inside it |
 | `dl <ws> --rm` | Open it, and delete it when the session ends |
+| `dl <ws> --recreate`, `dl <ws> --reset` | Rebuild the container (`--reset` also its volumes), then attach. Takes a command too: `dl <ws> --recreate -- <cmd>`. Not together, and not with `--rm` |
 
 Every verb also takes the workspace second (`dl stop <ws>`), and with no workspace at all it
 opens the selector.
