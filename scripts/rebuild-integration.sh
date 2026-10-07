@@ -31,6 +31,14 @@ INTEGRATION="${INTEGRATION_BRANCH:-fork/integration}"
 
 # One concern each, all rooted on upstream. A branch whose PR has merged
 # upstream comes OUT of this list; that is how the fork shrinks.
+#
+# This list changes in a commit of its OWN, never alongside a version bump.
+# Three entries were lost twice over, both times the same way: a topic was
+# added in the same commit that set a version, the next rebase onto upstream
+# dropped that commit as stale -- correctly, since a version is a statement
+# about one rebuild -- and took the TOPICS line with it. A branch silently
+# missing from here does not fail anything; it ships a release without the
+# change in it.
 TOPICS=(
     fork/identity                       # not upstreamable: channel, recipe, release workflow
     feat/from-ref                       # PR #649
@@ -38,6 +46,9 @@ TOPICS=(
     fix/agent-socket-private-directory  # PR #648
     fix/agent-socket-own-directory      # held, pending a repro on upstream main
     feat/claude-profile-mount           # PR #652
+    feat/aid-claude-profiles            # to propose upstream
+    feat/lxcfs-proc-view                # to propose upstream
+    feat/memory-cap                     # to propose upstream
     fork/public-api-toolchain           # not upstreamable: upstream pins a nightly instead
 )
 
