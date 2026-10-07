@@ -82,6 +82,7 @@ use crate::domain::workspace_id::{
     NamePart, UnsafeName, WorkspaceId, identity_of, validate_ref_name,
 };
 use crate::domain::workspace_state::NonEmpty;
+use crate::flows::claude_profiles;
 use crate::flows::kept_copies::KeptCopies;
 use crate::flows::kill;
 use crate::flows::launch_locks::LaunchLocks;
@@ -760,6 +761,52 @@ pub enum LaunchNotice {
         extra_binds_refused: bool,
         credential_bind: Option<PathBuf>,
     },
+    /// A set of profiles was bound in, one directory each under
+    /// [`crate::flows::provision::CLAUDE_CONFIG_TARGET`], and this is which --
+    /// which is the whole reason the notice exists. The set is the one shape of
+    /// this feature that puts more than one account's credential inside a
+    /// container, `--claude-profile all` most of all, so a launch that does it
+    /// says so every time rather than leaving the reader to infer it from the flag
+    /// they typed.
+    ///
+    /// `selected` is the profile this session runs as, and `None` is a real state
+    /// rather than a missing value: `all` selects nothing, and the session runs as
+    /// the host's unnamed login until something names one of the bound set.
+    ///
+    /// `unbound` is every name that resolved to nothing to bind -- not a name, no
+    /// profiles root, or a directory with no credential in it. Named rather than
+    /// dropped, because a set that quietly bound two of the three names typed is
+    /// the silent half-success this table exists to refuse.
+    ///
+    /// `extra_binds`, `extra_binds_capped`, `extra_binds_refused` and
+    /// `credential_bind` are [`Self::ClaudeProfileBound`]'s, summed over every
+    /// profile of the set: the same host paths, reachable for the same reason, and
+    /// a reader who needs to know which profile a path came from has the profile
+    /// list right beside it.
+    ClaudeProfileSetBound {
+        bound: Vec<String>,
+        unbound: Vec<String>,
+        selected: Option<String>,
+        /// Where the set is bound: [`crate::flows::provision::CLAUDE_CONFIG_TARGET`],
+        /// carried so the message can show the `CLAUDE_CONFIG_DIR` that switches
+        /// between them without a second spelling of the path in `dl`.
+        target: PathBuf,
+        extra_binds: Vec<PathBuf>,
+        extra_binds_capped: bool,
+        extra_binds_refused: bool,
+        credential_binds: Vec<PathBuf>,
+    },
+    /// `--claude-profile` named a profile this container has no bind for, on a
+    /// launch that is not creating the container.
+    ///
+    /// The switching case's refusal, and the reason it is not
+    /// [`Self::ClaudeProfileMountSwitched`]: a container that bound a set can be
+    /// pointed at any profile in it with no rebuild at all, so the question is not
+    /// "which one source is mounted" but whether this name is one of them. Nothing
+    /// is exported when it is not -- `CLAUDE_CONFIG_DIR` at a path nothing is
+    /// mounted on is a fresh, logged-out configuration `claude` would create and
+    /// say nothing about.
+    ClaudeProfileNotInBoundSet { name: String, bound: Vec<String> },
     /// `--claude-profile default` resolved a source that would be catastrophic
     /// to bind whole -- `/`, `$HOME` itself, or the sibling-profiles root
     /// itself -- and refused rather than binding it.
@@ -1567,6 +1614,85 @@ pub(crate) enum ClaudeProfileMount {
     /// `/`, `$HOME` itself, or the profiles root itself. See
     /// [`LaunchNotice::ClaudeProfileSourceUnsafe`].
     UnsafeSource { name: String, source: PathBuf },
+    /// Several profiles, each bound in a directory of its own **under**
+    /// [`provision::CLAUDE_CONFIG_TARGET`], with `selected` the one this launch
+    /// points `CLAUDE_CONFIG_DIR` at.
+    ///
+    /// The point of the layout is that the other directions are dead ends:
+    ///
+    /// - **Re-pointing one bind.** A bind mount resolves its source once, when it
+    ///   is made: the kernel attaches the source's inode to the mount point, not
+    ///   the path it was named by. Moving the host directory a container is
+    ///   already running over, or re-pointing a symlink the source was named
+    ///   through, changes nothing inside the container, so no amount of host-side
+    ///   rearranging can make one bind serve a second profile.
+    /// - **A second `mount --bind` inside the container.** Making the switch there
+    ///   needs `CAP_SYS_ADMIN` in the container's user namespace for *every*
+    ///   switch, plus `rslave` propagation to keep it from escaping into the
+    ///   host's namespace. `dl` runs unprivileged and the containers it opens are
+    ///   ordinary devcontainers, so this would mean handing every workspace a
+    ///   capability it otherwise has no use for, to save an environment variable.
+    ///
+    /// So every profile that might be wanted is bound at creation, and switching is
+    /// a different `CLAUDE_CONFIG_DIR` -- which costs nothing and needs no rebuild,
+    /// because the directories are all already there.
+    ///
+    /// `bound` is in the order the names were typed and holds only the ones with a
+    /// credential to bind; `unbound` is the rest, which are reported rather than
+    /// dropped ([`LaunchNotice::ClaudeProfileSetBound`]). `selected` is `None` for
+    /// `--claude-profile all`, which binds a set and picks nothing out of it, and
+    /// is otherwise the first name typed -- and is still `None` when that name is
+    /// one of the `unbound`, because a selection nothing bound is not one.
+    BoundSet {
+        bound: Vec<BoundProfile>,
+        unbound: Vec<String>,
+        selected: Option<String>,
+        profiles_root: Option<PathBuf>,
+        home: Option<PathBuf>,
+    },
+}
+
+/// One profile of a [`ClaudeProfileMount::BoundSet`]: the name typed and the host
+/// directory it resolved to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BoundProfile {
+    pub(crate) name: String,
+    pub(crate) source: PathBuf,
+}
+
+/// Where a profile of a bound set lives inside the container.
+///
+/// One definition, read by the mount flags, the `CLAUDE_CONFIG_DIR` export and the
+/// probe-fact comparison alike -- three places that have to agree on one path, in
+/// the way [`claude::profile_dir`] is one definition of the host-side half.
+pub(crate) fn profile_target(name: &str) -> String {
+    format!("{}/{name}", provision::CLAUDE_CONFIG_TARGET)
+}
+
+/// The names of a set, as one string for a notice whose field is a single name.
+///
+/// Every name typed, bound or not, because the reader's question there is which
+/// flag value this launch is talking about.
+fn set_label(bound: &[BoundProfile], unbound: &[String]) -> String {
+    bound
+        .iter()
+        .map(|profile| profile.name.as_str())
+        .chain(unbound.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The profile names a container has bound, read back out of the probe's mount
+/// points.
+///
+/// The leaf of every bind strictly under [`provision::CLAUDE_CONFIG_TARGET`]; a
+/// bind *at* the target is one profile standing in for the whole configuration
+/// directory and names no profile, so it yields nothing here.
+fn bound_profiles(mount: &ClaudeMountFacts) -> impl Iterator<Item = &str> {
+    mount.target_binds().iter().filter_map(|bind| {
+        bind.strip_prefix(&format!("{}/", provision::CLAUDE_CONFIG_TARGET))
+            .filter(|leaf| !leaf.is_empty() && !leaf.contains('/'))
+    })
 }
 
 impl ClaudeProfileMount {
@@ -1595,9 +1721,29 @@ impl ClaudeProfileMount {
     /// forwarded and nothing mounted, rather than either refusing or handing the
     /// container a logged-out configuration and calling it success.
     pub(crate) fn ensure(host: &Host) -> Self {
-        let Some(named) = host.claude.profile.as_deref() else {
-            return Self::NotAsked;
+        let named = match host.claude.profile_request() {
+            claude::ProfileRequest::None => return Self::NotAsked,
+            claude::ProfileRequest::One(name) => name,
+            claude::ProfileRequest::Set(names) => return Self::ensure_set(host, names),
+            // Expanded here, to the profiles that exist at launch, rather than by
+            // binding the profiles root whole. The exposure is the same one the
+            // word asks for -- every login on this host, readable from inside that
+            // container -- and the layout is the one every other set uses, so a
+            // session switches between them exactly as it would between names it
+            // typed. A profile made after this launch is simply not in it.
+            claude::ProfileRequest::All => {
+                let listed = claude_profiles::summarise(host.claude_profiles_root.as_deref(), None);
+                return Self::ensure_set(
+                    host,
+                    listed
+                        .into_iter()
+                        .filter(|row| row.state == claude_profiles::ProfileState::Authed)
+                        .map(|row| row.name)
+                        .collect(),
+                );
+            }
         };
+        let named = named.as_str();
         if named == claude::DEFAULT_PROFILE {
             return match host.claude_config_dir.as_deref() {
                 Some(source) if claude::has_credential(source) => {
@@ -1644,6 +1790,45 @@ impl ClaudeProfileMount {
         Self::Bound {
             name: named.to_owned(),
             source,
+            profiles_root: host.claude_profiles_root.clone(),
+            home: host.home.clone(),
+        }
+    }
+
+    /// [`Self::BoundSet`] for the names a set form asked for.
+    ///
+    /// `default` is not one of them, and that is the one asymmetry with
+    /// [`Self::ensure`] above. The unnamed login's configuration directory is not
+    /// under the profiles root and has no name of its own to sit under the target,
+    /// so a set cannot hold it -- and it needs no bind to be reachable anyway: the
+    /// session that selects nothing *is* the one running as the host's default.
+    ///
+    /// Every other way a name can fail to bind -- not a name, no profiles root, no
+    /// credential in the directory -- lands in `unbound` rather than refusing the
+    /// launch. One mistyped name out of three must not cost a workspace the other
+    /// two, and the name is reported either way.
+    fn ensure_set(host: &Host, names: Vec<String>) -> Self {
+        let mut bound: Vec<BoundProfile> = Vec::new();
+        let mut unbound = Vec::new();
+        for name in names {
+            match claude::profile_dir(host.claude_profiles_root.as_deref(), &name) {
+                Ok(source)
+                    if name != claude::DEFAULT_PROFILE
+                        && claude::has_credential(&source)
+                        && !bound.iter().any(|profile| profile.name == name) =>
+                {
+                    bound.push(BoundProfile { name, source });
+                }
+                _ => unbound.push(name),
+            }
+        }
+        let selected = claude::selected_profile(host.claude.profile.as_deref())
+            .filter(|name| bound.iter().any(|profile| profile.name == *name))
+            .map(str::to_owned);
+        Self::BoundSet {
+            bound,
+            unbound,
+            selected,
             profiles_root: host.claude_profiles_root.clone(),
             home: host.home.clone(),
         }
@@ -1700,12 +1885,45 @@ impl ClaudeProfileMount {
                 ];
                 args.extend(dangling_symlink_binds(
                     source,
+                    provision::CLAUDE_CONFIG_TARGET,
                     profiles_root.as_deref(),
                     home.as_deref(),
                 ));
                 args
             }
+            Self::BoundSet {
+                bound,
+                selected,
+                profiles_root,
+                home,
+                ..
+            } if creating_container => {
+                let mut args = Vec::new();
+                for profile in bound {
+                    let target = profile_target(&profile.name);
+                    args.push("--mount".to_owned());
+                    args.push(format!(
+                        "type=bind,source={},target={target}",
+                        profile.source.display(),
+                    ));
+                    args.extend(dangling_symlink_binds(
+                        &profile.source,
+                        &target,
+                        profiles_root.as_deref(),
+                        home.as_deref(),
+                    ));
+                }
+                // The env half only where a profile was picked, and `up_args`'
+                // rule about emitting it without the mount holds here too: the
+                // selection is already filtered to the names that bound.
+                if let Some(selected) = selected {
+                    args.push("--workspace-env".to_owned());
+                    args.push(format!("CLAUDE_CONFIG_DIR={}", profile_target(selected)));
+                }
+                args
+            }
             Self::Bound { .. }
+            | Self::BoundSet { .. }
             | Self::NotAsked
             | Self::NotAName { .. }
             | Self::NoRoot { .. }
@@ -1868,6 +2086,7 @@ fn source_is_catastrophic(
 /// defect this whole function exists to avoid.
 fn dangling_symlink_binds(
     profile: &Path,
+    mount_point: &str,
     profiles_root: Option<&Path>,
     home: Option<&Path>,
 ) -> Vec<String> {
@@ -1900,9 +2119,8 @@ fn dangling_symlink_binds(
         let readonly = if bind.readonly { ",readonly" } else { "" };
         args.push("--mount".to_owned());
         args.push(format!(
-            "type=bind,source={},target={}/{}{readonly}",
+            "type=bind,source={},target={mount_point}/{}{readonly}",
             bind.resolved.display(),
-            provision::CLAUDE_CONFIG_TARGET,
             bind.name,
         ));
     }
@@ -3085,7 +3303,10 @@ fn up_under_stage(
     // container, and whether devpod regenerates the override from the devcontainer
     // then is unknown here.
     let composed = match (&claude_mount, request.rebuild) {
-        (ClaudeProfileMount::Bound { .. }, Rebuild::Reuse | Rebuild::Recreate) => request
+        (
+            ClaudeProfileMount::Bound { .. } | ClaudeProfileMount::BoundSet { .. },
+            Rebuild::Reuse | Rebuild::Recreate,
+        ) => request
             .naming
             .identity()
             .and_then(|identity| sole_compose_override(host.devpod_home.as_ref(), identity)),
@@ -3129,6 +3350,57 @@ fn up_under_stage(
                 });
             }
         }
+        ClaudeProfileMount::BoundSet {
+            bound,
+            unbound,
+            selected,
+            profiles_root,
+            home,
+        } if creating_container => {
+            if let Some(override_path) = composed {
+                notices.say(LaunchNotice::ClaudeProfileMountComposeFrozen {
+                    name: set_label(bound, unbound),
+                    override_path,
+                });
+            } else {
+                let mut extra_binds = Vec::new();
+                let mut credential_binds = Vec::new();
+                let mut extra_binds_capped = false;
+                let mut extra_binds_refused = false;
+                for profile in bound {
+                    let (extra, capped, refused) = resolve_dangling_symlink_binds(
+                        &profile.source,
+                        profiles_root.as_deref(),
+                        home.as_deref(),
+                    );
+                    extra_binds_capped |= capped;
+                    extra_binds_refused |= refused;
+                    for bind in extra {
+                        if bind.readonly {
+                            extra_binds.push(bind.resolved);
+                        } else {
+                            credential_binds.push(bind.resolved);
+                        }
+                    }
+                }
+                notices.say(LaunchNotice::ClaudeProfileSetBound {
+                    bound: bound.iter().map(|profile| profile.name.clone()).collect(),
+                    target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+                    unbound: unbound.clone(),
+                    selected: selected.clone(),
+                    extra_binds,
+                    extra_binds_capped,
+                    extra_binds_refused,
+                    credential_binds,
+                });
+            }
+        }
+        // A set against a container this call is not creating says nothing here,
+        // where a single profile says `ClaudeProfileMountUnappliable`. Nothing has
+        // to land for the launch to do what was asked: the binds are already there
+        // when the container was created with them, and the session either points
+        // at the one named or says `ClaudeProfileNotInBoundSet` because it cannot.
+        ClaudeProfileMount::BoundSet { .. } => {}
         ClaudeProfileMount::UnsafeSource { name, source } => {
             notices.say(LaunchNotice::ClaudeProfileSourceUnsafe {
                 name: name.clone(),
@@ -3789,13 +4061,16 @@ impl CodexLogin {
 /// is the same boundary the title variable's prefix keeps (`aid`'s `AGENTS`
 /// table) and for the same reason: a prefix is dl's own command, not a rewrite of
 /// anyone else's environment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ClaudeConfigEnv {
     /// Leave whatever the container resolves, which is every launch that bound no
     /// profile.
     Leave,
-    /// Point it at [`provision::CLAUDE_CONFIG_TARGET`].
-    Set,
+    /// Point it at this directory: [`provision::CLAUDE_CONFIG_TARGET`] where one
+    /// profile is bound there, or one of the per-profile directories under it
+    /// where a set is. The path and not the constant, because which profile a
+    /// session runs as is exactly the choice a bound set makes available.
+    Set(String),
 }
 
 impl ClaudeConfigEnv {
@@ -3816,10 +4091,40 @@ impl ClaudeConfigEnv {
     /// buys a directory it cannot keep a credential in, where leaving the
     /// container's own answer standing at least lets a forwarded token be the
     /// login.
-    pub(crate) fn from_mount(mount: &ClaudeMountFacts) -> Self {
-        match mount.target_mounted() {
-            Some(true) if !mount.target_unusable() => Self::Set,
-            _ => Self::Leave,
+    pub(crate) fn from_mount(mount: &ClaudeMountFacts, selected: Option<&str>) -> Self {
+        if mount.target_mounted() != Some(true) || mount.target_unusable() {
+            return Self::Leave;
+        }
+        match selected {
+            // A name, and a bind of that name's own: the profile is reachable in
+            // this container whether or not it is the one the container was
+            // created to read, which is what makes switching cost a variable
+            // rather than a rebuild.
+            Some(name) if bound_profiles(mount).any(|bound| bound == name) => {
+                Self::Set(profile_target(name))
+            }
+            // A name on a container that holds one bind at the target itself.
+            // Which profile that is, is not this decision's question -- the mount
+            // notices answer it -- and withholding the export here would take the
+            // variable away from the case it was written for.
+            Some(_) | None if mount.target_binds() == [provision::CLAUDE_CONFIG_TARGET] => {
+                Self::Set(provision::CLAUDE_CONFIG_TARGET.to_owned())
+            }
+            // No name, and a set: the only honest pick is the directory the probe
+            // found this container reading, and only while a bind actually carries
+            // it. Nothing else distinguishes the profiles from each other.
+            None => match mount.dir() {
+                Some(dir)
+                    if mount
+                        .target_binds()
+                        .iter()
+                        .any(|bind| dir == bind || dir.starts_with(&format!("{bind}/"))) =>
+                {
+                    Self::Set(dir.to_owned())
+                }
+                _ => Self::Leave,
+            },
+            Some(_) => Self::Leave,
         }
     }
 }
@@ -3860,7 +4165,7 @@ impl RemotePayload {
         // interactive ones, and only when this payload happened to be the one that
         // created it.
         let inner = with_codex_login(
-            &with_zellij_session(&with_claude_config_dir(&line, claude), zellij),
+            &with_zellij_session(&with_claude_config_dir(&line, &claude), zellij),
             codex,
         );
         let quoted = posix_quote(&inner).ok_or_else(|| UnquotableCommand {
@@ -3879,7 +4184,7 @@ impl RemotePayload {
     /// Whether this payload names the bound profile as the config directory, which
     /// is what decides whether a token is forwarded over it.
     pub(crate) fn claude_config(&self) -> ClaudeConfigEnv {
-        self.claude
+        self.claude.clone()
     }
 }
 
@@ -3981,14 +4286,14 @@ fn with_codex_login(command: &str, codex: CodexLogin) -> String {
 ///
 /// `;` and not `&&` for [`with_zellij_session`]'s reason: the payload's status is
 /// the command's.
-fn with_claude_config_dir(command: &str, claude: ClaudeConfigEnv) -> String {
+fn with_claude_config_dir(command: &str, claude: &ClaudeConfigEnv) -> String {
     match claude {
         ClaudeConfigEnv::Leave => command.to_owned(),
-        ClaudeConfigEnv::Set => {
-            // A constant of safe characters, so quoting leaves it bare and cannot
-            // fail; the same call `with_zellij_session` makes about its session
-            // name.
-            let target = posix_quote(provision::CLAUDE_CONFIG_TARGET).unwrap_or_default();
+        ClaudeConfigEnv::Set(dir) => {
+            // The constant, or the constant joined with a `ProfileName`: safe
+            // characters either way, so quoting leaves it bare and cannot fail --
+            // the same call `with_zellij_session` makes about its session name.
+            let target = posix_quote(dir).unwrap_or_default();
             format!("export CLAUDE_CONFIG_DIR={target}; {command}")
         }
     }
@@ -4329,7 +4634,7 @@ impl<'a> SessionContext<'a> {
         // session ends up on is what decides whether a mount nothing points at is
         // worth a word.
         let effective = match claude {
-            ClaudeConfigEnv::Set => Some(ClaudeConfig::Bound),
+            ClaudeConfigEnv::Set(_) => Some(ClaudeConfig::Bound),
             ClaudeConfigEnv::Leave => seen.config(),
         };
         // Said for the bind itself, not from inside whichever arm below claims the
@@ -4337,11 +4642,19 @@ impl<'a> SessionContext<'a> {
         // classifying the pinned directory, and the bind the user asked for earns
         // the same notice either way.
         let mut said_the_mount_is_idle = false;
-        if let Some(name) = self.host.claude.profile.as_deref()
+        if let Some(name) = self.host.claude.selected_profile()
             && mount.target_mounted() == Some(true)
         {
             let requested = match ClaudeProfileMount::ensure(self.host) {
                 ClaudeProfileMount::Bound { source, .. } => Some(source),
+                // The selected profile's own source, never the set's first bind:
+                // this is the path `claude_profile_mount_notice` compares against
+                // what the container has, and the question it answers is about the
+                // profile this session is going to read.
+                ClaudeProfileMount::BoundSet { bound, .. } => bound
+                    .iter()
+                    .find(|profile| profile.name == name)
+                    .map(|profile| profile.source.clone()),
                 _ => None,
             };
             if let Some(notice) =
@@ -4372,7 +4685,7 @@ impl<'a> SessionContext<'a> {
                 // mount notice is about the bind and says nothing about which
                 // account `claude` will run as, so dropping this one there leaves
                 // the session's actual login unmentioned.
-                if let Some(name) = self.host.claude.profile.as_deref()
+                if let Some(name) = self.host.claude.selected_profile()
                     && !said_the_mount_is_idle
                 {
                     notices.say(LaunchNotice::ClaudeProfileNotForwarded {
@@ -4496,6 +4809,28 @@ fn claude_profile_mount_notice(
     mount: &ClaudeMountFacts,
     effective: Option<ClaudeConfig>,
 ) -> Option<LaunchNotice> {
+    // A container that bound a set answers a different question first, and the
+    // arms below cannot answer it: with one directory per profile, "is the profile
+    // this launch named reachable here" is about which binds exist, not about
+    // which single source is mounted. A name that is one of them needs no rebuild
+    // and earns no notice; a name that is not gets the one notice that is true.
+    let bound: Vec<&str> = bound_profiles(mount).collect();
+    if !bound.is_empty() {
+        if !bound.contains(&name) {
+            return Some(LaunchNotice::ClaudeProfileNotInBoundSet {
+                name: name.to_owned(),
+                bound: bound.iter().map(|name| (*name).to_owned()).collect(),
+            });
+        }
+        // The facts below -- the source, the writability, the uid -- describe the
+        // one bind the probe examined, which is the directory the container was
+        // reading when it ran. Where this launch is about to read a different one,
+        // nothing has looked at it, and a notice built from those facts would name
+        // this profile while describing another.
+        if mount.dir() != Some(profile_target(name).as_str()) {
+            return None;
+        }
+    }
     if let (Some(requested), Some(bound)) = (requested, mount.target_source()) {
         let bound_path = Path::new(bound);
         // `bound` is mountinfo field 4: a mount root in its *source*
@@ -4556,14 +4891,14 @@ fn claude_profile_mount_notice(
             (Some(container_uid), Some(dir_uid)) if container_uid != dir_uid => {
                 LaunchNotice::ClaudeProfileMountUidMismatch {
                     name: name.to_owned(),
-                    target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+                    target: PathBuf::from(mount.target_anchor()),
                     container_uid,
                     dir_uid,
                 }
             }
             uids => LaunchNotice::ClaudeProfileMountUnwritable {
                 name: name.to_owned(),
-                target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+                target: PathBuf::from(mount.target_anchor()),
                 uids_compared: matches!(uids, (Some(_), Some(_))),
             },
         });
@@ -4576,7 +4911,7 @@ fn claude_profile_mount_notice(
     if matches!(effective, Some(ClaudeConfig::Foreign) | None)
         && mount.target_source().is_some()
         && let Some(dir) = mount.dir()
-        && dir != provision::CLAUDE_CONFIG_TARGET
+        && !mount.target_binds().iter().any(|bind| bind == dir)
     {
         return Some(LaunchNotice::ClaudeProfileMountIgnored {
             name: name.to_owned(),
@@ -4622,7 +4957,10 @@ pub(crate) fn workspace_ssh(
                 command,
                 ZellijWrap::from_host(session.host),
                 CodexLogin::from_agent(agent),
-                ClaudeConfigEnv::from_mount(session.claude_seen.get().mount()),
+                ClaudeConfigEnv::from_mount(
+                    session.claude_seen.get().mount(),
+                    session.host.claude.selected_profile(),
+                ),
             )
             .map_err(SessionRefused::Unquotable)?,
         ),
@@ -4908,7 +5246,9 @@ fn devpod_session(
     // leaves devpod unrun rather than spawning a session that would forward the wrong
     // account.
     let claude_token = session.forwarded_claude(
-        payload.map_or(ClaudeConfigEnv::Leave, RemotePayload::claude_config),
+        payload
+            .as_ref()
+            .map_or(ClaudeConfigEnv::Leave, |payload| payload.claude_config()),
         notices,
     )?;
     let codex_token = session.forwarded_codex(visibility.agent, notices);
@@ -10475,6 +10815,178 @@ mod tests {
         assert_eq!(mount.up_args(true), Vec::<String>::new());
     }
 
+    /// A second logged-in profile beside the one `naming_a_claude_profile` made,
+    /// which is all a set needs to be a set.
+    fn a_second_profile(scene: &Scene, name: &str, logged_in: bool) {
+        let profile = scene
+            .host
+            .claude_profiles_root
+            .as_ref()
+            .expect("a profiles root")
+            .join(name);
+        std::fs::create_dir_all(&profile).expect("a profile directory");
+        if logged_in {
+            std::fs::write(
+                profile.join(".credentials.json"),
+                r#"{"claudeAiOauth":{"accessToken":"not-a-real-token-from-the-profile"}}"#,
+            )
+            .expect("a credential");
+        }
+    }
+
+    #[test]
+    fn a_named_claude_profile_set_binds_a_directory_each_and_runs_as_the_first() {
+        // The whole of what makes switching free afterwards: every profile named is
+        // in the container at a path of its own, so moving between them is a
+        // different `CLAUDE_CONFIG_DIR` and never a rebuild. Nothing is bound at the
+        // target itself -- a second mount there would have docker create the other
+        // profiles' mount points *inside* the first profile's own host directory.
+        let mut scene = Scene::new().naming_a_claude_profile("bear", true);
+        a_second_profile(&scene, "work", true);
+        scene.host.claude.profile = Some("bear,work".to_owned());
+        let root = scene
+            .host
+            .claude_profiles_root
+            .clone()
+            .expect("a profiles root");
+
+        let args = ClaudeProfileMount::ensure(&scene.host).up_args(true);
+
+        for name in ["bear", "work"] {
+            let expected = format!(
+                "type=bind,source={},target={}/{name}",
+                root.join(name).display(),
+                provision::CLAUDE_CONFIG_TARGET,
+            );
+            assert!(args.contains(&expected), "no {name} mount in {args:?}");
+        }
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.ends_with(&format!(",target={}", provision::CLAUDE_CONFIG_TARGET))),
+            "nothing may be bound at the target itself: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair[0] == "--workspace-env"
+                && pair[1]
+                    == format!("CLAUDE_CONFIG_DIR={}/bear", provision::CLAUDE_CONFIG_TARGET)),
+            "the first name typed is the one this session runs as: {args:?}"
+        );
+    }
+
+    #[test]
+    fn claude_profile_all_binds_every_logged_in_profile_and_selects_none() {
+        // The exposure the owner chose knowingly, and the one thing that keeps it
+        // honest: every login on the host is in the container, so nothing is
+        // selected and `claude` runs as the host's unnamed login until something
+        // names one. A profile nobody has logged in to carries no credential and is
+        // not in the set.
+        let mut scene = Scene::new().naming_a_claude_profile("bear", true);
+        a_second_profile(&scene, "work", true);
+        a_second_profile(&scene, "fresh", false);
+        scene.host.claude.profile = Some("all".to_owned());
+
+        let mount = ClaudeProfileMount::ensure(&scene.host);
+
+        let ClaudeProfileMount::BoundSet {
+            bound,
+            unbound,
+            selected,
+            ..
+        } = &mount
+        else {
+            panic!("expected a set, got {mount:?}");
+        };
+        assert_eq!(
+            bound
+                .iter()
+                .map(|profile| profile.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bear", "work"]
+        );
+        assert_eq!(unbound, &Vec::<String>::new());
+        assert_eq!(selected, &None);
+        let args = mount.up_args(true);
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("CLAUDE_CONFIG_DIR=")),
+            "`all` selects nothing, so nothing points at one: {args:?}"
+        );
+    }
+
+    #[test]
+    fn switching_among_a_bound_claude_profile_set_is_a_different_config_dir() {
+        // The milestone, read off the facts a launch actually has: the probe (or
+        // the memo) says which directories are bound, and a launch naming one of
+        // them exports it. A name nothing bound exports nothing -- pointing
+        // `CLAUDE_CONFIG_DIR` at an unmounted path is a fresh, logged-out
+        // configuration `claude` would create in silence.
+        let target = provision::CLAUDE_CONFIG_TARGET;
+        let bear = format!("{target}/bear");
+        let work = format!("{target}/work");
+        let set = ClaudeMountFacts::synthetic(Some(true), None, None, None, None)
+            .with_binds(&[&bear, &work])
+            .with_dir(&bear);
+        let one = ClaudeMountFacts::synthetic(Some(true), None, None, None, None)
+            .with_binds(&[target])
+            .with_dir(target);
+        let cases = [
+            (&set, Some("work"), ClaudeConfigEnv::Set(work.clone())),
+            (&set, Some("bear"), ClaudeConfigEnv::Set(bear.clone())),
+            (&set, Some("otter"), ClaudeConfigEnv::Leave),
+            (&set, None, ClaudeConfigEnv::Set(bear.clone())),
+            (&one, Some("bear"), ClaudeConfigEnv::Set(target.to_owned())),
+            (&one, None, ClaudeConfigEnv::Set(target.to_owned())),
+        ];
+        for (facts, selected, want) in cases {
+            assert_eq!(
+                ClaudeConfigEnv::from_mount(facts, selected),
+                want,
+                "{selected:?} over {:?}",
+                facts.target_binds()
+            );
+        }
+    }
+
+    #[test]
+    fn a_claude_profile_the_container_never_bound_is_named_rather_than_pointed_at() {
+        // The one notice a bound set can earn, and the two cases that earn none:
+        // a name the container has needs no rebuild and nothing said, and a name it
+        // has that this launch is about to switch *to* has facts describing the
+        // other bind, which would name this profile while measuring another.
+        let target = provision::CLAUDE_CONFIG_TARGET;
+        let bear = format!("{target}/bear");
+        let facts = ClaudeMountFacts::synthetic(
+            Some(true),
+            Some("/host/me/.claude-profiles/bear"),
+            Some(false),
+            Some(1000),
+            Some(1000),
+        )
+        .with_binds(&[&bear, &format!("{target}/work")])
+        .with_dir(&bear);
+        assert_eq!(
+            claude_profile_mount_notice("otter", None, &facts, Some(ClaudeConfig::Ours)),
+            Some(LaunchNotice::ClaudeProfileNotInBoundSet {
+                name: "otter".to_owned(),
+                bound: vec!["bear".to_owned(), "work".to_owned()],
+            })
+        );
+        assert_eq!(
+            claude_profile_mount_notice("work", None, &facts, Some(ClaudeConfig::Bound)),
+            None,
+            "the facts describe bear's bind, not work's"
+        );
+        assert_eq!(
+            claude_profile_mount_notice("bear", None, &facts, Some(ClaudeConfig::Bound)),
+            Some(LaunchNotice::ClaudeProfileMountUnwritable {
+                name: "bear".to_owned(),
+                target: PathBuf::from(&bear),
+                uids_compared: true,
+            }),
+            "a bind this launch does read is still examined, and named by its own path"
+        );
+    }
+
     #[test]
     fn claude_profile_default_never_binds_a_directory_of_that_name_under_the_root() {
         // devlaunch's D1: `--claude-profile default` used to pass `ProfileName::parse`
@@ -12127,7 +12639,7 @@ mod tests {
             &RemoteCommand::argv(&["make", "test"]),
             ZellijWrap::Beside,
             CodexLogin::Off,
-            ClaudeConfigEnv::from_mount(&mounted),
+            ClaudeConfigEnv::from_mount(&mounted, None),
         )
         .expect("quotable");
         let line = payload.as_str();
@@ -12154,13 +12666,21 @@ mod tests {
             (Some(false), None, ClaudeConfigEnv::Leave),
             (None, None, ClaudeConfigEnv::Leave),
             (Some(true), Some(false), ClaudeConfigEnv::Leave),
-            (Some(true), None, ClaudeConfigEnv::Set),
-            (Some(true), Some(true), ClaudeConfigEnv::Set),
+            (
+                Some(true),
+                None,
+                ClaudeConfigEnv::Set(provision::CLAUDE_CONFIG_TARGET.to_owned()),
+            ),
+            (
+                Some(true),
+                Some(true),
+                ClaudeConfigEnv::Set(provision::CLAUDE_CONFIG_TARGET.to_owned()),
+            ),
         ] {
             let facts =
                 ClaudeMountFacts::synthetic(target_mounted, None, target_writable, None, None);
             assert_eq!(
-                ClaudeConfigEnv::from_mount(&facts),
+                ClaudeConfigEnv::from_mount(&facts, None),
                 expected,
                 "{target_mounted:?} {target_writable:?}"
             );
@@ -12952,7 +13472,7 @@ mod tests {
         let claude_seen = ClaudeSeen::new();
         claude_seen.set(ClaudeObservation::remembered(
             seen,
-            ClaudeMountFacts::remembered(mounted, None, None, None),
+            ClaudeMountFacts::remembered(mounted, None, None, None, remembered_binds(mounted)),
         ));
         let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
         let _ = workspace_ssh(
@@ -13247,6 +13767,16 @@ mod tests {
     // mounted, what else it saw of it decides whether the operator hears
     // anything more.
     // =======================================================================
+
+    /// What a memo written for a container with one profile bound at the target
+    /// carries for its binds, which is the shape every test here that predates
+    /// sets means. `None`/`Some(false)` is nothing bound and nothing to list.
+    fn remembered_binds(mounted: Option<bool>) -> Vec<String> {
+        match mounted {
+            Some(true) => vec![provision::CLAUDE_CONFIG_TARGET.to_owned()],
+            _ => Vec::new(),
+        }
+    }
 
     /// Only the notices [`claude_profile_mount_notice`] can produce, in order --
     /// `workspace_ssh` says plenty else along the way (an `SshCommand` among
@@ -16181,8 +16711,13 @@ mod tests {
         let completion = scene.cache_dir().join("completion.json");
         let mut parts = launching(&scene.runner, &updater, &completion);
         parts.provision.claude_remembered = Some(ClaudeConfig::Ours);
-        parts.provision.claude_remembered_mount =
-            ClaudeMountFacts::remembered(Some(true), None, None, None);
+        parts.provision.claude_remembered_mount = ClaudeMountFacts::remembered(
+            Some(true),
+            None,
+            None,
+            None,
+            remembered_binds(Some(true)),
+        );
         let mut cold = NeverCold;
         let mut launch = Launch::new(
             &mut parts.context,
@@ -16245,6 +16780,7 @@ mod tests {
                 .claude_profiles_root
                 .as_ref()
                 .map(|root| root.join("work").display().to_string()),
+            remembered_binds(Some(true)),
         );
         let mut cold = NeverCold;
         let mut launch = Launch::new(
@@ -16314,6 +16850,7 @@ mod tests {
                 None,
                 Some("/home/dev/.claude-pinned".to_owned()),
                 bound.map(|name| root.join(name).display().to_string()),
+                remembered_binds(Some(true)),
             );
             let mut cold = NeverCold;
             let mut launch = Launch::new(
@@ -16371,8 +16908,13 @@ mod tests {
         let completion = scene.cache_dir().join("completion.json");
         let mut parts = launching(&scene.runner, &updater, &completion);
         parts.provision.claude_remembered = Some(ClaudeConfig::Ours);
-        parts.provision.claude_remembered_mount =
-            ClaudeMountFacts::remembered(Some(true), Some(false), None, None);
+        parts.provision.claude_remembered_mount = ClaudeMountFacts::remembered(
+            Some(true),
+            Some(false),
+            None,
+            None,
+            remembered_binds(Some(true)),
+        );
         let mut cold = NeverCold;
         let mut launch = Launch::new(
             &mut parts.context,

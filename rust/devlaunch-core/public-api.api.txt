@@ -68,13 +68,26 @@ pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUidMismatch::container_
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUidMismatch::dir_uid: u32
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUidMismatch::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUidMismatch::target: std::path::PathBuf
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable::target: std::path::PathBuf
-pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable
-pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable::name: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable::uids_compared: bool
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileNotForwarded
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileNotForwarded::name: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileNotInBoundSet
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileNotInBoundSet::bound: alloc::vec::Vec<alloc::string::String>
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileNotInBoundSet::name: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileSetBound
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileSetBound::bound: alloc::vec::Vec<alloc::string::String>
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileSetBound::credential_binds: alloc::vec::Vec<std::path::PathBuf>
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileSetBound::extra_binds: alloc::vec::Vec<std::path::PathBuf>
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileSetBound::extra_binds_capped: bool
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileSetBound::extra_binds_refused: bool
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileSetBound::selected: core::option::Option<alloc::string::String>
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileSetBound::target: std::path::PathBuf
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileSetBound::unbound: alloc::vec::Vec<alloc::string::String>
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileSourceUnsafe
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileSourceUnsafe::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileSourceUnsafe::source: std::path::PathBuf
@@ -100,6 +113,12 @@ pub devlaunch_core::api::LaunchNotice::LaunchLockUnavailable
 pub devlaunch_core::api::LaunchNotice::LaunchLockUnavailable::reason: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::LaunchLockUnavailable::workspace_id: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::Lifecycle(devlaunch_core::flows::lifecycle::LifecycleNotice)
+pub devlaunch_core::api::LaunchNotice::MemoryCapNotSet
+pub devlaunch_core::api::LaunchNotice::MemoryCapNotSet::bytes: u64
+pub devlaunch_core::api::LaunchNotice::MemoryCapNotSet::reason: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::MemoryCapped
+pub devlaunch_core::api::LaunchNotice::MemoryCapped::bytes: u64
+pub devlaunch_core::api::LaunchNotice::MemoryCapped::containers: usize
 pub devlaunch_core::api::LaunchNotice::MountSourceEmpty
 pub devlaunch_core::api::LaunchNotice::MountSourceMissing
 pub devlaunch_core::api::LaunchNotice::MountSourceMissing::path: alloc::string::String
@@ -156,7 +175,9 @@ pub devlaunch_core::api::LaunchVerb::Attach::command: core::option::Option<devla
 pub devlaunch_core::api::LaunchVerb::Code
 pub devlaunch_core::api::LaunchVerb::Dotfiles
 pub devlaunch_core::api::LaunchVerb::Recreate
+pub devlaunch_core::api::LaunchVerb::Recreate::command: core::option::Option<devlaunch_core::flows::launch::RemoteCommand>
 pub devlaunch_core::api::LaunchVerb::Reset
+pub devlaunch_core::api::LaunchVerb::Reset::command: core::option::Option<devlaunch_core::flows::launch::RemoteCommand>
 pub devlaunch_core::api::LaunchVerb::Restart
 pub devlaunch_core::api::LaunchVerb::Up
 impl core::clone::Clone for devlaunch_core::flows::launch::LaunchVerb
@@ -201,6 +222,23 @@ pub fn devlaunch_core::flows::lifecycle::LifecycleNotice::eq(&self, &devlaunch_c
 impl core::fmt::Debug for devlaunch_core::flows::lifecycle::LifecycleNotice
 pub fn devlaunch_core::flows::lifecycle::LifecycleNotice::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for devlaunch_core::flows::lifecycle::LifecycleNotice
+pub enum devlaunch_core::api::MemoryCap
+pub devlaunch_core::api::MemoryCap::Capped
+pub devlaunch_core::api::MemoryCap::Capped::bytes: u64
+pub devlaunch_core::api::MemoryCap::Off
+impl devlaunch_core::flows::launch::MemoryCap
+pub fn devlaunch_core::flows::launch::MemoryCap::requested(core::option::Option<&str>) -> core::result::Result<Self, devlaunch_core::flows::launch::MemorySizeRefused>
+impl core::clone::Clone for devlaunch_core::flows::launch::MemoryCap
+pub fn devlaunch_core::flows::launch::MemoryCap::clone(&self) -> devlaunch_core::flows::launch::MemoryCap
+impl core::cmp::Eq for devlaunch_core::flows::launch::MemoryCap
+impl core::cmp::PartialEq for devlaunch_core::flows::launch::MemoryCap
+pub fn devlaunch_core::flows::launch::MemoryCap::eq(&self, &devlaunch_core::flows::launch::MemoryCap) -> bool
+impl core::default::Default for devlaunch_core::flows::launch::MemoryCap
+pub fn devlaunch_core::flows::launch::MemoryCap::default() -> Self
+impl core::fmt::Debug for devlaunch_core::flows::launch::MemoryCap
+pub fn devlaunch_core::flows::launch::MemoryCap::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for devlaunch_core::flows::launch::MemoryCap
+impl core::marker::StructuralPartialEq for devlaunch_core::flows::launch::MemoryCap
 pub enum devlaunch_core::api::ProvisionEvent
 pub devlaunch_core::api::ProvisionEvent::NotInstalled
 pub devlaunch_core::api::ProvisionEvent::NotInstalled::exit: devlaunch_runner::Exit
@@ -405,6 +443,7 @@ impl devlaunch_core::flows::launch::Host
 pub fn devlaunch_core::flows::launch::Host::from_process(impl core::convert::Into<std::path::PathBuf>) -> Self
 pub fn devlaunch_core::flows::launch::Host::with_agent_resume(self, core::option::Option<devlaunch_core::clients::AgentResume>) -> Self
 pub fn devlaunch_core::flows::launch::Host::with_claude_profile(self, core::option::Option<alloc::string::String>) -> Self
+pub fn devlaunch_core::flows::launch::Host::with_memory_cap(self, devlaunch_core::flows::launch::MemoryCap) -> Self
 impl core::clone::Clone for devlaunch_core::flows::launch::Host
 pub fn devlaunch_core::flows::launch::Host::clone(&self) -> devlaunch_core::flows::launch::Host
 impl core::cmp::Eq for devlaunch_core::flows::launch::Host
@@ -432,6 +471,16 @@ pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::from_ref(self, core::o
 pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::new(&'a mut devlaunch_core::flows::listing::CommandContext<'r>, &'a mut devlaunch_core::flows::lifecycle::Refresh<'l>, &'a mut dyn devlaunch_core::flows::launch::ColdMachinery<'r>, &'a dyn devlaunch_core::flows::launch::Provision, &'a devlaunch_core::flows::launch::Host, &'a mut dyn core::ops::function::FnMut(&str), &'a mut dyn devlaunch_core::notices::Notices<devlaunch_core::flows::launch::LaunchNotice>) -> Self
 pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::recognised_as(self, core::option::Option<devlaunch_core::domain::workspace_id::WorkspaceId>) -> Self
 pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::run(&mut self, &str, &devlaunch_core::flows::launch::LaunchVerb, core::option::Option<&devlaunch_core::domain::spec::DevcontainerPath>) -> core::result::Result<devlaunch_core::flows::launch::Launched, devlaunch_core::flows::launch::LaunchAborted>
+pub struct devlaunch_core::api::MemorySizeRefused
+pub devlaunch_core::api::MemorySizeRefused::typed: alloc::string::String
+impl core::clone::Clone for devlaunch_core::flows::launch::MemorySizeRefused
+pub fn devlaunch_core::flows::launch::MemorySizeRefused::clone(&self) -> devlaunch_core::flows::launch::MemorySizeRefused
+impl core::cmp::Eq for devlaunch_core::flows::launch::MemorySizeRefused
+impl core::cmp::PartialEq for devlaunch_core::flows::launch::MemorySizeRefused
+pub fn devlaunch_core::flows::launch::MemorySizeRefused::eq(&self, &devlaunch_core::flows::launch::MemorySizeRefused) -> bool
+impl core::fmt::Debug for devlaunch_core::flows::launch::MemorySizeRefused
+pub fn devlaunch_core::flows::launch::MemorySizeRefused::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for devlaunch_core::flows::launch::MemorySizeRefused
 pub struct devlaunch_core::api::MetadataStorage
 impl devlaunch_core::domain::metadata::MetadataStorage
 pub fn devlaunch_core::domain::metadata::MetadataStorage::default_path() -> core::result::Result<std::path::PathBuf, devlaunch_core::domain::xdg::NoHomeDirectory>
@@ -491,7 +540,9 @@ pub fn devlaunch_core::flows::workspace_clone::WorkspaceCloneManager<'r>::on_rep
 pub fn devlaunch_core::flows::workspace_clone::WorkspaceCloneManager<'r>::repo_manager(&self) -> &devlaunch_core::flows::repo_manager::RepositoryManager<'r>
 impl core::fmt::Debug for devlaunch_core::flows::workspace_clone::WorkspaceCloneManager<'_>
 pub fn devlaunch_core::flows::workspace_clone::WorkspaceCloneManager<'_>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const devlaunch_core::api::DEFAULT_MEMORY_CAP_BYTES: u64
 pub const devlaunch_core::api::HANDOFF_VAR: &str
+pub const devlaunch_core::api::NO_MEMORY_CAP: &str
 pub const devlaunch_core::api::PREWARM_VAR: &str
 pub trait devlaunch_core::api::ColdMachinery<'r>
 pub fn devlaunch_core::api::ColdMachinery::open(&mut self) -> core::result::Result<devlaunch_core::flows::launch::Cold<'_, 'r>, devlaunch_core::flows::launch::ColdRefused>
@@ -664,13 +715,26 @@ pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUidMismatch::
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUidMismatch::dir_uid: u32
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUidMismatch::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUidMismatch::target: std::path::PathBuf
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable::target: std::path::PathBuf
-pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable
-pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable::name: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable::uids_compared: bool
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileNotForwarded
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileNotForwarded::name: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileNotInBoundSet
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileNotInBoundSet::bound: alloc::vec::Vec<alloc::string::String>
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileNotInBoundSet::name: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSetBound
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSetBound::bound: alloc::vec::Vec<alloc::string::String>
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSetBound::credential_binds: alloc::vec::Vec<std::path::PathBuf>
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSetBound::extra_binds: alloc::vec::Vec<std::path::PathBuf>
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSetBound::extra_binds_capped: bool
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSetBound::extra_binds_refused: bool
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSetBound::selected: core::option::Option<alloc::string::String>
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSetBound::target: std::path::PathBuf
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSetBound::unbound: alloc::vec::Vec<alloc::string::String>
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSourceUnsafe
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSourceUnsafe::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileSourceUnsafe::source: std::path::PathBuf
@@ -696,6 +760,12 @@ pub devlaunch_core::flows::launch::LaunchNotice::LaunchLockUnavailable
 pub devlaunch_core::flows::launch::LaunchNotice::LaunchLockUnavailable::reason: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::LaunchLockUnavailable::workspace_id: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::Lifecycle(devlaunch_core::flows::lifecycle::LifecycleNotice)
+pub devlaunch_core::flows::launch::LaunchNotice::MemoryCapNotSet
+pub devlaunch_core::flows::launch::LaunchNotice::MemoryCapNotSet::bytes: u64
+pub devlaunch_core::flows::launch::LaunchNotice::MemoryCapNotSet::reason: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::MemoryCapped
+pub devlaunch_core::flows::launch::LaunchNotice::MemoryCapped::bytes: u64
+pub devlaunch_core::flows::launch::LaunchNotice::MemoryCapped::containers: usize
 pub devlaunch_core::flows::launch::LaunchNotice::MountSourceEmpty
 pub devlaunch_core::flows::launch::LaunchNotice::MountSourceMissing
 pub devlaunch_core::flows::launch::LaunchNotice::MountSourceMissing::path: alloc::string::String
@@ -752,7 +822,9 @@ pub devlaunch_core::flows::launch::LaunchVerb::Attach::command: core::option::Op
 pub devlaunch_core::flows::launch::LaunchVerb::Code
 pub devlaunch_core::flows::launch::LaunchVerb::Dotfiles
 pub devlaunch_core::flows::launch::LaunchVerb::Recreate
+pub devlaunch_core::flows::launch::LaunchVerb::Recreate::command: core::option::Option<devlaunch_core::flows::launch::RemoteCommand>
 pub devlaunch_core::flows::launch::LaunchVerb::Reset
+pub devlaunch_core::flows::launch::LaunchVerb::Reset::command: core::option::Option<devlaunch_core::flows::launch::RemoteCommand>
 pub devlaunch_core::flows::launch::LaunchVerb::Restart
 pub devlaunch_core::flows::launch::LaunchVerb::Up
 impl core::clone::Clone for devlaunch_core::flows::launch::LaunchVerb
@@ -763,6 +835,23 @@ pub fn devlaunch_core::flows::launch::LaunchVerb::eq(&self, &devlaunch_core::flo
 impl core::fmt::Debug for devlaunch_core::flows::launch::LaunchVerb
 pub fn devlaunch_core::flows::launch::LaunchVerb::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for devlaunch_core::flows::launch::LaunchVerb
+pub enum devlaunch_core::flows::launch::MemoryCap
+pub devlaunch_core::flows::launch::MemoryCap::Capped
+pub devlaunch_core::flows::launch::MemoryCap::Capped::bytes: u64
+pub devlaunch_core::flows::launch::MemoryCap::Off
+impl devlaunch_core::flows::launch::MemoryCap
+pub fn devlaunch_core::flows::launch::MemoryCap::requested(core::option::Option<&str>) -> core::result::Result<Self, devlaunch_core::flows::launch::MemorySizeRefused>
+impl core::clone::Clone for devlaunch_core::flows::launch::MemoryCap
+pub fn devlaunch_core::flows::launch::MemoryCap::clone(&self) -> devlaunch_core::flows::launch::MemoryCap
+impl core::cmp::Eq for devlaunch_core::flows::launch::MemoryCap
+impl core::cmp::PartialEq for devlaunch_core::flows::launch::MemoryCap
+pub fn devlaunch_core::flows::launch::MemoryCap::eq(&self, &devlaunch_core::flows::launch::MemoryCap) -> bool
+impl core::default::Default for devlaunch_core::flows::launch::MemoryCap
+pub fn devlaunch_core::flows::launch::MemoryCap::default() -> Self
+impl core::fmt::Debug for devlaunch_core::flows::launch::MemoryCap
+pub fn devlaunch_core::flows::launch::MemoryCap::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for devlaunch_core::flows::launch::MemoryCap
+impl core::marker::StructuralPartialEq for devlaunch_core::flows::launch::MemoryCap
 pub struct devlaunch_core::flows::launch::Cold<'a, 'r>
 pub devlaunch_core::flows::launch::Cold::clones: &'a devlaunch_core::flows::workspace_clone::WorkspaceCloneManager<'r>
 pub devlaunch_core::flows::launch::Cold::storage: &'a mut devlaunch_core::domain::metadata::MetadataStorage
@@ -778,6 +867,7 @@ impl devlaunch_core::flows::launch::Host
 pub fn devlaunch_core::flows::launch::Host::from_process(impl core::convert::Into<std::path::PathBuf>) -> Self
 pub fn devlaunch_core::flows::launch::Host::with_agent_resume(self, core::option::Option<devlaunch_core::clients::AgentResume>) -> Self
 pub fn devlaunch_core::flows::launch::Host::with_claude_profile(self, core::option::Option<alloc::string::String>) -> Self
+pub fn devlaunch_core::flows::launch::Host::with_memory_cap(self, devlaunch_core::flows::launch::MemoryCap) -> Self
 impl core::clone::Clone for devlaunch_core::flows::launch::Host
 pub fn devlaunch_core::flows::launch::Host::clone(&self) -> devlaunch_core::flows::launch::Host
 impl core::cmp::Eq for devlaunch_core::flows::launch::Host
@@ -794,6 +884,16 @@ pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::from_ref(self, core::o
 pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::new(&'a mut devlaunch_core::flows::listing::CommandContext<'r>, &'a mut devlaunch_core::flows::lifecycle::Refresh<'l>, &'a mut dyn devlaunch_core::flows::launch::ColdMachinery<'r>, &'a dyn devlaunch_core::flows::launch::Provision, &'a devlaunch_core::flows::launch::Host, &'a mut dyn core::ops::function::FnMut(&str), &'a mut dyn devlaunch_core::notices::Notices<devlaunch_core::flows::launch::LaunchNotice>) -> Self
 pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::recognised_as(self, core::option::Option<devlaunch_core::domain::workspace_id::WorkspaceId>) -> Self
 pub fn devlaunch_core::flows::launch::Launch<'a, 'r, 'l>::run(&mut self, &str, &devlaunch_core::flows::launch::LaunchVerb, core::option::Option<&devlaunch_core::domain::spec::DevcontainerPath>) -> core::result::Result<devlaunch_core::flows::launch::Launched, devlaunch_core::flows::launch::LaunchAborted>
+pub struct devlaunch_core::flows::launch::MemorySizeRefused
+pub devlaunch_core::flows::launch::MemorySizeRefused::typed: alloc::string::String
+impl core::clone::Clone for devlaunch_core::flows::launch::MemorySizeRefused
+pub fn devlaunch_core::flows::launch::MemorySizeRefused::clone(&self) -> devlaunch_core::flows::launch::MemorySizeRefused
+impl core::cmp::Eq for devlaunch_core::flows::launch::MemorySizeRefused
+impl core::cmp::PartialEq for devlaunch_core::flows::launch::MemorySizeRefused
+pub fn devlaunch_core::flows::launch::MemorySizeRefused::eq(&self, &devlaunch_core::flows::launch::MemorySizeRefused) -> bool
+impl core::fmt::Debug for devlaunch_core::flows::launch::MemorySizeRefused
+pub fn devlaunch_core::flows::launch::MemorySizeRefused::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for devlaunch_core::flows::launch::MemorySizeRefused
 pub struct devlaunch_core::flows::launch::ToolProvisioning<'e>
 impl<'e> devlaunch_core::flows::launch::ToolProvisioning<'e>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'e>::for_verb(self, &devlaunch_core::flows::launch::LaunchVerb) -> Self
@@ -805,6 +905,8 @@ pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::provision_tools(&sel
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude_mount(&self, &str) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::stage_missing_for_this_launch(&self, &str) -> bool
+pub const devlaunch_core::flows::launch::DEFAULT_MEMORY_CAP_BYTES: u64
+pub const devlaunch_core::flows::launch::NO_MEMORY_CAP: &str
 pub trait devlaunch_core::flows::launch::ColdMachinery<'r>
 pub fn devlaunch_core::flows::launch::ColdMachinery::open(&mut self) -> core::result::Result<devlaunch_core::flows::launch::Cold<'_, 'r>, devlaunch_core::flows::launch::ColdRefused>
 pub fn devlaunch_core::flows::launch::ColdMachinery::recorded(&mut self) -> core::option::Option<&devlaunch_core::domain::metadata::MetadataStorage>

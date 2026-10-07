@@ -182,14 +182,33 @@ const CLAUDE_HOME_KEY: &str = "claudehome";
 const CLAUDE_DIR_KEY: &str = "claudedir";
 const CLAUDE_MOUNTS_KEY: &str = "claudemounts";
 const CLAUDE_SCAN_KEY: &str = "claudescan";
-/// Whether [`CLAUDE_CONFIG_TARGET`] is itself a mount point -- evidence a
+/// Whether anything is bound at or under [`CLAUDE_CONFIG_TARGET`] -- evidence a
 /// `--claude-profile` bind's `--mount` landed, independent of what
 /// `CLAUDE_CONFIG_DIR` resolves to. See [`ClaudeConfig::parse`].
 const CLAUDE_TARGET_MOUNTED_KEY: &str = "claudetargetmounted";
-/// The mount's source -- `mountinfo`'s field 4 at the row where field 5 is
-/// [`CLAUDE_CONFIG_TARGET`], unescaped the same way [`CLAUDE_MOUNT_SCAN_AWK`]
-/// already does. Empty when [`CLAUDE_TARGET_MOUNTED_KEY`] answers `no`, or when
-/// the scan itself could not run.
+/// Every mount point at or under [`CLAUDE_CONFIG_TARGET`], space-joined --
+/// [`CLAUDE_TARGET_MOUNTED_KEY`]'s detail, and the fact that makes switching
+/// profiles without a rebuild answerable.
+///
+/// A launch that names a set binds one directory per profile under the target
+/// ([`crate::flows::launch::ClaudeProfileMount`]), so which profiles a running
+/// container can be pointed at is a question about *paths that exist as mounts*,
+/// not about any single one. Without this key a launch asking for a profile the
+/// container never bound would export `CLAUDE_CONFIG_DIR` at a directory nothing
+/// mounted anything into, and `claude` would open a fresh, logged-out
+/// configuration there and say nothing -- the silent wrong-account outcome
+/// profiles exist to prevent.
+const CLAUDE_TARGET_BINDS_KEY: &str = "claudetargetbinds";
+/// The mount's source -- `mountinfo`'s field 4 at the row where field 5 is the
+/// bind this session reads, unescaped the same way [`CLAUDE_MOUNT_SCAN_AWK`]
+/// already does. Empty when [`CLAUDE_TARGET_MOUNTED_KEY`] answers `no`, when that
+/// bind is not itself a mount point, or when the scan itself could not run.
+///
+/// The bind this session reads is the effective config directory when that is
+/// [`CLAUDE_CONFIG_TARGET`] or sits under it, and the target otherwise. The two
+/// are the same path on a launch that binds one profile at the target, and come
+/// apart on one that binds a set: there the question "which profile is this" has
+/// an answer only once `CLAUDE_CONFIG_DIR` has picked one of them.
 ///
 /// This is the fact a bind's own verification was missing: [`ClaudeConfig::Bound`]
 /// says a profile is mounted, never *which* one, and a container created with one
@@ -217,7 +236,8 @@ const CLAUDE_UID_KEY: &str = "claudeuid";
 const CLAUDE_DIR_UID_KEY: &str = "claudediruid";
 
 /// The same pair as [`CLAUDE_WRITABLE_KEY`] and [`CLAUDE_DIR_UID_KEY`], asked of
-/// [`CLAUDE_CONFIG_TARGET`] itself rather than of the effective config directory.
+/// the bind this session reads (see [`CLAUDE_TARGET_SOURCE_KEY`]) rather than of
+/// the effective config directory.
 ///
 /// That pair describes whatever `CLAUDE_CONFIG_DIR` resolved to, which is the
 /// target only on a container that reads the variable devlaunch sets. A
@@ -228,9 +248,11 @@ const CLAUDE_DIR_UID_KEY: &str = "claudediruid";
 /// reported, and whether the bind's own treatment is withheld, are read from this
 /// pair alone: see [`ClaudeMountFacts::target_unusable`].
 ///
-/// Only asked when [`CLAUDE_TARGET_MOUNTED_KEY`] says the bind landed. The path
-/// exists unmounted on any container that ever had one, and its uid would then
-/// describe an empty directory rather than a profile.
+/// Only asked when [`CLAUDE_TARGET_SOURCE_KEY`] found that bind to be a mount
+/// point. The path exists unmounted on any container that ever had one -- and the
+/// target itself is an ordinary container-made directory on every container that
+/// binds a set under it -- so its uid would otherwise describe an empty directory
+/// rather than a profile.
 const CLAUDE_TARGET_WRITABLE_KEY: &str = "claudetargetwritable";
 const CLAUDE_TARGET_UID_KEY: &str = "claudetargetuid";
 
@@ -1515,6 +1537,18 @@ const CLAUDE_MOUNT_SCAN_AWK: &str = "{ p = $5\n  gsub(/\\\\040/, \" \", p)\n  gs
 /// into a second, silent list this key never promised.
 const CLAUDE_TARGET_SOURCE_AWK: &str = "$5 == t { p = $4\n  gsub(/\\\\040/, \" \", p)\n  gsub(/\\\\011/, \"\\t\", p)\n  print p\n  exit\n}";
 
+/// The bind-listing awk program's body, the twin [`target_binds_over`] diffs
+/// against. Prints every mount point (field 5) that is the target or sits under
+/// it, which is the whole of what [`CLAUDE_TARGET_BINDS_KEY`] carries.
+///
+/// No unescaping, where its two neighbours above do it: a mount point this key is
+/// about is one `dl` itself wrote, and `dl` only ever writes the target or the
+/// target joined with a [`crate::clients::claude::ProfileName`], whose character
+/// set has no space and no tab in it. Unescaping here would instead make the
+/// escaped and unescaped spellings of a *foreign* mount point under the target
+/// both match, which is a wider claim than the key makes.
+const CLAUDE_TARGET_BINDS_AWK: &str = "$5 == t || index($5, t \"/\") == 1 { print $5 }";
+
 /// The lines that describe the container's Claude config directory.
 ///
 /// Facts, and no verdict: where the directory resolved to, what `$HOME` resolved
@@ -1614,29 +1648,50 @@ fn claude_config_lines() -> Vec<String> {
         "fi".to_owned(),
         format!("echo \"{PROBE_MARK} {CLAUDE_SCAN_KEY} $cfg_scan\""),
         format!("echo \"{PROBE_MARK} {CLAUDE_MOUNTS_KEY} $cfg_mounts\""),
-        // Whether `CLAUDE_CONFIG_TARGET` is itself a mount point, independent of
-        // what `cfg_dir` resolved to -- the fact [`ClaudeConfig::parse`] needs to
-        // tell a bound profile apart from a container whose config directory
-        // merely happens to share that path. Step 2 (the `--mount` bind) is what
-        // makes this report `yes` on a container with a bound profile; it exists
-        // so the fact is available to any other caller too.
-        "cfg_target_mounted=no".to_owned(),
+        // Every mount point at or under `CLAUDE_CONFIG_TARGET`, which is the whole
+        // of what `dl` bound there: one profile at the target itself, or one per
+        // name under it. See [`CLAUDE_TARGET_BINDS_KEY`]. Space-joined for
+        // `CLAUDE_MOUNTS_KEY`'s reason -- a report is a map, so a repeated key
+        // would keep only the last -- and the paths cannot carry a space to split
+        // on, because `dl` writes no mount point here that is not the target or
+        // the target joined with a `ProfileName`.
+        "cfg_target_binds=".to_owned(),
         "if [ -r /proc/self/mountinfo ]; then".to_owned(),
         format!(
-            "  if awk -v t=\"{CLAUDE_CONFIG_TARGET}\" '$5 == t {{ found=1 }} END {{ exit !found }}' /proc/self/mountinfo 2>/dev/null; then"
+            "  cfg_target_binds=$(awk -v t=\"{CLAUDE_CONFIG_TARGET}\" -v ORS=' ' '{CLAUDE_TARGET_BINDS_AWK}' /proc/self/mountinfo 2>/dev/null || true)"
         ),
-        "    cfg_target_mounted=yes".to_owned(),
-        "  fi".to_owned(),
         "fi".to_owned(),
+        format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_BINDS_KEY} $cfg_target_binds\""),
+        // Whether anything landed there at all, independent of what `cfg_dir`
+        // resolved to -- the fact [`ClaudeConfig::parse`] needs to tell a bound
+        // profile apart from a container whose config directory merely happens to
+        // share that path. Step 2 (the `--mount` bind) is what makes this report
+        // `yes` on a container with a bound profile; it exists so the fact is
+        // available to any other caller too.
+        "cfg_target_mounted=no".to_owned(),
+        "if [ -n \"$cfg_target_binds\" ]; then cfg_target_mounted=yes; fi".to_owned(),
         format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_MOUNTED_KEY} $cfg_target_mounted\""),
+        // The bind this session actually reads, which is the only one the three
+        // facts below can honestly describe: the effective config directory when
+        // that is the target or sits under it, and the target itself otherwise.
+        // The two coincide on a launch that binds one profile at the target, which
+        // is the shape every one of these facts was written for; they come apart
+        // when a launch binds a set, one directory per name, and `CLAUDE_CONFIG_DIR`
+        // picks one of them.
+        format!("case \"$cfg_dir\" in"),
+        format!("  \"{CLAUDE_CONFIG_TARGET}\"|\"{CLAUDE_CONFIG_TARGET}\"/*) cfg_anchor=$cfg_dir;;"),
+        format!("  *) cfg_anchor=\"{CLAUDE_CONFIG_TARGET}\";;"),
+        "esac".to_owned(),
         // The mount's source -- the fact `ClaudeConfig::Bound` alone cannot carry,
         // and the one a switched `--claude-profile` needs: see
-        // [`CLAUDE_TARGET_SOURCE_KEY`]. Only asked when the target is actually
-        // mounted, and unescaped the same way `CLAUDE_MOUNT_SCAN_AWK` already does.
+        // [`CLAUDE_TARGET_SOURCE_KEY`]. Only asked when something is bound there,
+        // and unescaped the same way `CLAUDE_MOUNT_SCAN_AWK` already does. Empty
+        // when the anchor is not itself a mount point, which is also what gates
+        // the pair below.
         "cfg_target_source=".to_owned(),
         "if [ \"$cfg_target_mounted\" = yes ] && [ -r /proc/self/mountinfo ]; then".to_owned(),
         format!(
-            "  cfg_target_source=$(awk -v t=\"{CLAUDE_CONFIG_TARGET}\" '{CLAUDE_TARGET_SOURCE_AWK}' /proc/self/mountinfo 2>/dev/null || true)"
+            "  cfg_target_source=$(awk -v t=\"$cfg_anchor\" '{CLAUDE_TARGET_SOURCE_AWK}' /proc/self/mountinfo 2>/dev/null || true)"
         ),
         "fi".to_owned(),
         format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_SOURCE_KEY} $cfg_target_source\""),
@@ -1669,11 +1724,17 @@ fn claude_config_lines() -> Vec<String> {
         // in for them, and why neither is asked when nothing is mounted there.
         format!("cfg_target_writable={TRI_UNKNOWN}"),
         "cfg_target_uid=".to_owned(),
-        format!("if [ \"$cfg_target_mounted\" = {TRI_YES} ]; then"),
+        // On the anchor, and gated on its source rather than on `cfg_target_mounted`:
+        // a set bound one directory per name leaves the target itself an ordinary
+        // directory the container created, which `-w` and `stat` answer for
+        // perfectly well and whose answers describe no profile at all. An empty
+        // source is exactly "the anchor is not one of the binds", so unknown is
+        // what the pair reports there.
+        "if [ -n \"$cfg_target_source\" ]; then".to_owned(),
         format!(
-            "  if [ -w \"{CLAUDE_CONFIG_TARGET}\" ]; then cfg_target_writable={TRI_YES}; else cfg_target_writable={TRI_NO}; fi"
+            "  if [ -w \"$cfg_anchor\" ]; then cfg_target_writable={TRI_YES}; else cfg_target_writable={TRI_NO}; fi"
         ),
-        format!("  cfg_target_uid=$(stat -c %u \"{CLAUDE_CONFIG_TARGET}\" 2>/dev/null || true)"),
+        "  cfg_target_uid=$(stat -c %u \"$cfg_anchor\" 2>/dev/null || true)".to_owned(),
         "fi".to_owned(),
         format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_WRITABLE_KEY} $cfg_target_writable\""),
         format!("echo \"{PROBE_MARK} {CLAUDE_TARGET_UID_KEY} $cfg_target_uid\""),
@@ -1895,7 +1956,8 @@ pub enum ClaudeConfig {
     /// owns what is in there. Not `dl`'s own profile bind -- see [`Self::Bound`].
     Foreign,
     /// The container's effective config directory is [`CLAUDE_CONFIG_TARGET`] or
-    /// a path under it, and the probe found that path itself mounted --
+    /// a path under it, and one of the binds the probe found there is that
+    /// directory or an ancestor of it --
     /// `dl` bound a named profile in. Ours in every sense: forward nothing,
     /// because the mounted directory already carries the same credential file the
     /// host has and refreshes it the same way.
@@ -1932,8 +1994,11 @@ impl ClaudeConfig {
     /// [`Self::Bound`] is decided first, and takes both facts it names literally:
     /// the effective config directory must be [`CLAUDE_CONFIG_TARGET`] or sit under
     /// it (compared by component, so a sibling sharing the prefix is not under it),
-    /// and the probe must have found that path itself mounted. Either missing or
-    /// false falls through to the existing [`cfg_dir_is_foreign`] rule, unchanged.
+    /// and one of the binds the probe listed must be that directory or an ancestor
+    /// of it. The second test is what keeps the target's own parent directory --
+    /// which is an ordinary container-made directory on a container that binds a
+    /// set of profiles under it -- from reading as a profile nobody bound. Either
+    /// missing falls through to the existing [`cfg_dir_is_foreign`] rule, unchanged.
     pub(crate) fn parse(report: &str, host_home: Option<&str>) -> Option<Self> {
         let found = marked_lines(report);
         // A scan that did not happen is not evidence of ownership. Without this the
@@ -1945,9 +2010,8 @@ impl ClaudeConfig {
         let home = found.get(CLAUDE_HOME_KEY)?;
         let mounts = found.get(CLAUDE_MOUNTS_KEY)?;
         let dir = found.get(CLAUDE_DIR_KEY).map(String::as_str).unwrap_or("");
-        let target_mounted =
-            found.get(CLAUDE_TARGET_MOUNTED_KEY).map(String::as_str) == Some("yes");
-        if target_mounted && is_under(dir, CLAUDE_CONFIG_TARGET) {
+        let binds = target_binds(&found);
+        if is_under(dir, CLAUDE_CONFIG_TARGET) && binds.iter().any(|bind| is_under(dir, bind)) {
             return Some(Self::Bound);
         }
         Some(if cfg_dir_is_foreign(home, host_home, mounts) {
@@ -1983,6 +2047,7 @@ impl ClaudeConfig {
 pub struct ClaudeMountFacts {
     dir: Option<String>,
     target_mounted: Option<bool>,
+    target_binds: Vec<String>,
     target_source: Option<String>,
     writable: Option<bool>,
     container_uid: Option<u32>,
@@ -2004,6 +2069,7 @@ impl ClaudeMountFacts {
                 .filter(|dir| !dir.is_empty())
                 .cloned(),
             target_mounted: parse_tri(found.get(CLAUDE_TARGET_MOUNTED_KEY)),
+            target_binds: target_binds(&found),
             target_source: found
                 .get(CLAUDE_TARGET_SOURCE_KEY)
                 .filter(|source| !source.is_empty())
@@ -2029,10 +2095,18 @@ impl ClaudeMountFacts {
         self.dir.as_deref()
     }
 
-    /// Whether the probe found [`CLAUDE_CONFIG_TARGET`] itself mounted. `None` when
-    /// the probe could not say.
+    /// Whether the probe found anything bound at or under [`CLAUDE_CONFIG_TARGET`].
+    /// `None` when the probe could not say.
     pub fn target_mounted(&self) -> Option<bool> {
         self.target_mounted
+    }
+
+    /// Every mount point the probe found at or under [`CLAUDE_CONFIG_TARGET`] --
+    /// the profiles this container can be pointed at without being rebuilt. Empty
+    /// where the probe could not say, which is not a claim that there are none:
+    /// see [`CLAUDE_TARGET_BINDS_KEY`] and [`Self::target_mounted`].
+    pub fn target_binds(&self) -> &[String] {
+        &self.target_binds
     }
 
     /// The source actually mounted at [`CLAUDE_CONFIG_TARGET`], when the probe found
@@ -2074,6 +2148,21 @@ impl ClaudeMountFacts {
         self.target_uid
     }
 
+    /// The bind the pair above is about: [`Self::dir`] when that is
+    /// [`CLAUDE_CONFIG_TARGET`] or sits under it, and the target itself otherwise.
+    ///
+    /// The probe computes the same path in shell (`cfg_anchor`, in
+    /// [`claude_config_lines`]) because it has to `stat` it in the container; this
+    /// is the host-side reading of the same rule, for the notices that print the
+    /// path those numbers belong to. `the_anchor_is_the_bind_the_session_reads`
+    /// pins the two together.
+    pub(crate) fn target_anchor(&self) -> &str {
+        match self.dir.as_deref() {
+            Some(dir) if is_under(dir, CLAUDE_CONFIG_TARGET) => dir,
+            _ => CLAUDE_CONFIG_TARGET,
+        }
+    }
+
     /// Whether the bind landed on a directory this container's user cannot write.
     ///
     /// The one judgement this struct makes, because it is the one the facts above
@@ -2095,11 +2184,11 @@ impl ClaudeMountFacts {
     /// The facts a host-side record carries, with every other left unknown.
     ///
     /// [`crate::flows::provision::verdict_cache::VerdictCache::remembered_claude_mount`]
-    /// is the whole of what a launch that ran no probe can know. The four are
-    /// whether the target is mounted, which source is mounted there, whether the
-    /// container's user can write it, and which directory the session actually
-    /// reads -- the ones a warm attach needs to say anything at all about a named
-    /// profile, where a uid would be a guess.
+    /// is the whole of what a launch that ran no probe can know: whether the
+    /// target is mounted, which binds are under it, which source is mounted at the
+    /// one the session reads, whether the container's user can write it, and which
+    /// directory the session actually reads -- the ones a warm attach needs to say
+    /// anything at all about a named profile, where a uid would be a guess.
     ///
     /// `target_source` is what keeps a warm attach from naming the profile it was
     /// asked for as the one that is mounted. The bind lands only at container
@@ -2114,6 +2203,13 @@ impl ClaudeMountFacts {
     /// the host directory's owner and mode live, so a `chown` on the host takes
     /// effect in the container at once and is only reflected here by the next pass.
     ///
+    /// `target_binds` is which profiles the container can be pointed at at all,
+    /// without which a warm attach asking for one of the set it was launched with
+    /// would have to guess -- and guessing wrong exports `CLAUDE_CONFIG_DIR` at a
+    /// path nothing is mounted on. It is as fixed as `target_source`, and for the
+    /// same reason: the binds land at creation and the memo expires with the
+    /// container.
+    ///
     /// `dir` is the effective config directory, without which a warm attach cannot
     /// tell a mount the session reads past from one it reads. Exactly as stable as
     /// the classification remembered beside it, which is the standard this memo
@@ -2125,10 +2221,12 @@ impl ClaudeMountFacts {
         target_writable: Option<bool>,
         dir: Option<String>,
         target_source: Option<String>,
+        target_binds: Vec<String>,
     ) -> Self {
         Self {
             dir,
             target_mounted,
+            target_binds,
             target_source,
             target_writable,
             ..Self::default()
@@ -2151,6 +2249,12 @@ impl ClaudeMountFacts {
         Self {
             dir: None,
             target_mounted,
+            // One bind, at the target itself: the shape every row of that table
+            // was written for. A set is named by `with_binds` instead.
+            target_binds: match target_mounted {
+                Some(true) => vec![CLAUDE_CONFIG_TARGET.to_owned()],
+                _ => Vec::new(),
+            },
             target_source: target_source.map(str::to_owned),
             writable: None,
             container_uid,
@@ -2162,6 +2266,11 @@ impl ClaudeMountFacts {
 
     pub(crate) fn with_dir(mut self, dir: &str) -> Self {
         self.dir = Some(dir.to_owned());
+        self
+    }
+
+    pub(crate) fn with_binds(mut self, binds: &[&str]) -> Self {
+        self.target_binds = binds.iter().map(|bind| (*bind).to_owned()).collect();
         self
     }
 }
@@ -2208,6 +2317,19 @@ fn parse_tri(value: Option<&String>) -> Option<bool> {
 /// that could not say where its home is cannot be shown to own the directory
 /// either, and `Foreign` costs a login prompt where the other reading costs the
 /// host's credential.
+/// The mount points [`CLAUDE_TARGET_BINDS_KEY`] carries, as a list.
+///
+/// Read from the report in two places -- [`ClaudeConfig::parse`] and
+/// [`ClaudeMountFacts::parse`] -- so the split lives here rather than twice.
+/// Nothing is unescaped, for [`CLAUDE_TARGET_BINDS_AWK`]'s reason: a bind this key
+/// is about is one `dl` wrote, and no path `dl` writes here can hold a space.
+fn target_binds(found: &BTreeMap<String, String>) -> Vec<String> {
+    found
+        .get(CLAUDE_TARGET_BINDS_KEY)
+        .map(|binds| binds.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
 fn cfg_dir_is_foreign(container_home: &str, host_home: Option<&str>, mount_roots: &str) -> bool {
     mount_roots.split_whitespace().any(|root| {
         let root = unescape_mount(root);
@@ -3850,16 +3972,21 @@ if [ -n "$cfg_dir" ] && [ -r /proc/self/mountinfo ]; then
 fi
 echo "devlaunch-probe claudescan $cfg_scan"
 echo "devlaunch-probe claudemounts $cfg_mounts"
-cfg_target_mounted=no
+cfg_target_binds=
 if [ -r /proc/self/mountinfo ]; then
-  if awk -v t="/var/tmp/devlaunch-claude" '$5 == t { found=1 } END { exit !found }' /proc/self/mountinfo 2>/dev/null; then
-    cfg_target_mounted=yes
-  fi
+  cfg_target_binds=$(awk -v t="/var/tmp/devlaunch-claude" -v ORS=' ' '$5 == t || index($5, t "/") == 1 { print $5 }' /proc/self/mountinfo 2>/dev/null || true)
 fi
+echo "devlaunch-probe claudetargetbinds $cfg_target_binds"
+cfg_target_mounted=no
+if [ -n "$cfg_target_binds" ]; then cfg_target_mounted=yes; fi
 echo "devlaunch-probe claudetargetmounted $cfg_target_mounted"
+case "$cfg_dir" in
+  "/var/tmp/devlaunch-claude"|"/var/tmp/devlaunch-claude"/*) cfg_anchor=$cfg_dir;;
+  *) cfg_anchor="/var/tmp/devlaunch-claude";;
+esac
 cfg_target_source=
 if [ "$cfg_target_mounted" = yes ] && [ -r /proc/self/mountinfo ]; then
-  cfg_target_source=$(awk -v t="/var/tmp/devlaunch-claude" '$5 == t { p = $4
+  cfg_target_source=$(awk -v t="$cfg_anchor" '$5 == t { p = $4
   gsub(/\\040/, " ", p)
   gsub(/\\011/, "\t", p)
   print p
@@ -3883,9 +4010,9 @@ fi
 echo "devlaunch-probe claudediruid $cfg_dir_uid"
 cfg_target_writable=unknown
 cfg_target_uid=
-if [ "$cfg_target_mounted" = yes ]; then
-  if [ -w "/var/tmp/devlaunch-claude" ]; then cfg_target_writable=yes; else cfg_target_writable=no; fi
-  cfg_target_uid=$(stat -c %u "/var/tmp/devlaunch-claude" 2>/dev/null || true)
+if [ -n "$cfg_target_source" ]; then
+  if [ -w "$cfg_anchor" ]; then cfg_target_writable=yes; else cfg_target_writable=no; fi
+  cfg_target_uid=$(stat -c %u "$cfg_anchor" 2>/dev/null || true)
 fi
 echo "devlaunch-probe claudetargetwritable $cfg_target_writable"
 echo "devlaunch-probe claudetargetuid $cfg_target_uid""#;
@@ -5903,7 +6030,8 @@ fi
              devlaunch-probe claudedir {CLAUDE_CONFIG_TARGET}\n\
              devlaunch-probe claudescan ok\n\
              devlaunch-probe claudemounts \n\
-             devlaunch-probe claudetargetmounted yes"
+             devlaunch-probe claudetargetmounted yes\n\
+             devlaunch-probe claudetargetbinds {CLAUDE_CONFIG_TARGET}"
         );
         assert_eq!(
             ClaudeConfig::parse(&report, ELSEWHERE),
@@ -5933,10 +6061,69 @@ fi
                  devlaunch-probe claudedir {dir}\n\
                  devlaunch-probe claudescan ok\n\
                  devlaunch-probe claudemounts \n\
-                 devlaunch-probe claudetargetmounted yes"
+                 devlaunch-probe claudetargetmounted yes\n\
+                 devlaunch-probe claudetargetbinds {t}"
             );
             assert_eq!(ClaudeConfig::parse(&report, ELSEWHERE), want, "dir {dir:?}");
         }
+    }
+
+    #[test]
+    fn a_config_dir_with_no_bind_at_or_above_it_is_not_bound() {
+        // The target itself on a container that bound a set under it: an ordinary
+        // directory docker made to hang the binds on, holding no credential and
+        // belonging to nobody. Reading it as `Bound` would forward no token over a
+        // configuration that has none, which is a session with no login at all.
+        let report = format!(
+            "devlaunch-probe claudehome /home/vscode\n\
+             devlaunch-probe claudedir {CLAUDE_CONFIG_TARGET}\n\
+             devlaunch-probe claudescan ok\n\
+             devlaunch-probe claudemounts \n\
+             devlaunch-probe claudetargetmounted yes\n\
+             devlaunch-probe claudetargetbinds {CLAUDE_CONFIG_TARGET}/bear"
+        );
+        assert_eq!(
+            ClaudeConfig::parse(&report, ELSEWHERE),
+            Some(ClaudeConfig::Ours)
+        );
+        let reading_one = report.replace(
+            &format!("claudedir {CLAUDE_CONFIG_TARGET}"),
+            &format!("claudedir {CLAUDE_CONFIG_TARGET}/bear"),
+        );
+        assert_eq!(
+            ClaudeConfig::parse(&reading_one, ELSEWHERE),
+            Some(ClaudeConfig::Bound),
+            "the profile directory itself is the bind"
+        );
+    }
+
+    #[test]
+    fn the_anchor_is_the_bind_the_session_reads() {
+        // The host-side half of the probe's own `cfg_anchor`: the facts about
+        // writability and ownership belong to the directory the session reads when
+        // that is one of devlaunch's, and to the target otherwise -- never to a
+        // pinned `CLAUDE_CONFIG_DIR` somewhere else in the container, whose mode
+        // says nothing about the bind.
+        let anchored = |dir: Option<&str>| {
+            let facts = match dir {
+                Some(dir) => {
+                    ClaudeMountFacts::synthetic(Some(true), None, None, None, None).with_dir(dir)
+                }
+                None => ClaudeMountFacts::synthetic(Some(true), None, None, None, None),
+            };
+            facts.target_anchor().to_owned()
+        };
+        assert_eq!(anchored(None), CLAUDE_CONFIG_TARGET);
+        assert_eq!(anchored(Some(CLAUDE_CONFIG_TARGET)), CLAUDE_CONFIG_TARGET);
+        assert_eq!(
+            anchored(Some(&format!("{CLAUDE_CONFIG_TARGET}/bear"))),
+            format!("{CLAUDE_CONFIG_TARGET}/bear")
+        );
+        assert_eq!(anchored(Some("/home/dev/.claude")), CLAUDE_CONFIG_TARGET);
+        assert_eq!(
+            anchored(Some(&format!("{CLAUDE_CONFIG_TARGET}-evil"))),
+            CLAUDE_CONFIG_TARGET
+        );
     }
 
     #[test]
@@ -7094,6 +7281,81 @@ fi
             .to_owned();
         let awk_source = (!awk_source.is_empty()).then_some(awk_source);
         (awk_source, target_mount_source_over(info, target))
+    }
+
+    /// [`CLAUDE_TARGET_BINDS_AWK`]'s twin: every mount point (field 5) that is
+    /// `target` or sits under it, in the order the table lists them. Compared raw,
+    /// matching the awk, for [`target_mount_source_over`]'s reason.
+    fn target_binds_over(info: &str, target: &str) -> Vec<String> {
+        info.lines()
+            .filter_map(|line| {
+                let point = line.split(' ').nth(4)?;
+                (point == target || point.starts_with(&format!("{target}/")))
+                    .then(|| point.to_owned())
+            })
+            .collect()
+    }
+
+    /// [`CLAUDE_TARGET_BINDS_AWK`] run standalone against a `mountinfo` fixture,
+    /// beside [`target_binds_over`] over the identical text -- the diff test the
+    /// awk and its Rust twin owe each other, as for the two awks above.
+    fn awk_and_rust_target_binds(info: &str, target: &str) -> (Vec<String>, Vec<String>) {
+        let mountinfo = tempfile::NamedTempFile::new().expect("a scratch file");
+        std::fs::write(mountinfo.path(), info).expect("a mount table");
+        let script = format!("awk -v t=\"$1\" -v ORS=' ' '{CLAUDE_TARGET_BINDS_AWK}' \"$2\"");
+        let answered = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .arg("sh") // $0, unused by the script but conventional to supply
+            .arg(target)
+            .arg(mountinfo.path())
+            .output()
+            .expect("sh ran");
+        assert!(
+            answered.status.success(),
+            "the awk exited nonzero: {answered:?}"
+        );
+        let awk_binds = String::from_utf8_lossy(&answered.stdout)
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        (awk_binds, target_binds_over(info, target))
+    }
+
+    #[test]
+    fn the_binds_awk_and_rust_twin_agree_on_a_set_under_the_target() {
+        // The shape `--claude-profile bear,work` creates, plus the two near misses
+        // that must not be counted: the target's prefix-sharing sibling, and an
+        // unrelated mount.
+        let info = mountinfo_table(&[
+            (
+                "/host/me/.claude-profiles/bear",
+                &format!("{CLAUDE_CONFIG_TARGET}/bear"),
+            ),
+            (
+                "/host/me/.claude-profiles/work",
+                &format!("{CLAUDE_CONFIG_TARGET}/work"),
+            ),
+            ("/host/me/.claude", &format!("{CLAUDE_CONFIG_TARGET}-evil")),
+            ("/host/me/elsewhere", "/home/vscode/.claude"),
+        ]);
+        let (awk_binds, rust_binds) = awk_and_rust_target_binds(&info, CLAUDE_CONFIG_TARGET);
+        assert_eq!(awk_binds, rust_binds);
+        assert_eq!(
+            rust_binds,
+            vec![
+                format!("{CLAUDE_CONFIG_TARGET}/bear"),
+                format!("{CLAUDE_CONFIG_TARGET}/work")
+            ]
+        );
+    }
+
+    #[test]
+    fn the_binds_awk_and_rust_twin_agree_on_the_target_itself() {
+        let info = mountinfo_table(&[("/host/me/.claude-profiles/bear", CLAUDE_CONFIG_TARGET)]);
+        let (awk_binds, rust_binds) = awk_and_rust_target_binds(&info, CLAUDE_CONFIG_TARGET);
+        assert_eq!(awk_binds, rust_binds);
+        assert_eq!(rust_binds, vec![CLAUDE_CONFIG_TARGET.to_owned()]);
     }
 
     #[test]

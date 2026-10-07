@@ -446,9 +446,10 @@ Options:
     --effort <level>                 How hard the agent thinks, the same way:
                                      claude's --effort, codex's
                                      model_reasoning_effort. gemini has none
-    --claude-profile <name>          Passed through to dl: bind that Claude login
-                                     into the workspace. Per launch, so it is
-                                     given again on a recreate
+    --claude-profile <name,...|all>  Passed through to dl: bind that Claude login
+                                     into the workspace, or several to switch
+                                     between with no rebuild. Per launch, so it
+                                     is given again on a recreate
     --memory <size|none>             Passed through to dl: hold the workspace's
                                      containers to this much memory, swap
                                      included. Defaults to 8G

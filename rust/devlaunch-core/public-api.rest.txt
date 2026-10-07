@@ -2892,6 +2892,7 @@ impl devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::provision::ClaudeMountFacts::container_uid(&self) -> core::option::Option<u32>
 pub fn devlaunch_core::flows::provision::ClaudeMountFacts::dir(&self) -> core::option::Option<&str>
 pub fn devlaunch_core::flows::provision::ClaudeMountFacts::dir_uid(&self) -> core::option::Option<u32>
+pub fn devlaunch_core::flows::provision::ClaudeMountFacts::target_binds(&self) -> &[alloc::string::String]
 pub fn devlaunch_core::flows::provision::ClaudeMountFacts::target_mounted(&self) -> core::option::Option<bool>
 pub fn devlaunch_core::flows::provision::ClaudeMountFacts::target_source(&self) -> core::option::Option<&str>
 pub fn devlaunch_core::flows::provision::ClaudeMountFacts::target_uid(&self) -> core::option::Option<u32>

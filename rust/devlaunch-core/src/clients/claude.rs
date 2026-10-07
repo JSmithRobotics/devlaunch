@@ -239,6 +239,19 @@ pub(crate) struct HostEnv {
 }
 
 impl HostEnv {
+    /// What [`Self::profile`] asked for.
+    pub(crate) fn profile_request(&self) -> ProfileRequest {
+        ProfileRequest::parse(self.profile.as_deref())
+    }
+
+    /// The profile this launch runs as -- [`selected_profile`] of the typed value.
+    /// Every decision about *one* account reads this rather than the field,
+    /// because the field can name a set and a set has no single account until one
+    /// of them is picked.
+    pub(crate) fn selected_profile(&self) -> Option<&str> {
+        selected_profile(self.profile.as_deref())
+    }
+
     /// What this process's environment says.
     pub(crate) fn from_process() -> Self {
         Self {
@@ -308,8 +321,7 @@ pub(crate) fn resolve_token(
         return TokenLookup::Missing(NoToken::OptedOut);
     }
     if let Some(named) = host
-        .profile
-        .as_deref()
+        .selected_profile()
         .filter(|named| *named != DEFAULT_PROFILE)
     {
         return from_profile(named, profiles_root);
@@ -349,6 +361,74 @@ pub(crate) fn resolve_token(
 /// rather than the string `"default"` typed a third time, free to drift from the
 /// other two.
 pub(crate) const DEFAULT_PROFILE: &str = "default";
+
+/// The word `--claude-profile` takes to mean "every profile on this host".
+///
+/// A profile directory of that name is unreachable by name while this word exists,
+/// the same trade [`DEFAULT_PROFILE`] already makes: one word beats one directory,
+/// and the alternative -- a flag whose meaning depends on what happens to be on
+/// disk -- is the ambiguity worth refusing.
+pub(crate) const ALL_PROFILES: &str = "all";
+
+/// The profile a typed `--claude-profile` value runs as: the name itself, the
+/// first of a list, and none at all for [`ALL_PROFILES`], which selects nothing.
+///
+/// Borrows out of the value it is given, which is why it is a function here and
+/// not a method on [`ProfileRequest`] -- that one owns its names, and every caller
+/// of this has the typed string in hand.
+pub(crate) fn selected_profile(typed: Option<&str>) -> Option<&str> {
+    match typed {
+        Some(typed) if typed == ALL_PROFILES => None,
+        // An empty first element is not filtered out: `--claude-profile ""` and
+        // `--claude-profile ,bear` are names that are not names, and the refusal
+        // that says so is the one worth keeping.
+        Some(typed) => typed.split(',').next(),
+        None => None,
+    }
+}
+
+/// What a `--claude-profile` value asked this launch to make reachable.
+///
+/// A set is bound one profile per directory and the session picks between them
+/// with `CLAUDE_CONFIG_DIR`, which is why the parse is here and not at the flag:
+/// the same string decides which token is forwarded ([`resolve_token`]) and which
+/// directories are bound ([`crate::flows::launch::ClaudeProfileMount`]), and two
+/// readings of one value is how those two would come to disagree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProfileRequest {
+    /// No `--claude-profile`.
+    None,
+    /// One name, which is bound at [`crate::flows::provision::CLAUDE_CONFIG_TARGET`]
+    /// itself. Its own arm rather than a one-element [`Self::Set`] because the
+    /// layout differs: a single profile *is* the container's configuration
+    /// directory, where a set gets a directory each under it.
+    One(String),
+    /// Two or more names, in the order they were typed. The first is the one this
+    /// session runs as; the rest are bound so that switching to them costs an
+    /// environment variable rather than a rebuild.
+    Set(Vec<String>),
+    /// [`ALL_PROFILES`]: every profile this host has, resolved at launch. Nothing
+    /// is selected, so the session runs as the host's unnamed login until a
+    /// `CLAUDE_CONFIG_DIR` names one of the bound set.
+    All,
+}
+
+impl ProfileRequest {
+    /// Read the typed value. Nothing is validated here -- a name that is not one
+    /// still arrives as a name, so the refusal stays where it already is.
+    pub(crate) fn parse(typed: Option<&str>) -> Self {
+        let Some(typed) = typed else {
+            return Self::None;
+        };
+        if typed == ALL_PROFILES {
+            return Self::All;
+        }
+        if typed.contains(',') {
+            return Self::Set(typed.split(',').map(str::to_owned).collect());
+        }
+        Self::One(typed.to_owned())
+    }
+}
 
 /// Why [`profile_dir`] found nowhere to look.
 ///

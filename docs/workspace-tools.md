@@ -191,6 +191,49 @@ bind lands only when the container is created, so switching to a different
 profile on a workspace that already exists is a `recreate`; a `restart` keeps
 whichever profile the container was created with.
 
+### Several profiles, and switching without a rebuild
+
+A comma-separated list binds each name, one directory per profile under
+`/var/tmp/devlaunch-claude/`:
+
+```bash
+dl owner/repo --claude-profile bear,work
+```
+
+The launch runs as the first name, and the others are already there. Switching to
+one of them is a different `CLAUDE_CONFIG_DIR` and nothing else:
+
+```bash
+CLAUDE_CONFIG_DIR=/var/tmp/devlaunch-claude/work claude   # inside the workspace
+dl <workspace> --claude-profile work -- claude            # from outside, which sets it
+aid <workspace> --claude-profile work                     # the agent, likewise
+```
+
+`--claude-profile all` is the same shape, over every profile on the host that has a
+login. It selects none of them: `claude` runs as your host's unnamed login until
+something names one. Every one of those credentials is readable from inside that
+container, which is the thing named profiles exist to prevent, so it is deliberate
+and `dl` prints what it bound on every launch that does it.
+
+Two routes that look simpler are dead ends, and the code says so where it does
+this:
+
+- **Re-pointing one bind on the host.** A bind mount resolves its source once,
+  when it is made: the kernel attaches the source's inode to the mount point, not
+  the path it was named by. Moving the directory, or re-pointing the symlink it
+  was named through, changes nothing inside a container that is already running.
+- **A `mount --bind` inside the container.** That needs `CAP_SYS_ADMIN` in the
+  container's user namespace for every switch, plus `rslave` propagation to keep
+  it out of the host's namespace. `dl` is unprivileged and these are ordinary
+  devcontainers, so it would mean handing every workspace a capability it has no
+  other use for.
+
+So the set is fixed when the container is created. A name that was not in it is
+not reachable by any variable, and `dl` says so rather than pointing
+`CLAUDE_CONFIG_DIR` at an empty directory: `claude` would make a fresh,
+logged-out configuration there and say nothing. Adding a name to the set is a
+`recreate`, with the same compose exception as below.
+
 A docker-compose devcontainer is the exception, and a `recreate` does not move
 the profile there. devpod generates that project's mount set once, at the create,
 and every later `up` builds from the file it generated, so the container keeps the

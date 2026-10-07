@@ -179,6 +179,7 @@ impl VerdictCache {
             result_mtime,
             dir: mount.dir().map(str::to_owned),
             source: mount.target_source().map(str::to_owned),
+            binds: mount.target_binds().to_vec(),
             mounted: match mount.target_mounted() {
                 // Before the plain `Mounted` arm: a bind the container's user
                 // cannot write has to come back as the thing it is, or a launch
@@ -242,7 +243,9 @@ impl VerdictCache {
     /// one -- which is the `Bound` treatment, on every warm attach, with nothing
     /// said. Which source is mounted travels with them because without it a warm
     /// attach cannot tell the profile it was asked for from the one the container
-    /// was created with, and said the first was mounted when the second was.
+    /// was created with, and said the first was mounted when the second was. Which
+    /// binds exist travels with them for the launch that switches among a set: a
+    /// warm attach naming one of them has nothing else to check the name against.
     ///
     /// Unknown for every doubt, on the same list as [`Self::remembered_claude`]'s,
     /// and unknown is what leaves the container's own `CLAUDE_CONFIG_DIR` standing
@@ -255,12 +258,17 @@ impl VerdictCache {
         // The source only where something is mounted to have one. A memo that says
         // the target is not mounted carries no bind to name.
         let source = memo.source;
+        let binds = memo.binds;
         match memo.mounted {
-            MemoMount::Mounted => ClaudeMountFacts::remembered(Some(true), None, dir, source),
-            MemoMount::MountedUnwritable => {
-                ClaudeMountFacts::remembered(Some(true), Some(false), dir, source)
+            MemoMount::Mounted => {
+                ClaudeMountFacts::remembered(Some(true), None, dir, source, binds)
             }
-            MemoMount::NotMounted => ClaudeMountFacts::remembered(Some(false), None, dir, None),
+            MemoMount::MountedUnwritable => {
+                ClaudeMountFacts::remembered(Some(true), Some(false), dir, source, binds)
+            }
+            MemoMount::NotMounted => {
+                ClaudeMountFacts::remembered(Some(false), None, dir, None, Vec::new())
+            }
             MemoMount::Unknown | MemoMount::Unrecorded => ClaudeMountFacts::default(),
         }
     }
@@ -440,6 +448,17 @@ struct Memo {
     /// ([`crate::flows::launch::claude_profile_mount_notice`]).
     #[serde(default)]
     source: Option<String>,
+    /// Every mount point the last pass found at or under
+    /// [`crate::flows::provision::CLAUDE_CONFIG_TARGET`] -- which profiles this
+    /// container can be pointed at without being rebuilt. Carried for
+    /// [`Self::source`]'s reason, and it is the fact a launch that switches among
+    /// a bound set turns on: without it a warm attach asking for one of them would
+    /// export `CLAUDE_CONFIG_DIR` at a path it never checked was mounted.
+    ///
+    /// Empty on a memo an older build wrote, which reads back as "the probe could
+    /// not say" -- never as "there are none", for [`Self::source`]'s reason.
+    #[serde(default)]
+    binds: Vec<String>,
 }
 
 /// The four things a pass can have concluded about the config directory.
@@ -714,6 +733,7 @@ mod tests {
             Some(1001),
         )
         .with_dir("/home/dev/.claude-pinned")
+        .with_binds(&["/var/tmp/devlaunch-claude/work"])
     }
 
     #[test]
@@ -774,6 +794,14 @@ mod tests {
                 (mounted == Some(true)).then_some("/home/me/.claude-profiles/work"),
                 "{mounted:?}"
             );
+            // And which profiles are bound, without which a warm attach naming one
+            // of a set has nothing to check the name against and cannot switch to
+            // it at all.
+            let expected_binds: Vec<String> = match mounted {
+                Some(true) => vec!["/var/tmp/devlaunch-claude/work".to_owned()],
+                _ => Vec::new(),
+            };
+            assert_eq!(remembered.target_binds(), expected_binds, "{mounted:?}");
             assert_eq!(
                 remembered.target_unusable(),
                 mounted == Some(true) && writable == Some(false),

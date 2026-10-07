@@ -3311,6 +3311,97 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             }
             message
         }
+        // The one notice that names more than one account at once, so it says
+        // plainly which credentials the container now holds and which of them the
+        // session runs as.
+        LaunchNotice::ClaudeProfileSetBound {
+            bound,
+            unbound,
+            selected,
+            target,
+            extra_binds,
+            extra_binds_capped,
+            extra_binds_refused,
+            credential_binds,
+        } => {
+            let mut message = if bound.is_empty() {
+                "No Claude profile was bound: none of the names given has a login on this \
+                 host. This workspace opens with your ordinary forwarded Claude login."
+                    .to_owned()
+            } else {
+                format!(
+                    "Claude profiles bound into this container, one directory each under {}: \
+                     {}. Every one of those logins is readable from inside the container. \
+                     Switch between them with CLAUDE_CONFIG_DIR={}/<name>, which needs no \
+                     rebuild; adding a profile to the set does, and is a `recreate`.",
+                    target.display(),
+                    bound.join(", "),
+                    target.display(),
+                )
+            };
+            match selected {
+                Some(selected) => {
+                    message.push_str(&format!(" This session runs as {}.", python_repr(selected)))
+                }
+                None if !bound.is_empty() => message.push_str(
+                    " No profile was selected, so `claude` here runs as your host's \
+                     unnamed login until CLAUDE_CONFIG_DIR names one of them.",
+                ),
+                None => {}
+            }
+            if !unbound.is_empty() {
+                message.push_str(&format!(
+                    " Not bound: {} -- no login found under that name.",
+                    unbound.join(", ")
+                ));
+            }
+            if *extra_binds_refused {
+                message.push_str(
+                    " These profiles' top-level symlinks were not checked: no \
+                     sibling-profiles root could be resolved on this host, so none of them \
+                     were bound and any such link stays dangling.",
+                );
+            }
+            if !extra_binds.is_empty() {
+                message.push_str(&format!(
+                    " They also have top-level symlinks reaching outside themselves, so the \
+                     container additionally reaches these host paths, read-only: {}.",
+                    extra_binds
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !credential_binds.is_empty() {
+                message.push_str(&format!(
+                    " A credential file is itself a top-level symlink reaching outside its \
+                     profile, so the container additionally reaches these host paths, \
+                     read-write so a refresh can still write them in place: {}.",
+                    credential_binds
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if *extra_binds_capped {
+                message.push_str(
+                    " More such links exist than this launch will bind; the rest are left \
+                     dangling rather than bound.",
+                );
+            }
+            message
+        }
+        LaunchNotice::ClaudeProfileNotInBoundSet { name, bound } => format!(
+            "Claude profile {} is not one this container has: it was created with {} bound, \
+             and a `--mount` only lands when devpod creates a container. Nothing was pointed \
+             at {}, so `claude` here runs as whatever login the container already had. A \
+             `recreate` naming the full set is what adds it.",
+            python_repr(name),
+            bound.join(", "),
+            python_repr(name),
+        ),
         LaunchNotice::ClaudeProfileMountUnappliable { name } => format!(
             "--claude-profile {} was not bound: this container already exists, and a `--mount` \
              only lands when devpod creates one. Its Claude configuration is unchanged from \
@@ -6135,6 +6226,42 @@ mod tests {
         assert!(
             !line.contains("is now the container's Claude configuration"),
             "nothing was bound by this launch: {line}"
+        );
+    }
+
+    /// The owner's condition on binding more than one account at a time: the
+    /// launch that does it says which logins are now inside the container, and how
+    /// to move between them, every time.
+    #[test]
+    fn a_bound_claude_profile_set_names_every_login_it_put_in_the_container() {
+        let line = launch_notice(&LaunchNotice::ClaudeProfileSetBound {
+            bound: vec!["bear".to_owned(), "work".to_owned()],
+            unbound: vec!["otter".to_owned()],
+            selected: Some("bear".to_owned()),
+            target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
+            extra_binds: Vec::new(),
+            extra_binds_capped: false,
+            extra_binds_refused: false,
+            credential_binds: Vec::new(),
+        })
+        .expect("a sentence");
+
+        assert!(line.contains("bear, work"), "both logins are named: {line}");
+        assert!(
+            line.contains("readable from inside the container"),
+            "the exposure is stated rather than implied: {line}"
+        );
+        assert!(
+            line.contains("CLAUDE_CONFIG_DIR=/var/tmp/devlaunch-claude/<name>"),
+            "and how to switch between them: {line}"
+        );
+        assert!(
+            line.contains("runs as 'bear'"),
+            "the account this session is: {line}"
+        );
+        assert!(
+            line.contains("Not bound: otter"),
+            "a name that bound nothing is said, not dropped: {line}"
         );
     }
 

@@ -736,10 +736,13 @@ pub(crate) struct Cli {
     /// `~/.claude-profiles/<name>/`, or under `CLAUDE_PROFILES_DIR`; dl reads them
     /// and never creates one. `default` binds the host's own configuration
     /// directory the same way, read-write, so the login reaches the container
-    /// through that bind rather than through forwarding. Per launch: unlike
-    /// `--devcontainer` it is not stored with the workspace, so a workspace never
-    /// forwards an account chosen weeks ago.
-    #[arg(long = "claude-profile", value_name = "NAME")]
+    /// through that bind rather than through forwarding. Several names bind one
+    /// directory each under `/var/tmp/devlaunch-claude/`, run as the first, and
+    /// switch with `CLAUDE_CONFIG_DIR` and no rebuild; `all` is every profile on
+    /// this host, which puts every one of those logins in the container and runs
+    /// as none of them. Per launch: unlike `--devcontainer` it is not stored with
+    /// the workspace, so a workspace never forwards an account chosen weeks ago.
+    #[arg(long = "claude-profile", value_name = "NAME[,NAME...]|all")]
     claude_profile: Option<String>,
     /// Cut a new branch from this ref instead of the default branch. Only means
     /// something when the branch does not exist yet -- a branch that is already

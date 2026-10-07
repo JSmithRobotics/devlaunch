@@ -380,6 +380,23 @@ the profile on disk. A bind lands only when the container is created, so switchi
 workspace that already exists needs a `recreate`; a plain `restart` keeps whichever profile the
 container was created with.
 
+Name several, and a `recreate` is not needed to move between them:
+
+```bash
+dl blooop/devlaunch --claude-profile bear,work
+```
+
+Each profile is bound in a directory of its own under `/var/tmp/devlaunch-claude/`, the launch
+runs as the first name given, and any of the others is one `CLAUDE_CONFIG_DIR` away:
+`CLAUDE_CONFIG_DIR=/var/tmp/devlaunch-claude/work claude` inside the workspace, or
+`dl <workspace> --claude-profile work -- claude` from outside, which sets it for you. `dl` prints
+which profiles it bound, because every one of those logins is then readable from inside that
+container. `--claude-profile all` is every profile on the host, bound the same way, and selects
+none of them: that container holds all of your Claude logins, so it is worth typing deliberately.
+A name that was not bound at creation is still a `recreate`, and `dl` says so rather than pointing
+at an empty directory. Depth, and what a docker-compose devcontainer can and cannot do here, is in
+[docs/workspace-tools.md](docs/workspace-tools.md).
+
 ### A memory cap each container can see
 
 `--memory <size>` holds a workspace's containers to a memory limit, swap included:
@@ -485,7 +502,7 @@ as they always have.
 | `--no-remote-control`, `--no-remote` | Start a plain local session. Remote Control is on by default for `claude`: the session is named after the workspace and can be read and steered from claude.ai/code or the Claude app. It needs a claude.ai login in the container |
 | `--remote-control`, `--remote` | Ask for Remote Control by name. `claude` has it already; beside `--codex` or `--gemini` this says they have not got it and stops |
 | `--devcontainer <variant\|path>` | Passed through to `dl` |
-| `--claude-profile <name>` | Passed through to `dl`: which host Claude login to forward. Not the claude.ai account the container's `claude` is paired to for Remote Control |
+| `--claude-profile <name[,name...]\|all>` | Passed through to `dl`: which host Claude login to forward, or several to bind and switch between. Not the claude.ai account the container's `claude` is paired to for Remote Control |
 
 **The trade, stated plainly.** Every agent starts in full auto, because it is already inside a
 disposable container holding only this repo and the per-tool prompts would stall an unattended
