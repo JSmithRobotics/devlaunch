@@ -6080,6 +6080,35 @@ mod tests {
         );
     }
 
+    /// The saying-so half of the mount verification, and the only sentence that
+    /// tells a reader a mounted profile is not the one this session reads.
+    #[test]
+    fn a_claude_profile_mount_this_session_reads_past_names_the_directory_read_instead() {
+        let line = launch_notice(&LaunchNotice::ClaudeProfileMountIgnored {
+            name: "bear".to_owned(),
+            dir: std::path::PathBuf::from("/home/dev/.claude-pinned"),
+        })
+        .expect("a sentence");
+
+        assert!(line.contains("Claude profile 'bear'"), "{line}");
+        assert!(
+            line.contains("mounted in this container"),
+            "the bind landed, and the line says so before it says what is wrong: {line}"
+        );
+        assert!(
+            line.contains("/home/dev/.claude-pinned"),
+            "the directory actually read is the evidence: {line}"
+        );
+        assert!(
+            line.contains("does not use that profile"),
+            "the consequence, which is the whole point of saying anything: {line}"
+        );
+        assert!(
+            line.contains("dl <workspace> -- ..."),
+            "and the way in that does read it: {line}"
+        );
+    }
+
     #[test]
     fn a_bound_profile_with_no_extra_binds_says_nothing_about_symlinks() {
         // The plain case: no top-level symlinks reach outside the profile, so
@@ -6096,6 +6125,10 @@ mod tests {
         .expect("a sentence");
 
         assert!(line.contains("Claude profile 'bear'"), "{line}");
+        assert!(
+            line.contains("not on a docker-compose devcontainer"),
+            "the `recreate` this promises carries the exception it does not hold for: {line}"
+        );
         assert!(
             !line.contains("top-level symlinks"),
             "no extra binds means no mention of them: {line}"

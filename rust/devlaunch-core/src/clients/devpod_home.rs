@@ -353,8 +353,7 @@ pub(crate) fn sole_busy_marker(
 /// at the create and every later `up` -- `--recreate` included -- builds from the
 /// file already there, so a `--mount` added after the create never reaches the
 /// container. Measured against devpod 0.26.1: a `recreate --claude-profile`
-/// against a compose workspace left the profile it was created with bound, over
-/// an override file five days older than the container.
+/// against a compose workspace left the profile it was created with bound.
 ///
 /// Nothing for every ambiguity [`sole_busy_marker`] answers nothing to, and for
 /// one case that is not an ambiguity: the agent tree is on whichever machine

@@ -479,6 +479,7 @@ pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::last_claude_mount(&s
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::pass_never_finished(&self, &str) -> bool
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::provision_tools(&self, &dyn devlaunch_runner::Runner, &str, devlaunch_core::flows::provision::PassOccasion, core::option::Option<&str>) -> core::result::Result<core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>, devlaunch_core::flows::provision::DevpodMissing>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
+pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude_mount(&self, &str) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::stage_missing_for_this_launch(&self, &str) -> bool
 pub struct devlaunch_core::api::WorkspaceCloneManager<'r>
 impl<'r> devlaunch_core::flows::workspace_clone::WorkspaceCloneManager<'r>
@@ -503,12 +504,14 @@ pub fn devlaunch_core::api::Provision::last_claude_mount(&self) -> devlaunch_cor
 pub fn devlaunch_core::api::Provision::pass_never_finished(&self, &str) -> bool
 pub fn devlaunch_core::api::Provision::provision_tools(&self, &dyn devlaunch_runner::Runner, &str, devlaunch_core::flows::provision::PassOccasion, core::option::Option<&str>) -> core::result::Result<core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>, devlaunch_core::flows::provision::DevpodMissing>
 pub fn devlaunch_core::api::Provision::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
+pub fn devlaunch_core::api::Provision::remembered_claude_mount(&self, &str) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::api::Provision::stage_missing_for_this_launch(&self, &str) -> bool
 impl devlaunch_core::flows::launch::Provision for devlaunch_core::flows::launch::ToolProvisioning<'_>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::last_claude_mount(&self) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::pass_never_finished(&self, &str) -> bool
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::provision_tools(&self, &dyn devlaunch_runner::Runner, &str, devlaunch_core::flows::provision::PassOccasion, core::option::Option<&str>) -> core::result::Result<core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>, devlaunch_core::flows::provision::DevpodMissing>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
+pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude_mount(&self, &str) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::stage_missing_for_this_launch(&self, &str) -> bool
 pub fn devlaunch_core::api::enriched_listing(&mut devlaunch_core::flows::listing::CommandContext<'_>, &devlaunch_core::flows::listing::DlView<'_>, devlaunch_core::flows::listing::Sizes) -> core::result::Result<alloc::vec::Vec<devlaunch_core::flows::listing::ListedWorkspace>, devlaunch_core::clients::devpod::ListingUnreadable>
 pub fn devlaunch_core::api::identity(&str) -> core::result::Result<devlaunch_core::domain::spec::SpecIdentity<'_>, devlaunch_core::domain::workspace_id::UnsafeName>
@@ -794,6 +797,7 @@ pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::last_claude_mount(&s
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::pass_never_finished(&self, &str) -> bool
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::provision_tools(&self, &dyn devlaunch_runner::Runner, &str, devlaunch_core::flows::provision::PassOccasion, core::option::Option<&str>) -> core::result::Result<core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>, devlaunch_core::flows::provision::DevpodMissing>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
+pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude_mount(&self, &str) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::stage_missing_for_this_launch(&self, &str) -> bool
 pub trait devlaunch_core::flows::launch::ColdMachinery<'r>
 pub fn devlaunch_core::flows::launch::ColdMachinery::open(&mut self) -> core::result::Result<devlaunch_core::flows::launch::Cold<'_, 'r>, devlaunch_core::flows::launch::ColdRefused>
@@ -806,12 +810,14 @@ pub fn devlaunch_core::flows::launch::Provision::last_claude_mount(&self) -> dev
 pub fn devlaunch_core::flows::launch::Provision::pass_never_finished(&self, &str) -> bool
 pub fn devlaunch_core::flows::launch::Provision::provision_tools(&self, &dyn devlaunch_runner::Runner, &str, devlaunch_core::flows::provision::PassOccasion, core::option::Option<&str>) -> core::result::Result<core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>, devlaunch_core::flows::provision::DevpodMissing>
 pub fn devlaunch_core::flows::launch::Provision::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
+pub fn devlaunch_core::flows::launch::Provision::remembered_claude_mount(&self, &str) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::Provision::stage_missing_for_this_launch(&self, &str) -> bool
 impl devlaunch_core::flows::launch::Provision for devlaunch_core::flows::launch::ToolProvisioning<'_>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::last_claude_mount(&self) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::pass_never_finished(&self, &str) -> bool
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::provision_tools(&self, &dyn devlaunch_runner::Runner, &str, devlaunch_core::flows::provision::PassOccasion, core::option::Option<&str>) -> core::result::Result<core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>, devlaunch_core::flows::provision::DevpodMissing>
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude(&self, &str) -> core::option::Option<devlaunch_core::flows::provision::ClaudeConfig>
+pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::remembered_claude_mount(&self, &str) -> devlaunch_core::flows::provision::ClaudeMountFacts
 pub fn devlaunch_core::flows::launch::ToolProvisioning<'_>::stage_missing_for_this_launch(&self, &str) -> bool
 pub enum devlaunch_core::flows::lifecycle::DeleteStalled
 pub devlaunch_core::flows::lifecycle::DeleteStalled::OnTheLock

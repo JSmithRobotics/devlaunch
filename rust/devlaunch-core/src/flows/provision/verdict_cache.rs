@@ -63,7 +63,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use super::{ClaudeConfig, CodexSwitch, Switches, ToolsSwitch, ZellijSwitch};
+use super::{ClaudeConfig, ClaudeMountFacts, CodexSwitch, Switches, ToolsSwitch, ZellijSwitch};
 
 use crate::clients::devpod_home::{DevpodHome, sole_workspace_result};
 
@@ -162,7 +162,7 @@ impl VerdictCache {
         &self,
         workspace_id: &str,
         claude: Option<ClaudeConfig>,
-        mounted: Option<bool>,
+        mount: &ClaudeMountFacts,
         observed: Observed,
     ) {
         let Observed(result_mtime) = observed;
@@ -177,7 +177,12 @@ impl VerdictCache {
                 None => MemoWord::Unknown,
             },
             result_mtime,
-            mounted: match mounted {
+            mounted: match mount.target_mounted() {
+                // Before the plain `Mounted` arm, so a bind the container's user
+                // cannot write is remembered as the thing it is. Remembering it as
+                // mounted alone is what sent every later warm attach back to the
+                // `Bound` treatment the probe had just withheld.
+                Some(true) if mount.target_unusable() => MemoMount::MountedUnwritable,
                 Some(true) => MemoMount::Mounted,
                 Some(false) => MemoMount::NotMounted,
                 None => MemoMount::Unknown,
@@ -220,22 +225,32 @@ impl VerdictCache {
         }
     }
 
-    /// Whether the last pass found the profile target mounted in the container
-    /// standing now.
+    /// What the last pass found of the profile target in the container standing
+    /// now: whether it was mounted, and whether the container's user could write
+    /// it.
     ///
     /// Separate from [`Self::remembered_claude`] because the two answer different
     /// questions and a memo can carry one without the other: a pass that could not
     /// classify the directory may still have seen the mount, and a memo written
     /// before this field existed carries the classification and not the mount.
     ///
-    /// `None` for every doubt, on the same list as [`Self::remembered_claude`]'s,
+    /// Both facts, not just the mount, because the pair is what
+    /// [`ClaudeMountFacts::target_unusable`] is read from and a launch that answers
+    /// only the first reads an unusable bind as a working one -- which is the
+    /// `Bound` treatment, on every warm attach, with nothing said.
+    ///
+    /// Unknown for every doubt, on the same list as [`Self::remembered_claude`]'s,
     /// and unknown is what leaves the container's own `CLAUDE_CONFIG_DIR` standing
     /// ([`crate::flows::launch::ClaudeConfigEnv::from_mount`]).
-    pub fn remembered_claude_mounted(&self, workspace_id: &str) -> Option<bool> {
-        match self.read_memo(workspace_id)?.mounted {
-            MemoMount::Mounted => Some(true),
-            MemoMount::NotMounted => Some(false),
-            MemoMount::Unknown | MemoMount::Unrecorded => None,
+    pub(crate) fn remembered_claude_mount(&self, workspace_id: &str) -> ClaudeMountFacts {
+        let Some(memo) = self.read_memo(workspace_id) else {
+            return ClaudeMountFacts::default();
+        };
+        match memo.mounted {
+            MemoMount::Mounted => ClaudeMountFacts::remembered(Some(true), None),
+            MemoMount::MountedUnwritable => ClaudeMountFacts::remembered(Some(true), Some(false)),
+            MemoMount::NotMounted => ClaudeMountFacts::remembered(Some(false), None),
+            MemoMount::Unknown | MemoMount::Unrecorded => ClaudeMountFacts::default(),
         }
     }
 
@@ -437,6 +452,13 @@ enum MemoMount {
     Unknown,
     #[serde(rename = "yes")]
     Mounted,
+    /// Mounted, and the container's user cannot write it: the bind landed on a
+    /// directory that cannot hold a refreshed credential, which is the one state
+    /// that takes the `Bound` treatment away ([`ClaudeMountFacts::target_unusable`]).
+    /// Its own word rather than a second field, so a build that has never heard of
+    /// it fails to deserialize and reads as no memo at all.
+    #[serde(rename = "yes-unwritable")]
+    MountedUnwritable,
     #[serde(rename = "no")]
     NotMounted,
 }
@@ -637,18 +659,29 @@ mod tests {
 
     /// Remember `seen` against the container standing now, as [`provision`] does.
     fn remembered_under(verdicts: &VerdictCache, workspace_id: &str, seen: Option<ClaudeConfig>) {
-        remembered_mount_under(verdicts, workspace_id, seen, None);
+        remembered_mount_under(verdicts, workspace_id, seen, &ClaudeMountFacts::default());
     }
 
-    /// The same, naming the mount fact the memo carries beside the classification.
+    /// The same, naming the mount facts the memo carries beside the classification.
     fn remembered_mount_under(
         verdicts: &VerdictCache,
         workspace_id: &str,
         seen: Option<ClaudeConfig>,
-        mounted: Option<bool>,
+        mount: &ClaudeMountFacts,
     ) {
         let observed = verdicts.observe(workspace_id).expect("an anchor");
-        verdicts.remember_claude(workspace_id, seen, mounted, observed);
+        verdicts.remember_claude(workspace_id, seen, mount, observed);
+    }
+
+    /// Mount facts as a probe would have reported them, for a memo round trip.
+    fn probed(target_mounted: Option<bool>, target_writable: Option<bool>) -> ClaudeMountFacts {
+        ClaudeMountFacts::synthetic(
+            target_mounted,
+            Some("/home/me/.claude-profiles/work"),
+            target_writable,
+            Some(1000),
+            Some(1001),
+        )
     }
 
     #[test]
@@ -677,10 +710,30 @@ mod tests {
     /// not be sent back through a pass to relearn it.
     #[test]
     fn whether_the_profile_was_mounted_outlives_the_pass_too() {
-        for mounted in [Some(true), Some(false), None] {
+        // Both facts, because a memo that carries only the first reads an unusable
+        // bind back as a working one: `target_unusable` goes false, the export the
+        // probe withheld is made anyway, and the warm attach forwards no token.
+        for (mounted, writable) in [
+            (Some(true), Some(true)),
+            (Some(true), Some(false)),
+            (Some(true), None),
+            (Some(false), None),
+            (None, None),
+        ] {
             let (_cache, _home, verdicts) = anchored();
-            remembered_mount_under(&verdicts, "ws", Some(ClaudeConfig::Ours), mounted);
-            assert_eq!(verdicts.remembered_claude_mounted("ws"), mounted);
+            remembered_mount_under(
+                &verdicts,
+                "ws",
+                Some(ClaudeConfig::Ours),
+                &probed(mounted, writable),
+            );
+            let remembered = verdicts.remembered_claude_mount("ws");
+            assert_eq!(remembered.target_mounted(), mounted, "{mounted:?}");
+            assert_eq!(
+                remembered.target_unusable(),
+                mounted == Some(true) && writable == Some(false),
+                "{mounted:?}/{writable:?}"
+            );
         }
 
         let (_cache, _home, verdicts) = anchored();
@@ -695,7 +748,10 @@ mod tests {
             .expect("a memo"),
         );
         assert_eq!(verdicts.remembered_claude("ws"), Some(ClaudeConfig::Ours));
-        assert_eq!(verdicts.remembered_claude_mounted("ws"), None);
+        assert_eq!(
+            verdicts.remembered_claude_mount("ws").target_mounted(),
+            None
+        );
         assert!(
             !verdicts.has_claude_memo("ws"),
             "a memo with no mount fact must cost one top-up to acquire one"

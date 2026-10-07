@@ -663,14 +663,17 @@ pub enum LaunchNotice {
     ///
     /// So this `up` cannot change which profile is mounted, which is precisely
     /// what the other profile notices promise a `recreate` does. Said in place of
-    /// [`Self::ClaudeProfileBound`] on a create or rebuild of such a workspace.
+    /// [`Self::ClaudeProfileBound`] on a rebuild of such a workspace, and in place
+    /// of [`Self::ClaudeProfileMountUnappliable`] on a launch that reuses the
+    /// container: both of those send the reader to a `recreate`, and that is the
+    /// most common way a profile is first named at all.
     ///
     /// It does not claim the mounted profile is the wrong one: nothing on this
     /// side of the `up` knows which profile the container holds. The probe says
     /// that afterwards, as [`Self::ClaudeProfileMountSwitched`].
     ///
     /// `override_path` is the directory holding the generated override, named
-    /// because it is the evidence for the claim -- and because its absence is
+    /// because it is the evidence for the claim -- and because its presence is
     /// what the detection turns on
     /// ([`crate::clients::devpod_home::sole_compose_override`]).
     ClaudeProfileMountComposeFrozen {
@@ -2208,16 +2211,14 @@ impl ClaudeObservation {
     }
 
     /// From [`Provision::remembered_claude`] and
-    /// [`Provision::remembered_claude_mounted`], which are the two facts a
-    /// host-side record keeps. Whether the target is mounted survives because the
-    /// bind cannot change without the container being rebuilt, which expires the
-    /// memo; every other mount fact describes a live directory nothing here has
-    /// looked at, and reads "unknown" rather than a guessed one.
-    fn remembered(config: Option<ClaudeConfig>, target_mounted: Option<bool>) -> Self {
-        Self {
-            config,
-            mount: ClaudeMountFacts::remembered(target_mounted),
-        }
+    /// [`Provision::remembered_claude_mount`], which are the facts a host-side
+    /// record keeps. Whether the target is mounted, and whether the container's
+    /// user can write it, survive because neither can change without the container
+    /// being rebuilt, which expires the memo; every other mount fact describes a
+    /// live directory nothing here has looked at, and reads "unknown" rather than a
+    /// guessed one.
+    fn remembered(config: Option<ClaudeConfig>, mount: ClaudeMountFacts) -> Self {
+        Self { config, mount }
     }
 
     /// Who owns the container's Claude config directory, as far as this launch
@@ -2627,19 +2628,22 @@ pub trait Provision {
         None
     }
 
-    /// Whether the host's records say the profile target was mounted in the
-    /// container standing now.
+    /// What the host's records say of the profile mount in the container standing
+    /// now: whether the target was mounted, and whether the container's user could
+    /// write it.
     ///
     /// A second question beside [`Self::remembered_claude`] for
     /// [`Self::last_claude_mount`]'s reason, and asked on the same fast-attach arm:
     /// the warm `dl <ws> -- cmd` that runs no pass is the loop a script lives in,
     /// and it is the launch that most needs
-    /// [`ClaudeConfigEnv`] to fire.
+    /// [`ClaudeConfigEnv`] to fire -- and the launch on which an unusable bind must
+    /// still withhold it, which the mount fact alone cannot say.
     ///
-    /// `None` -- "no record, so leave the container's own answer standing" -- for
-    /// every implementation with nothing remembered.
-    fn remembered_claude_mounted(&self, _workspace_id: &str) -> Option<bool> {
-        None
+    /// [`ClaudeMountFacts::default()`] -- "nothing recorded, so leave the
+    /// container's own answer standing" -- for every implementation with nothing
+    /// remembered.
+    fn remembered_claude_mount(&self, _workspace_id: &str) -> ClaudeMountFacts {
+        ClaudeMountFacts::default()
     }
 
     /// The raw mount facts the most recent [`Self::provision_tools`] call
@@ -2836,8 +2840,8 @@ impl Provision for ToolProvisioning<'_> {
         self.verdicts.remembered_claude(workspace_id)
     }
 
-    fn remembered_claude_mounted(&self, workspace_id: &str) -> Option<bool> {
-        self.verdicts.remembered_claude_mounted(workspace_id)
+    fn remembered_claude_mount(&self, workspace_id: &str) -> ClaudeMountFacts {
+        self.verdicts.remembered_claude_mount(workspace_id)
     }
 
     fn last_claude_mount(&self) -> ClaudeMountFacts {
@@ -3049,6 +3053,22 @@ fn up_under_stage(
     // (and the mount lands) despite carrying no `--id`.
     let creating_container = matches!(request.naming, Naming::Create { .. })
         || !matches!(request.rebuild, Rebuild::Reuse);
+    // Asked only where a profile is actually being bound, because the answer costs
+    // a walk of devpod's contexts. One answer for both `Bound` arms below: the
+    // generated override freezes the mount set whether this launch rebuilds the
+    // container or reuses it, and the line each arm would otherwise say sends the
+    // reader to a `recreate` that cannot move the profile either way.
+    //
+    // `--reset` is left out because it is not what was measured: it removes the
+    // container, and whether devpod regenerates the override from the devcontainer
+    // then is unknown here.
+    let composed = match (&claude_mount, request.rebuild) {
+        (ClaudeProfileMount::Bound { .. }, Rebuild::Reuse | Rebuild::Recreate) => request
+            .naming
+            .identity()
+            .and_then(|identity| sole_compose_override(host.devpod_home.as_ref(), identity)),
+        _ => None,
+    };
     match &claude_mount {
         ClaudeProfileMount::Bound {
             name,
@@ -3056,12 +3076,6 @@ fn up_under_stage(
             profiles_root,
             home,
         } if creating_container => {
-            // Asked only where a profile is actually being bound, because the
-            // answer costs a walk of devpod's contexts.
-            let composed = request
-                .naming
-                .identity()
-                .and_then(|identity| sole_compose_override(host.devpod_home.as_ref(), identity));
             if let Some(override_path) = composed {
                 notices.say(LaunchNotice::ClaudeProfileMountComposeFrozen {
                     name: name.clone(),
@@ -3100,7 +3114,13 @@ fn up_under_stage(
             });
         }
         ClaudeProfileMount::Bound { name, .. } => {
-            notices.say(LaunchNotice::ClaudeProfileMountUnappliable { name: name.clone() });
+            notices.say(match composed {
+                Some(override_path) => LaunchNotice::ClaudeProfileMountComposeFrozen {
+                    name: name.clone(),
+                    override_path,
+                },
+                None => LaunchNotice::ClaudeProfileMountUnappliable { name: name.clone() },
+            });
         }
         ClaudeProfileMount::NotAsked
         | ClaudeProfileMount::NotAName { .. }
@@ -4263,7 +4283,7 @@ impl<'a> SessionContext<'a> {
     /// bind landed and pointed `CLAUDE_CONFIG_DIR` at
     /// [`crate::flows::provision::CLAUDE_CONFIG_TARGET`], never whether the mount is
     /// actually usable. A bind is not a guarantee -- see [`claude_profile_mount_notice`]
-    /// for the two ways it can still be silently inert. One of them, a bind this
+    /// for the ways it can still be silently inert. One of them, a bind this
     /// container's user cannot write, takes the `Bound` arm's treatment away
     /// entirely: forwarding nothing is right only while the mounted directory can
     /// refresh the credential it holds, so the host's token becomes the fallback
@@ -4275,14 +4295,26 @@ impl<'a> SessionContext<'a> {
     ) -> Result<Option<claude::Token>, SessionRefused> {
         let seen = self.claude_seen.get();
         let mount = seen.mount();
+        // What the session will actually read, which is the payload's export where
+        // there is one and the probe's classification otherwise. The two differ in
+        // exactly the case [`ClaudeConfigEnv`] exists for: a devcontainer that pins
+        // `CLAUDE_CONFIG_DIR` leaves the probe reporting `Ours` or `Foreign` over a
+        // mount that the export is about to make the effective one. Forwarding a
+        // token there would put a credential that cannot refresh over one that can,
+        // which is the whole reason the `Bound` arm forwards nothing.
+        //
+        // Before the mount's own notice, which is read from it: which directory the
+        // session ends up on is what decides whether a mount nothing points at is
+        // worth a word.
+        let effective = match claude {
+            ClaudeConfigEnv::Set => Some(ClaudeConfig::Bound),
+            ClaudeConfigEnv::Leave => seen.config(),
+        };
         // Said for the bind itself, not from inside whichever arm below claims the
         // session. A devcontainer that pins `CLAUDE_CONFIG_DIR` leaves the probe
         // classifying the pinned directory, and the bind the user asked for earns
-        // the same notice either way. Every path that reached this from the `Bound`
-        // arm had `target_mounted` true already -- both `ClaudeConfig::Bound` and
-        // `ClaudeConfigEnv::Set` require it -- so nothing that was silent before
-        // starts talking.
-        let mut ignored = false;
+        // the same notice either way.
+        let mut said_about_the_mount = false;
         if let Some(name) = self.host.claude.profile.as_deref()
             && mount.target_mounted() == Some(true)
         {
@@ -4291,23 +4323,12 @@ impl<'a> SessionContext<'a> {
                 _ => None,
             };
             if let Some(notice) =
-                claude_profile_mount_notice(name, requested.as_deref(), mount, claude)
+                claude_profile_mount_notice(name, requested.as_deref(), mount, effective)
             {
-                ignored = matches!(notice, LaunchNotice::ClaudeProfileMountIgnored { .. });
+                said_about_the_mount = true;
                 notices.say(notice);
             }
         }
-        // What the session will actually read, which is the payload's export where
-        // there is one and the probe's classification otherwise. The two differ in
-        // exactly the case [`ClaudeConfigEnv`] exists for: a devcontainer that pins
-        // `CLAUDE_CONFIG_DIR` leaves the probe reporting `Ours` or `Foreign` over a
-        // mount that the export is about to make the effective one. Forwarding a
-        // token there would put a credential that cannot refresh over one that can,
-        // which is the whole reason the `Bound` arm forwards nothing.
-        let effective = match claude {
-            ClaudeConfigEnv::Set => Some(ClaudeConfig::Bound),
-            ClaudeConfigEnv::Leave => seen.config(),
-        };
         match effective {
             Some(ClaudeConfig::Ours) => {}
             Some(ClaudeConfig::Bound) => {
@@ -4321,8 +4342,13 @@ impl<'a> SessionContext<'a> {
                 }
             }
             Some(ClaudeConfig::Foreign) | None => {
+                // Unless the mount already earned a sentence of its own, which
+                // names the profile and the reason it is not in effect. Two
+                // notices for one launch leaves the second contradicting the
+                // first: this one says the configuration is nobody's to forward
+                // into, over a line that has just named the profile mounted there.
                 if let Some(name) = self.host.claude.profile.as_deref()
-                    && !ignored
+                    && !said_about_the_mount
                 {
                     notices.say(LaunchNotice::ClaudeProfileNotForwarded {
                         name: name.to_owned(),
@@ -4394,10 +4420,11 @@ impl<'a> SessionContext<'a> {
 /// Which notice, if any, a bound Claude profile earns from what the probe
 /// actually saw of the mount.
 ///
-/// Called only when `claude_seen`'s [`ClaudeConfig`] already answered
-/// [`ClaudeConfig::Bound`] -- the bind landed, and `CLAUDE_CONFIG_DIR` resolved
-/// to exactly [`crate::flows::provision::CLAUDE_CONFIG_TARGET`]. Two more things
-/// can still be wrong, and neither is visible from that alone:
+/// Called whenever the probe found
+/// [`crate::flows::provision::CLAUDE_CONFIG_TARGET`] itself mounted and this
+/// launch named a profile, whatever [`ClaudeConfig`] was made of the directory
+/// the container resolves. Three things can still be wrong, and none of them is
+/// visible from the bind having landed:
 ///
 /// - **A different profile is actually mounted there.** The mount lands only at
 ///   container creation, so a container created with one profile and later
@@ -4420,8 +4447,11 @@ impl<'a> SessionContext<'a> {
 ///   what leaves the two uids [`ClaudeMountFacts::container_uid`] and
 ///   [`ClaudeMountFacts::target_uid`] apart.
 ///
-/// A usable mount can also sit idle: no export (`ClaudeConfigEnv::Leave`) and
-/// another directory in effect.
+/// - **A usable mount can sit idle**, with another directory in effect and no
+///   export pointing at it. `effective` is what the session will actually read,
+///   and it is also what says whether that is worth a word: on
+///   [`ClaudeConfig::Ours`] the profile's own credential is forwarded as a token,
+///   so `claude` does run as that account and there is nothing to warn about.
 ///
 /// The switch is checked first: a mount pointed at the wrong profile entirely is
 /// the more fundamental problem, and its own uid facts describe whichever
@@ -4439,7 +4469,7 @@ fn claude_profile_mount_notice(
     name: &str,
     requested: Option<&Path>,
     mount: &ClaudeMountFacts,
-    claude: ClaudeConfigEnv,
+    effective: Option<ClaudeConfig>,
 ) -> Option<LaunchNotice> {
     if let (Some(requested), Some(bound)) = (requested, mount.target_source()) {
         let bound_path = Path::new(bound);
@@ -4482,10 +4512,13 @@ fn claude_profile_mount_notice(
     // the variable and the declared path on one whose devcontainer pins
     // `CLAUDE_CONFIG_DIR` -- and on the second kind a mismatch reported from them
     // would name the bind while quoting numbers that have nothing to do with it.
-    // Guarding on `dir()` kept that quiet; it also held the notice back on exactly
-    // the containers that needed it most.
+    //
+    // The uids must actually differ: an unusable bind can equally be a read-only
+    // mount or a mode the owner itself cannot write, and "your uid (1000) does not
+    // own it (uid 1000)" is a sentence that sends the reader after the wrong cause.
     if mount.target_unusable()
         && let (Some(container_uid), Some(dir_uid)) = (mount.container_uid(), mount.target_uid())
+        && container_uid != dir_uid
     {
         return Some(LaunchNotice::ClaudeProfileMountUidMismatch {
             name: name.to_owned(),
@@ -4494,7 +4527,7 @@ fn claude_profile_mount_notice(
             dir_uid,
         });
     }
-    if claude == ClaudeConfigEnv::Leave
+    if matches!(effective, Some(ClaudeConfig::Foreign) | None)
         && !mount.target_unusable()
         && let Some(dir) = mount.dir()
         && dir != provision::CLAUDE_CONFIG_TARGET
@@ -7260,7 +7293,7 @@ impl<'a, 'r, 'l> Launch<'a, 'r, 'l> {
             self.claude_seen.set(ClaudeObservation::remembered(
                 self.provision.remembered_claude(placement.workspace_id()),
                 self.provision
-                    .remembered_claude_mounted(placement.workspace_id()),
+                    .remembered_claude_mount(placement.workspace_id()),
             ));
         }
         // Both names, from the one `placement.title()` and the one gate behind it,
@@ -7870,7 +7903,7 @@ mod tests {
         claude_remembered: Option<ClaudeConfig>,
         /// What those same records say about the profile mount, which is the one
         /// mount fact they carry.
-        claude_remembered_mounted: Option<bool>,
+        claude_remembered_mount: ClaudeMountFacts,
         /// The mount facts the same pass observed, alongside `claude_seen` --
         /// unknown by default, like every fact [`ClaudeMountFacts`] carries.
         claude_mount: ClaudeMountFacts,
@@ -7932,8 +7965,8 @@ mod tests {
             self.claude_remembered
         }
 
-        fn remembered_claude_mounted(&self, _workspace_id: &str) -> Option<bool> {
-            self.claude_remembered_mounted
+        fn remembered_claude_mount(&self, _workspace_id: &str) -> ClaudeMountFacts {
+            self.claude_remembered_mount.clone()
         }
 
         fn last_claude_mount(&self) -> ClaudeMountFacts {
@@ -11603,13 +11636,9 @@ mod tests {
         );
     }
 
-    /// MEASURED against devpod 0.26.1: `dl <ws> recreate --claude-profile X` on a
-    /// docker-compose devcontainer left the profile the container was created with
-    /// bound, because devpod rebuilds the project from the compose override it
-    /// generated at the create. So the one notice that promises "changing profile
-    /// is a `recreate`" must not be the notice such a workspace gets.
-    #[test]
-    fn a_compose_workspace_is_not_promised_a_profile_change_a_recreate_cannot_make() {
+    /// One `devpod up` over a compose workspace with a profile named, for a test
+    /// that only cares what was said about it.
+    fn profile_notices_on_a_compose_workspace(rebuild: Rebuild) -> (PathBuf, Vec<LaunchNotice>) {
         let scene = Scene::new().naming_a_claude_profile("bear", true);
         let override_path = with_compose_override(
             scene
@@ -11630,7 +11659,7 @@ mod tests {
                 workspace_id: "myws",
             },
         )
-        .with_rebuild(Rebuild::Recreate);
+        .with_rebuild(rebuild);
         let mut notices = Vec::new();
 
         let outcome = workspace_up(
@@ -11644,16 +11673,58 @@ mod tests {
             &mut notices,
         );
 
-        assert_eq!(outcome, Ok(UpOutcome::Started));
+        assert_eq!(outcome, Ok(UpOutcome::Started), "{rebuild:?}");
+        (override_path, notices)
+    }
+
+    /// MEASURED against devpod 0.26.1: `dl <ws> recreate --claude-profile X` on a
+    /// docker-compose devcontainer left the profile the container was created with
+    /// bound, because devpod rebuilds the project from the compose override it
+    /// generated at the create. So the one notice that promises "changing profile
+    /// is a `recreate`" must not be the notice such a workspace gets.
+    ///
+    /// Both launches that reach it with a profile named: the `recreate` that was
+    /// measured, and the ordinary reuse that is how `--claude-profile` is most
+    /// often named for the first time and which would otherwise send the reader
+    /// into exactly that recreate.
+    #[test]
+    fn a_compose_workspace_is_not_promised_a_profile_change_a_recreate_cannot_make() {
+        for rebuild in [Rebuild::Recreate, Rebuild::Reuse] {
+            let (override_path, notices) = profile_notices_on_a_compose_workspace(rebuild);
+            assert!(
+                notices.contains(&LaunchNotice::ClaudeProfileMountComposeFrozen {
+                    name: "bear".to_owned(),
+                    override_path,
+                }),
+                "{rebuild:?}: {notices:?}"
+            );
+            assert!(
+                !notices.iter().any(|notice| matches!(
+                    notice,
+                    LaunchNotice::ClaudeProfileBound { .. }
+                        | LaunchNotice::ClaudeProfileMountUnappliable { .. }
+                )),
+                "{rebuild:?}: {notices:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_compose_reset_is_not_told_a_recreate_cannot_move_its_profile_because_nobody_measured_it() {
+        // `--reset` removes the container, and whether devpod regenerates the
+        // compose override from the devcontainer afterwards was never measured. So
+        // it keeps the ordinary line rather than a withdrawal with nothing behind
+        // it.
+        let (_override_path, notices) = profile_notices_on_a_compose_workspace(Rebuild::Reset);
         assert!(
-            notices.contains(&LaunchNotice::ClaudeProfileMountComposeFrozen {
-                name: "bear".to_owned(),
-                override_path,
-            }),
+            !notices.iter().any(|notice| matches!(
+                notice,
+                LaunchNotice::ClaudeProfileMountComposeFrozen { .. }
+            )),
             "{notices:?}"
         );
         assert!(
-            !notices
+            notices
                 .iter()
                 .any(|notice| matches!(notice, LaunchNotice::ClaudeProfileBound { .. })),
             "{notices:?}"
@@ -12829,7 +12900,10 @@ mod tests {
         let mut notices = no_notices();
         let mut said = Vec::new();
         let claude_seen = ClaudeSeen::new();
-        claude_seen.set(ClaudeObservation::remembered(seen, mounted));
+        claude_seen.set(ClaudeObservation::remembered(
+            seen,
+            ClaudeMountFacts::remembered(mounted, None),
+        ));
         let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
         let _ = workspace_ssh(
             &context,
@@ -13012,7 +13086,7 @@ mod tests {
         let claude_seen = ClaudeSeen::new();
         claude_seen.set(ClaudeObservation::remembered(
             Some(ClaudeConfig::Ours),
-            None,
+            ClaudeMountFacts::default(),
         ));
         let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
         workspace_ssh(&context, "myws", command, None, &mut |_| {}, &mut notices)
@@ -13119,9 +13193,9 @@ mod tests {
     }
 
     // =======================================================================
-    // a bound mount's own verification: what the probe saw of it decides
-    // whether the operator hears anything more, once `ClaudeConfig::Bound`
-    // has already established the bind landed and pointed at the target.
+    // a bound mount's own verification: once the probe has found the target
+    // mounted, what else it saw of it decides whether the operator hears
+    // anything more.
     // =======================================================================
 
     /// Only the notices [`claude_profile_mount_notice`] can produce, in order --
@@ -13241,12 +13315,17 @@ mod tests {
     }
 
     #[test]
-    fn a_usable_mount_that_a_bare_attach_reads_past_is_named_ignored_not_unforwarded() {
+    fn a_claude_profile_mount_a_bare_attach_reads_past_is_named_only_where_nothing_else_carries_it()
+    {
         // No command means no `CLAUDE_CONFIG_DIR` export, so a devcontainer that
-        // pins its own directory leaves the bind idle. The probe classifies the pin
-        // as `Foreign` or `Ours`; either way the notice names the mount and the
-        // directory in effect, and `ClaudeProfileNotForwarded` stays out of it.
-        for seen in [ClaudeConfig::Foreign, ClaudeConfig::Ours] {
+        // pins its own directory leaves the bind idle. Whether that is worth a word
+        // depends on what the session gets instead, which is why the token is
+        // asserted beside the notice: on `Foreign` nothing is forwarded and `claude`
+        // runs as whatever the pinned directory holds, which is the failure the
+        // notice names; on `Ours` the profile's own credential goes out as a token,
+        // so `claude` does run as that account and "does not use that profile"
+        // would be false.
+        for (seen, ignored) in [(ClaudeConfig::Foreign, true), (ClaudeConfig::Ours, false)] {
             let scene = Scene::new()
                 .on_a_terminal(&["myws"])
                 .with_running("myws")
@@ -13272,14 +13351,37 @@ mod tests {
             let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
             let opened = workspace_ssh(&context, "myws", None, None, &mut |_| {}, &mut notices);
             assert!(opened.is_ok(), "{seen:?}: {opened:?}");
-            assert_eq!(
-                claude_profile_mount_notices(&notices),
+            let expected = if ignored {
                 vec![LaunchNotice::ClaudeProfileMountIgnored {
                     name: "work".to_owned(),
                     dir: PathBuf::from("/home/dev/.claude-pinned"),
-                }],
+                }]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                claude_profile_mount_notices(&notices),
+                expected,
                 "{seen:?}: {notices:?}"
             );
+
+            let calls = scene.runner.calls_to("devpod");
+            let session = calls
+                .iter()
+                .find(|call| call.args().first().map(String::as_str) == Some("ssh"))
+                .expect("a session");
+            let forwarded = session
+                .invocation()
+                .env
+                .entries
+                .get(claude::TOKEN_VAR)
+                .map(String::as_str);
+            let expected_token = if ignored {
+                None
+            } else {
+                Some("not-a-real-token-from-the-profile")
+            };
+            assert_eq!(forwarded, expected_token, "{seen:?}");
         }
     }
 
@@ -15949,7 +16051,7 @@ mod tests {
         let completion = scene.cache_dir().join("completion.json");
         let mut parts = launching(&scene.runner, &updater, &completion);
         parts.provision.claude_remembered = Some(ClaudeConfig::Ours);
-        parts.provision.claude_remembered_mounted = Some(true);
+        parts.provision.claude_remembered_mount = ClaudeMountFacts::remembered(Some(true), None);
         let mut cold = NeverCold;
         let mut launch = Launch::new(
             &mut parts.context,
@@ -15984,6 +16086,70 @@ mod tests {
                 "export CLAUDE_CONFIG_DIR={}",
                 provision::CLAUDE_CONFIG_TARGET
             ))),
+            "{ssh:?}"
+        );
+    }
+
+    /// The other half of the same fact, and the one a memo carrying only "mounted"
+    /// got wrong on every launch after the first: a bind this container's user
+    /// cannot write must keep the treatment the probe withheld, which is the
+    /// container's own `CLAUDE_CONFIG_DIR` left alone and the profile's token
+    /// forwarded instead.
+    #[test]
+    fn a_warm_attach_over_a_claude_profile_mount_nobody_can_write_forwards_the_token_instead() {
+        let workspace =
+            WorkspaceId::new("octocat", "Hello-World", "master").expect("a safe triple");
+        let scene = Scene::new()
+            .with_running(workspace.value())
+            .naming_a_claude_profile("work", true);
+        let updater = SelfInvocation::new("dl");
+        let completion = scene.cache_dir().join("completion.json");
+        let mut parts = launching(&scene.runner, &updater, &completion);
+        parts.provision.claude_remembered = Some(ClaudeConfig::Ours);
+        parts.provision.claude_remembered_mount =
+            ClaudeMountFacts::remembered(Some(true), Some(false));
+        let mut cold = NeverCold;
+        let mut launch = Launch::new(
+            &mut parts.context,
+            &mut parts.refresh,
+            &mut cold,
+            &parts.provision,
+            &scene.host,
+            &mut parts.chatter,
+            &mut parts.said,
+        );
+
+        let launched = launch.run(
+            "octocat/Hello-World@master",
+            &LaunchVerb::Attach {
+                command: Some(RemoteCommand::argv(&["claude"])),
+            },
+            None,
+        );
+        assert_eq!(
+            launched,
+            Ok(Launched::Session(Session::RemoteExit { status: 0 }))
+        );
+
+        let ssh = scene
+            .runner
+            .calls_to("devpod")
+            .into_iter()
+            .find(|call| call.args().first().map(String::as_str) == Some("ssh"))
+            .expect("a session");
+        assert!(
+            !ssh.argv()
+                .iter()
+                .any(|arg| arg.contains("export CLAUDE_CONFIG_DIR")),
+            "a directory the container cannot write is not where Claude Code is pointed: {ssh:?}"
+        );
+        assert_eq!(
+            ssh.invocation()
+                .env
+                .entries
+                .get(claude::TOKEN_VAR)
+                .map(String::as_str),
+            Some("not-a-real-token-from-the-profile"),
             "{ssh:?}"
         );
     }

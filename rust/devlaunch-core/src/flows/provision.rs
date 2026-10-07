@@ -224,8 +224,9 @@ const CLAUDE_DIR_UID_KEY: &str = "claudediruid";
 /// devcontainer that pins `CLAUDE_CONFIG_DIR` itself -- the case
 /// [`crate::flows::launch::ClaudeConfigEnv`] exists for -- leaves the pair
 /// describing the pinned directory while the bind, the thing the user asked for,
-/// goes unexamined. A profile the container's user cannot write was then neither
-/// reported nor withheld: see [`ClaudeMountFacts::target_unusable`].
+/// goes unexamined. Whether a profile the container's user cannot write is
+/// reported, and whether the bind's own treatment is withheld, are read from this
+/// pair alone: see [`ClaudeMountFacts::target_unusable`].
 ///
 /// Only asked when [`CLAUDE_TARGET_MOUNTED_KEY`] says the bind landed. The path
 /// exists unmounted on any container that ever had one, and its uid would then
@@ -2090,16 +2091,22 @@ impl ClaudeMountFacts {
 }
 
 impl ClaudeMountFacts {
-    /// The one fact a host-side record carries, with every other left unknown.
+    /// The two facts a host-side record carries, with every other left unknown.
     ///
-    /// [`crate::flows::provision::verdict_cache::VerdictCache::remembered_claude_mounted`]
+    /// [`crate::flows::provision::verdict_cache::VerdictCache::remembered_claude_mount`]
     /// is the whole of what a launch that ran no probe can know, and it is enough
-    /// for the decision that needs it: the bind lands only at container creation
-    /// and the memo's anchor expires with the container, so "the target is mounted"
-    /// survives a warm attach where a uid or a source path would be a guess.
-    pub(crate) fn remembered(target_mounted: Option<bool>) -> Self {
+    /// for the decisions that need it: the bind lands only at container creation
+    /// and the memo's anchor expires with the container, so whether the target is
+    /// mounted and whether the container's user can write it both survive a warm
+    /// attach where a uid or a source path would be a guess.
+    ///
+    /// `target_writable` is `Some(false)` or unknown and never `Some(true)`: the
+    /// memo records the unusable bind as the state it is and everything else as
+    /// plain "mounted", so a true here would be a fact nothing wrote down.
+    pub(crate) fn remembered(target_mounted: Option<bool>, target_writable: Option<bool>) -> Self {
         Self {
             target_mounted,
+            target_writable,
             ..Self::default()
         }
     }
@@ -3285,18 +3292,17 @@ fn provision(
         return Ok(Pass {
             provisioning: Provisioning::CachedProvisioned,
             claude: verdicts.remembered_claude(workspace),
-            // No probe ran, so every mount fact but one comes back unknown. The one
-            // is whether the target is mounted at all, which the memo carries under
-            // the same anchor and which a container cannot change without being
+            // No probe ran, so every mount fact but two comes back unknown. The two
+            // are whether the target is mounted at all and whether the container's
+            // user can write it, which the memo carries under the same anchor and
+            // which a container cannot change without being
             // rebuilt. Consequence of the rest: `Switches` carries no profile name,
             // so a relaunch that names a different `--claude-profile` against a
             // warm, trusted cache has nothing here to notice the change with --
             // `claude_profile_mount_notice` never runs, because this pass never
             // ran the probe it needs. That is the headline case this gap costs:
             // a warm restart naming a new profile silently keeps the old mount.
-            claude_mount: ClaudeMountFacts::remembered(
-                verdicts.remembered_claude_mounted(workspace),
-            ),
+            claude_mount: verdicts.remembered_claude_mount(workspace),
         });
     }
 
@@ -3364,7 +3370,13 @@ fn run_the_pass(
             // left the *previous* pass's answer standing. A container recreated with
             // a `~/.claude` mount plus one refused trip kept an `ours` that every
             // warm attach afterwards believed.
-            remember(verdicts, workspace, None, None, observed);
+            remember(
+                verdicts,
+                workspace,
+                None,
+                &ClaudeMountFacts::default(),
+                observed,
+            );
             return refused(workspace, refusal, events);
         }
     };
@@ -3377,7 +3389,7 @@ fn run_the_pass(
         verdicts,
         workspace,
         found.claude,
-        found.claude_mount.target_mounted(),
+        &found.claude_mount,
         observed,
     );
 
@@ -3541,11 +3553,11 @@ fn remember(
     verdicts: Option<&VerdictCache>,
     workspace: &str,
     claude: Option<ClaudeConfig>,
-    mounted: Option<bool>,
+    mount: &ClaudeMountFacts,
     observed: Option<Observed>,
 ) {
     if let (Some(verdicts), Some(observed)) = (verdicts, observed) {
-        verdicts.remember_claude(workspace, claude, mounted, observed);
+        verdicts.remember_claude(workspace, claude, mount, observed);
     }
 }
 
@@ -7252,7 +7264,12 @@ fi
             Some(crate::clients::devpod_home::DevpodHome::at(home.path())),
         );
         let observed = verdicts.observe("myws").expect("an anchor");
-        verdicts.remember_claude("myws", Some(ClaudeConfig::Ours), None, observed);
+        verdicts.remember_claude(
+            "myws",
+            Some(ClaudeConfig::Ours),
+            &ClaudeMountFacts::default(),
+            observed,
+        );
         assert_eq!(
             verdicts.remembered_claude("myws"),
             Some(ClaudeConfig::Ours),
