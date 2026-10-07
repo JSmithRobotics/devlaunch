@@ -1894,8 +1894,8 @@ pub enum ClaudeConfig {
     /// Something is mounted at or under it from outside, and whatever mounted it
     /// owns what is in there. Not `dl`'s own profile bind -- see [`Self::Bound`].
     Foreign,
-    /// The container's effective config directory is exactly
-    /// [`CLAUDE_CONFIG_TARGET`], and the probe found that path itself mounted --
+    /// The container's effective config directory is [`CLAUDE_CONFIG_TARGET`] or
+    /// a path under it, and the probe found that path itself mounted --
     /// `dl` bound a named profile in. Ours in every sense: forward nothing,
     /// because the mounted directory already carries the same credential file the
     /// host has and refreshes it the same way.
@@ -1930,7 +1930,8 @@ impl ClaudeConfig {
     /// is worse than forwarding nothing. See [`crate::clients::claude`].
     ///
     /// [`Self::Bound`] is decided first, and takes both facts it names literally:
-    /// the effective config directory must equal [`CLAUDE_CONFIG_TARGET`] exactly,
+    /// the effective config directory must be [`CLAUDE_CONFIG_TARGET`] or sit under
+    /// it (compared by component, so a sibling sharing the prefix is not under it),
     /// and the probe must have found that path itself mounted. Either missing or
     /// false falls through to the existing [`cfg_dir_is_foreign`] rule, unchanged.
     pub(crate) fn parse(report: &str, host_home: Option<&str>) -> Option<Self> {
@@ -1946,7 +1947,7 @@ impl ClaudeConfig {
         let dir = found.get(CLAUDE_DIR_KEY).map(String::as_str).unwrap_or("");
         let target_mounted =
             found.get(CLAUDE_TARGET_MOUNTED_KEY).map(String::as_str) == Some("yes");
-        if target_mounted && dir == CLAUDE_CONFIG_TARGET {
+        if target_mounted && is_under(dir, CLAUDE_CONFIG_TARGET) {
             return Some(Self::Bound);
         }
         Some(if cfg_dir_is_foreign(home, host_home, mounts) {
@@ -5908,6 +5909,34 @@ fi
             ClaudeConfig::parse(&report, ELSEWHERE),
             Some(ClaudeConfig::Bound)
         );
+    }
+
+    #[test]
+    fn a_claude_config_dir_at_or_under_a_mounted_target_reads_as_bound() {
+        // A profile one level down is still the mounted credential; reading it as
+        // anything else forwards the host token over it. A sibling that merely
+        // shares the string prefix is not under the target.
+        let t = CLAUDE_CONFIG_TARGET;
+        let cases = [
+            (t.to_string(), Some(ClaudeConfig::Bound)),
+            (format!("{t}/"), Some(ClaudeConfig::Bound)),
+            (format!("{t}/bear"), Some(ClaudeConfig::Bound)),
+            (format!("{t}//bear/"), Some(ClaudeConfig::Bound)),
+            (format!("{t}/./bear"), Some(ClaudeConfig::Bound)),
+            (format!("{t}-evil"), Some(ClaudeConfig::Ours)),
+            (format!("{t}-evil/bear"), Some(ClaudeConfig::Ours)),
+            (String::new(), Some(ClaudeConfig::Ours)),
+        ];
+        for (dir, want) in cases {
+            let report = format!(
+                "devlaunch-probe claudehome /home/vscode\n\
+                 devlaunch-probe claudedir {dir}\n\
+                 devlaunch-probe claudescan ok\n\
+                 devlaunch-probe claudemounts \n\
+                 devlaunch-probe claudetargetmounted yes"
+            );
+            assert_eq!(ClaudeConfig::parse(&report, ELSEWHERE), want, "dir {dir:?}");
+        }
     }
 
     #[test]
