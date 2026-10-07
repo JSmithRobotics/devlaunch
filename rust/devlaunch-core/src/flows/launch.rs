@@ -653,10 +653,20 @@ pub enum LaunchNotice {
     /// a refreshed credential has nowhere to land, and the bind gets none of the
     /// treatment a working one earns -- and a silent unusable bind is the state
     /// this whole table exists to stop.
+    ///
+    /// `reading` is the directory this session actually reads when that is *not*
+    /// `target`, and it is what stops the notice overstating itself. A lost
+    /// refresh is the whole of the damage only while the session is on the bind
+    /// the notice names; on a set whose anchor is the unwritable one, on a bare
+    /// attach that carries no export, and on a container that pins its own
+    /// directory, the session is somewhere else entirely and `claude` does not run
+    /// as this profile at all. See
+    /// `a_profile_the_session_is_not_reading_forwards_no_token_and_says_so`.
     ClaudeProfileMountUnwritable {
         name: String,
         target: PathBuf,
         uids_compared: bool,
+        reading: Option<PathBuf>,
     },
     /// A named profile is mounted and usable at the target, but this session
     /// reads a different Claude configuration directory, so the mount goes
@@ -4678,6 +4688,14 @@ impl<'a> SessionContext<'a> {
             ClaudeConfigEnv::Set(_) => Some(ClaudeConfig::Bound),
             ClaudeConfigEnv::Leave => seen.config(),
         };
+        // The same question asked of the path rather than the classification: which
+        // directory `claude` will open. The export where there is one, and the
+        // directory the probe found the container reading where there is not --
+        // which is the half a bare attach has, since it carries no export at all.
+        let reading = match &claude {
+            ClaudeConfigEnv::Set(dir) => Some(dir.as_str()),
+            ClaudeConfigEnv::Leave => mount.dir(),
+        };
         // Said for the bind itself, not from inside whichever arm below claims the
         // session. A devcontainer that pins `CLAUDE_CONFIG_DIR` leaves the probe
         // classifying the pinned directory, and the bind the user asked for earns
@@ -4699,7 +4717,7 @@ impl<'a> SessionContext<'a> {
                 _ => None,
             };
             if let Some(notice) =
-                claude_profile_mount_notice(name, requested.as_deref(), mount, effective)
+                claude_profile_mount_notice(name, requested.as_deref(), mount, effective, reading)
             {
                 said_the_mount_is_idle =
                     matches!(notice, LaunchNotice::ClaudeProfileMountIgnored { .. });
@@ -4719,12 +4737,25 @@ impl<'a> SessionContext<'a> {
                 // unwritable bind ([`ClaudeConfigEnv::from_mount`]): the session
                 // reads that profile's own directory, and the token is what makes
                 // the account it authenticates as the same one.
-                let switched_to_unwritable =
+                //
+                // Which is the whole of the licence, and `reading` is what holds it
+                // to that: a profile's token is forwarded only where the directory
+                // this session opens is that profile's own. Three ways it is not --
+                // a bare attach, which builds no payload and so exports nothing; a
+                // set whose anchor is itself unwritable, which `from_mount`
+                // short-circuits on before it reaches the set arm; and a probe that
+                // could not name the directory -- and each would otherwise pair one
+                // account's live token with another account's bind.
+                let unwritable = match &claude {
+                    ClaudeConfigEnv::Set(dir) => mount.bind_unwritable(dir),
+                    ClaudeConfigEnv::Leave => mount.target_unusable(),
+                };
+                let another_profiles_directory =
                     self.host.claude.selected_profile().is_some_and(|name| {
                         bound_profiles(mount).any(|bound| bound == name)
-                            && mount.bind_unwritable(&profile_target(name))
+                            && reading.is_none_or(|dir| dir != profile_target(name))
                     });
-                if !mount.target_unusable() && !switched_to_unwritable {
+                if !unwritable || another_profiles_directory {
                     return Ok(None);
                 }
             }
@@ -4859,7 +4890,13 @@ fn claude_profile_mount_notice(
     requested: Option<&Path>,
     mount: &ClaudeMountFacts,
     effective: Option<ClaudeConfig>,
+    reading: Option<&str>,
 ) -> Option<LaunchNotice> {
+    // The directory this session ends up on, which decides how much of the damage
+    // an unwritable bind is: a lost refresh where the session is on that bind, and
+    // a different account's directory where it is not. `None` is the probe not
+    // saying, which leaves the claim the notice made before this was carried.
+    let read_instead = |target: &str| reading.filter(|dir| *dir != target).map(PathBuf::from);
     // A container that bound a set answers a different question first, and the
     // arms below cannot answer it: with one directory per profile, "is the profile
     // this launch named reachable here" is about which binds exist, not about
@@ -4889,6 +4926,7 @@ fn claude_profile_mount_notice(
                     name: name.to_owned(),
                     target: PathBuf::from(&bind),
                     uids_compared: false,
+                    reading: read_instead(&bind),
                 }
             });
         }
@@ -4962,6 +5000,7 @@ fn claude_profile_mount_notice(
                 name: name.to_owned(),
                 target: PathBuf::from(mount.target_anchor()),
                 uids_compared: matches!(uids, (Some(_), Some(_))),
+                reading: read_instead(mount.target_anchor()),
             },
         });
     }
@@ -11031,7 +11070,13 @@ mod tests {
             ClaudeConfigEnv::Set(target.to_owned())
         );
         assert_eq!(
-            claude_profile_mount_notice("bear", None, &facts, Some(ClaudeConfig::Bound)),
+            claude_profile_mount_notice(
+                "bear",
+                None,
+                &facts,
+                Some(ClaudeConfig::Bound),
+                Some(target)
+            ),
             None,
             "nothing is wrong with this container"
         );
@@ -11065,17 +11110,55 @@ mod tests {
             ClaudeConfigEnv::Set(work.clone())
         );
         assert_eq!(
-            claude_profile_mount_notice("work", None, &facts, Some(ClaudeConfig::Bound)),
+            claude_profile_mount_notice(
+                "work",
+                None,
+                &facts,
+                Some(ClaudeConfig::Bound),
+                Some(work.as_str()),
+            ),
             Some(LaunchNotice::ClaudeProfileMountUnwritable {
                 name: "work".to_owned(),
                 target: PathBuf::from(&work),
                 uids_compared: false,
+                reading: None,
             })
         );
         assert_eq!(
             ClaudeConfigEnv::from_mount(&facts, Some("bear")),
             ClaudeConfigEnv::Set(bear),
             "the writable one is unaffected"
+        );
+    }
+
+    #[test]
+    fn an_unwritable_bind_the_container_pins_away_from_names_what_is_read_instead() {
+        // `Ours`: the container pins a `CLAUDE_CONFIG_DIR` of its own, so the bind
+        // is read by nobody and the profile's credential travels as a token
+        // instead. The lost refresh is still true of the bind; "this session still
+        // reads that profile" is not, and that is the sentence `reading` picks.
+        let facts = ClaudeMountFacts::synthetic(
+            Some(true),
+            Some("/host/me/.claude-profiles/work"),
+            Some(false),
+            Some(1000),
+            Some(1000),
+        )
+        .with_dir("/home/dev/.claude-pinned");
+        assert_eq!(
+            claude_profile_mount_notice(
+                "work",
+                None,
+                &facts,
+                Some(ClaudeConfig::Ours),
+                Some("/home/dev/.claude-pinned"),
+            ),
+            Some(LaunchNotice::ClaudeProfileMountUnwritable {
+                name: "work".to_owned(),
+                target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
+                uids_compared: true,
+                reading: Some(PathBuf::from("/home/dev/.claude-pinned")),
+            })
         );
     }
 
@@ -11097,23 +11180,42 @@ mod tests {
         .with_binds(&[&bear, &format!("{target}/work")])
         .with_dir(&bear);
         assert_eq!(
-            claude_profile_mount_notice("otter", None, &facts, Some(ClaudeConfig::Ours)),
+            claude_profile_mount_notice(
+                "otter",
+                None,
+                &facts,
+                Some(ClaudeConfig::Ours),
+                Some(&bear)
+            ),
             Some(LaunchNotice::ClaudeProfileNotInBoundSet {
                 name: "otter".to_owned(),
                 bound: vec!["bear".to_owned(), "work".to_owned()],
             })
         );
         assert_eq!(
-            claude_profile_mount_notice("work", None, &facts, Some(ClaudeConfig::Bound)),
+            claude_profile_mount_notice(
+                "work",
+                None,
+                &facts,
+                Some(ClaudeConfig::Bound),
+                Some(&bear)
+            ),
             None,
             "the facts describe bear's bind, not work's"
         );
         assert_eq!(
-            claude_profile_mount_notice("bear", None, &facts, Some(ClaudeConfig::Bound)),
+            claude_profile_mount_notice(
+                "bear",
+                None,
+                &facts,
+                Some(ClaudeConfig::Bound),
+                Some(&bear)
+            ),
             Some(LaunchNotice::ClaudeProfileMountUnwritable {
                 name: "bear".to_owned(),
                 target: PathBuf::from(&bear),
                 uids_compared: true,
+                reading: None,
             }),
             "a bind this launch does read is still examined, and named by its own path"
         );
@@ -14043,6 +14145,7 @@ mod tests {
                 name: name.to_owned(),
                 target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
                 uids_compared,
+                reading: None,
             };
         let mismatch = |name: &str| LaunchNotice::ClaudeProfileMountUidMismatch {
             name: name.to_owned(),
@@ -14243,10 +14346,23 @@ mod tests {
         // property: the export names the same profile the forwarded credential
         // authenticates as, so no session writes one account's transcripts,
         // `.claude.json` or `settings.local.json` through another's bind.
+        //
+        // Every classification, because the export is what decides here and it
+        // overrides all three alike: a container that pins its own directory is
+        // pointed off it by the same `CLAUDE_CONFIG_DIR` a writable set bind would
+        // get, so `Foreign` -- which forwards nothing when nothing is exported --
+        // forwards this profile's token too, and the pair stays the property.
         let target = provision::CLAUDE_CONFIG_TARGET;
         let bear = format!("{target}/bear");
         let work = format!("{target}/work");
-        for writable in [false, true] {
+        for (seen, writable) in [
+            ClaudeConfig::Bound,
+            ClaudeConfig::Foreign,
+            ClaudeConfig::Ours,
+        ]
+        .into_iter()
+        .flat_map(|seen| [false, true].map(|writable| (seen, writable)))
+        {
             let scene = Scene::new()
                 .with_running("myws")
                 .naming_a_claude_profile("work", true);
@@ -14259,9 +14375,8 @@ mod tests {
             if !writable {
                 mount = mount.with_unwritable_binds(&[&work]);
             }
-            let (opened, notices) =
-                a_session_on_someone_elses_claude(&scene, Some(ClaudeConfig::Bound), mount);
-            assert!(opened.is_ok(), "{writable}: {opened:?}");
+            let (opened, notices) = a_session_on_someone_elses_claude(&scene, Some(seen), mount);
+            assert!(opened.is_ok(), "{seen:?}/{writable}: {opened:?}");
 
             let expected_notices = if writable {
                 Vec::new()
@@ -14270,12 +14385,13 @@ mod tests {
                     name: "work".to_owned(),
                     target: PathBuf::from(&work),
                     uids_compared: false,
+                    reading: None,
                 }]
             };
             assert_eq!(
                 claude_profile_mount_notices(&notices),
                 expected_notices,
-                "{writable}: {notices:?}"
+                "{seen:?}/{writable}: {notices:?}"
             );
 
             let calls = scene.runner.calls_to("devpod");
@@ -14288,7 +14404,7 @@ mod tests {
                     .args()
                     .iter()
                     .any(|arg| arg.contains(&format!("export CLAUDE_CONFIG_DIR={work};"))),
-                "{writable}: {:?}",
+                "{seen:?}/{writable}: {:?}",
                 session.args()
             );
             let forwarded = session
@@ -14305,7 +14421,106 @@ mod tests {
             } else {
                 Some("not-a-real-token-from-the-profile")
             };
-            assert_eq!(forwarded, expected_token, "{writable}");
+            assert_eq!(forwarded, expected_token, "{seen:?}/{writable}");
+        }
+    }
+
+    #[test]
+    fn a_profile_the_session_is_not_reading_forwards_no_token_and_says_so() {
+        // A profile's token is what makes the session run as that account, and it
+        // is right only while `CLAUDE_CONFIG_DIR` names that profile's own bind.
+        // Three ways it does not, each of which would otherwise hand one account's
+        // live access token to a session reading another account's directory --
+        // either persisting the first's transcripts and history through the
+        // second's bind, or running under the second's credential with the first's
+        // token loose in the environment.
+        //
+        // A bare attach builds no payload, so nothing exports anything and the
+        // session stays on the anchor. An unwritable *anchor* takes the same route
+        // for a different reason: `ClaudeConfigEnv::from_mount` short-circuits on
+        // it before it reaches the set arm, so again nothing is exported.
+        //
+        // The notice is asserted beside the token because the two are the pair:
+        // the bind is still unwritable and still worth saying, and what it must
+        // not say is that this session reads it.
+        let target = provision::CLAUDE_CONFIG_TARGET;
+        let bear = format!("{target}/bear");
+        let work = format!("{target}/work");
+        for (row, bare, anchor_writable) in [
+            ("bare attach, writable anchor", true, true),
+            ("a command, unwritable anchor", false, false),
+            ("bare attach, unwritable anchor", true, false),
+        ] {
+            let scene = Scene::new()
+                .with_running("myws")
+                .naming_a_claude_profile("work", true);
+            let unwritable: Vec<&str> = if anchor_writable {
+                vec![&work]
+            } else {
+                vec![&bear, &work]
+            };
+            let mount = ClaudeMountFacts::synthetic(
+                Some(true),
+                None,
+                Some(anchor_writable),
+                Some(1000),
+                Some(1000),
+            )
+            .with_binds(&[&bear, &work])
+            .with_dir(&bear)
+            .with_unwritable_binds(&unwritable);
+            let token = HostToken::new();
+            let mut notices = Vec::new();
+            let claude_seen = ClaudeSeen::new();
+            claude_seen.set(ClaudeObservation::from_pass(
+                Some(ClaudeConfig::Bound),
+                mount,
+            ));
+            let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
+            let command = RemoteCommand::argv(&["claude"]);
+            let opened = workspace_ssh(
+                &context,
+                "myws",
+                (!bare).then_some(&command),
+                None,
+                &mut |_| {},
+                &mut notices,
+            );
+            assert!(opened.is_ok(), "{row}: {opened:?}");
+            assert_eq!(
+                claude_profile_mount_notices(&notices),
+                vec![LaunchNotice::ClaudeProfileMountUnwritable {
+                    name: "work".to_owned(),
+                    target: PathBuf::from(&work),
+                    uids_compared: false,
+                    reading: Some(PathBuf::from(&bear)),
+                }],
+                "{row}: {notices:?}"
+            );
+
+            let calls = scene.runner.calls_to("devpod");
+            let session = calls
+                .iter()
+                .find(|call| call.args().first().map(String::as_str) == Some("ssh"))
+                .expect("a session");
+            assert!(
+                !session
+                    .args()
+                    .iter()
+                    .any(|arg| arg.contains("CLAUDE_CONFIG_DIR")),
+                "{row}: {:?}",
+                session.args()
+            );
+            assert_eq!(
+                session
+                    .invocation()
+                    .env
+                    .entries
+                    .get(claude::TOKEN_VAR)
+                    .map(String::as_str),
+                None,
+                "{row}"
+            );
         }
     }
 

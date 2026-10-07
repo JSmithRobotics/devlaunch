@@ -3202,13 +3202,23 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             name,
             target,
             uids_compared,
+            reading,
         } => format!(
             "Claude profile {}: {} is bound in, but this container's user cannot write to it, so \
-             a refreshed Claude login cannot be saved. That is the whole of it: this session \
-             still reads that profile and runs as it, unless this container's own Claude \
-             configuration is one dl does not forward into, which gets its own notice. {}",
+             a refreshed Claude login cannot be saved. {} {}",
             python_repr(name),
             target.display(),
+            match reading {
+                Some(dir) => format!(
+                    "And this session reads {} rather than that bind, so `claude` here does not \
+                     run as that profile at all.",
+                    dir.display()
+                ),
+                None => "That is the whole of it: this session still reads that profile and runs \
+                         as it, unless this container's own Claude configuration is one dl does \
+                         not forward into, which gets its own notice."
+                    .to_owned(),
+            },
             if *uids_compared {
                 "A read-only mount, or a mode the directory's own owner cannot write, is what is \
                  left once the uids match."
@@ -6178,6 +6188,7 @@ mod tests {
             name: "bear".to_owned(),
             target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
             uids_compared: true,
+            reading: None,
         });
         assert_eq!(
             line,
@@ -6199,6 +6210,7 @@ mod tests {
             name: "bear".to_owned(),
             target: std::path::PathBuf::from("/var/tmp/devlaunch-claude"),
             uids_compared: false,
+            reading: None,
         });
         assert_eq!(
             line,
@@ -6209,6 +6221,28 @@ mod tests {
                  as it, unless this container's own Claude configuration is one dl does not \
                  forward into, which gets its own notice. This session did not read the \
                  directory's owner, so what blocks the write is not known here; \
+                 `dl <workspace> up` looks again."
+                    .to_owned()
+            )
+        );
+
+        // And the scene the first three do not cover: the bind is unwritable and
+        // the session is not on it, so the lost refresh is the lesser half and
+        // "still reads that profile" would be the false half.
+        let line = launch_notice(&LaunchNotice::ClaudeProfileMountUnwritable {
+            name: "bear".to_owned(),
+            target: std::path::PathBuf::from("/var/tmp/devlaunch-claude/bear"),
+            uids_compared: false,
+            reading: Some(std::path::PathBuf::from("/var/tmp/devlaunch-claude/work")),
+        });
+        assert_eq!(
+            line,
+            Some(
+                "Claude profile 'bear': /var/tmp/devlaunch-claude/bear is bound in, but this \
+                 container's user cannot write to it, so a refreshed Claude login cannot be \
+                 saved. And this session reads /var/tmp/devlaunch-claude/work rather than that \
+                 bind, so `claude` here does not run as that profile at all. This session did \
+                 not read the directory's owner, so what blocks the write is not known here; \
                  `dl <workspace> up` looks again."
                     .to_owned()
             )

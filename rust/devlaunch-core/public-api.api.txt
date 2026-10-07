@@ -72,6 +72,7 @@ pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnappliable::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable::name: alloc::string::String
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable::reading: core::option::Option<std::path::PathBuf>
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable::target: std::path::PathBuf
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountUnwritable::uids_compared: bool
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileNotForwarded
@@ -719,6 +720,7 @@ pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnappliable::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable::name: alloc::string::String
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable::reading: core::option::Option<std::path::PathBuf>
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable::target: std::path::PathBuf
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountUnwritable::uids_compared: bool
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileNotForwarded
