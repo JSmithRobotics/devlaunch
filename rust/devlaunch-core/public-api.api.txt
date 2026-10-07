@@ -53,6 +53,9 @@ pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::extra_binds_capped: b
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::extra_binds_refused: bool
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileBound::source: std::path::PathBuf
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountIgnored
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountIgnored::dir: std::path::PathBuf
+pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountIgnored::name: alloc::string::String
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountSwitched
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountSwitched::bound: std::path::PathBuf
 pub devlaunch_core::api::LaunchNotice::ClaudeProfileMountSwitched::name: alloc::string::String
@@ -637,6 +640,9 @@ pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::extra_binds
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::extra_binds_refused: bool
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileBound::source: std::path::PathBuf
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountIgnored
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountIgnored::dir: std::path::PathBuf
+pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountIgnored::name: alloc::string::String
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountSwitched
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountSwitched::bound: std::path::PathBuf
 pub devlaunch_core::flows::launch::LaunchNotice::ClaudeProfileMountSwitched::name: alloc::string::String

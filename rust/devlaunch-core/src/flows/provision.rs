@@ -2128,6 +2128,11 @@ impl ClaudeMountFacts {
             target_uid,
         }
     }
+
+    pub(crate) fn with_dir(mut self, dir: &str) -> Self {
+        self.dir = Some(dir.to_owned());
+        self
+    }
 }
 
 /// One of the tri-state literals a probe fact travels as, read from a report's

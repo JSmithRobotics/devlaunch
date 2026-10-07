@@ -3194,6 +3194,14 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
             python_repr(name),
             target.display()
         ),
+        LaunchNotice::ClaudeProfileMountIgnored { name, dir } => format!(
+            "Claude profile {}: it is mounted in this container, but this session reads {} \
+             instead, so `claude` here does not use that profile. A command run through \
+             `dl <workspace> -- ...` sets CLAUDE_CONFIG_DIR itself; an interactive attach \
+             does not.",
+            python_repr(name),
+            dir.display()
+        ),
         // warning: the bind landed, but a different profile's directory is actually
         // mounted there -- a container created with one profile, later launched with
         // a different name, and a `--mount` that only lands at creation.

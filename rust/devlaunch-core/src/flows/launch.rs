@@ -635,6 +635,14 @@ pub enum LaunchNotice {
         container_uid: u32,
         dir_uid: u32,
     },
+    /// A named profile is mounted and usable at the target, but this session
+    /// reads a different Claude configuration directory, so the mount goes
+    /// unused.
+    ///
+    /// `dir` is the directory the probe saw in effect. Said only where this
+    /// launch's command carries no `CLAUDE_CONFIG_DIR` export of its own, which
+    /// is the one place a bound mount can sit idle.
+    ClaudeProfileMountIgnored { name: String, dir: PathBuf },
     /// A named profile was bound in, but the probe found a *different* source
     /// mounted at the target than the one this launch asked to bind.
     ///
@@ -4236,6 +4244,7 @@ impl<'a> SessionContext<'a> {
         // arm had `target_mounted` true already -- both `ClaudeConfig::Bound` and
         // `ClaudeConfigEnv::Set` require it -- so nothing that was silent before
         // starts talking.
+        let mut ignored = false;
         if let Some(name) = self.host.claude.profile.as_deref()
             && mount.target_mounted() == Some(true)
         {
@@ -4243,7 +4252,10 @@ impl<'a> SessionContext<'a> {
                 ClaudeProfileMount::Bound { source, .. } => Some(source),
                 _ => None,
             };
-            if let Some(notice) = claude_profile_mount_notice(name, requested.as_deref(), mount) {
+            if let Some(notice) =
+                claude_profile_mount_notice(name, requested.as_deref(), mount, claude)
+            {
+                ignored = matches!(notice, LaunchNotice::ClaudeProfileMountIgnored { .. });
                 notices.say(notice);
             }
         }
@@ -4271,7 +4283,9 @@ impl<'a> SessionContext<'a> {
                 }
             }
             Some(ClaudeConfig::Foreign) | None => {
-                if let Some(name) = self.host.claude.profile.as_deref() {
+                if let Some(name) = self.host.claude.profile.as_deref()
+                    && !ignored
+                {
                     notices.say(LaunchNotice::ClaudeProfileNotForwarded {
                         name: name.to_owned(),
                     });
@@ -4368,6 +4382,9 @@ impl<'a> SessionContext<'a> {
 ///   what leaves the two uids [`ClaudeMountFacts::container_uid`] and
 ///   [`ClaudeMountFacts::target_uid`] apart.
 ///
+/// A usable mount can also sit idle: no export (`ClaudeConfigEnv::Leave`) and
+/// another directory in effect.
+///
 /// The switch is checked first: a mount pointed at the wrong profile entirely is
 /// the more fundamental problem, and its own uid facts describe whichever
 /// profile is actually there rather than the one asked for, which would be a
@@ -4384,6 +4401,7 @@ fn claude_profile_mount_notice(
     name: &str,
     requested: Option<&Path>,
     mount: &ClaudeMountFacts,
+    claude: ClaudeConfigEnv,
 ) -> Option<LaunchNotice> {
     if let (Some(requested), Some(bound)) = (requested, mount.target_source()) {
         let bound_path = Path::new(bound);
@@ -4436,6 +4454,16 @@ fn claude_profile_mount_notice(
             target: PathBuf::from(provision::CLAUDE_CONFIG_TARGET),
             container_uid,
             dir_uid,
+        });
+    }
+    if claude == ClaudeConfigEnv::Leave
+        && !mount.target_unusable()
+        && let Some(dir) = mount.dir()
+        && dir != provision::CLAUDE_CONFIG_TARGET
+    {
+        return Some(LaunchNotice::ClaudeProfileMountIgnored {
+            name: name.to_owned(),
+            dir: PathBuf::from(dir),
         });
     }
     None
@@ -13012,6 +13040,7 @@ mod tests {
                     LaunchNotice::ClaudeProfileNotForwarded { .. }
                         | LaunchNotice::ClaudeProfileMountUidMismatch { .. }
                         | LaunchNotice::ClaudeProfileMountSwitched { .. }
+                        | LaunchNotice::ClaudeProfileMountIgnored { .. }
                 )
             })
             .cloned()
@@ -13111,6 +13140,49 @@ mod tests {
                     .any(|argument| argument.contains("CLAUDE_CONFIG_DIR")),
                 "{seen:?}: {:?}",
                 call.invocation().argv(),
+            );
+        }
+    }
+
+    #[test]
+    fn a_usable_mount_that_a_bare_attach_reads_past_is_named_ignored_not_unforwarded() {
+        // No command means no `CLAUDE_CONFIG_DIR` export, so a devcontainer that
+        // pins its own directory leaves the bind idle. The probe classifies the pin
+        // as `Foreign` or `Ours`; either way the notice names the mount and the
+        // directory in effect, and `ClaudeProfileNotForwarded` stays out of it.
+        for seen in [ClaudeConfig::Foreign, ClaudeConfig::Ours] {
+            let scene = Scene::new()
+                .on_a_terminal(&["myws"])
+                .with_running("myws")
+                .naming_a_claude_profile("work", true);
+            let source = scene
+                .host
+                .claude_profiles_root
+                .clone()
+                .unwrap()
+                .join("work");
+            let mount = ClaudeMountFacts::synthetic(
+                Some(true),
+                Some(source.to_str().expect("a utf-8 fixture path")),
+                Some(true),
+                Some(1000),
+                Some(1000),
+            )
+            .with_dir("/home/dev/.claude-pinned");
+            let token = HostToken::new();
+            let mut notices = Vec::new();
+            let claude_seen = ClaudeSeen::new();
+            claude_seen.set(ClaudeObservation::from_pass(Some(seen), mount));
+            let context = SessionContext::new(&scene.runner, &scene.host, &token, &claude_seen);
+            let opened = workspace_ssh(&context, "myws", None, None, &mut |_| {}, &mut notices);
+            assert!(opened.is_ok(), "{seen:?}: {opened:?}");
+            assert_eq!(
+                claude_profile_mount_notices(&notices),
+                vec![LaunchNotice::ClaudeProfileMountIgnored {
+                    name: "work".to_owned(),
+                    dir: PathBuf::from("/home/dev/.claude-pinned"),
+                }],
+                "{seen:?}: {notices:?}"
             );
         }
     }
