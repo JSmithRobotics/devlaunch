@@ -213,8 +213,12 @@ fn run(argv: &[String]) -> i32 {
         interactive::Collected::Launch(parsed, boot) => (*parsed, boot),
         // 130, the code a Ctrl-C at the prompt editor ends with, because a cancel
         // in a picker is the same request made with a different key.
-        interactive::Collected::Cancelled => {
-            eprintln!("aid: cancelled; the background boot was stopped and nothing launched.");
+        interactive::Collected::Cancelled { boot_stopped } => {
+            if boot_stopped {
+                eprintln!("aid: cancelled; the background boot was stopped and nothing launched.");
+            } else {
+                eprintln!("aid: cancelled; nothing launched.");
+            }
             return 130;
         }
     };

@@ -255,7 +255,8 @@ workspace so that the warm calls after the first get them too. The mount itself
 only a rebuild can change. Writability is not like that: a bind reflects the host
 directory's owner and mode live, so a `chown` or `chmod` on the host profile is in
 effect in the container at once, while the answer written down beside the
-workspace catches up only on the next `up`. A workspace created
+workspace catches up only on the next pass after a start, which on a running
+workspace means `dl <ws> restart`. A workspace created
 before this existed learns it on its next `up`. When it fires, no token
 is forwarded: the mounted credential refreshes itself and a forwarded one cannot,
 so putting one over the other would be a downgrade.

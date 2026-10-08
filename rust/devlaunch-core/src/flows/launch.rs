@@ -19777,6 +19777,10 @@ mod tests {
                 "ssh".to_owned()
             ]
         );
+        // The start is a real one, so the provisioning pass runs after it rather
+        // than taking the trusted-marker shortcut a `TopUp` takes. The notice that
+        // names `restart` as the verb that looks again rests on this.
+        assert_eq!(parts.provision.occasions(), vec![PassOccasion::AfterUp]);
     }
 
     #[test]

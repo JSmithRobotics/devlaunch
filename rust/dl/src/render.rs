@@ -3249,7 +3249,7 @@ pub(crate) fn launch_notice(notice: &LaunchNotice) -> Option<String> {
                  left once the uids match."
             } else {
                 "This session did not read the directory's owner, so what blocks the write is not \
-                 known here; `dl <workspace> restart` looks again."
+                 known here; `dl <workspace> restart` looks again (it stops the container)."
             }
         ),
         LaunchNotice::ClaudeProfileMountIgnored { name, dir } => format!(
@@ -6246,7 +6246,8 @@ mod tests {
                  saved. That is the whole of it: this profile's own login travels with this \
                  session, so `claude` here runs as it. This session did not read the \
                  directory's owner, so what blocks the write is not known here; \
-                 `dl <workspace> restart` looks again."
+                 `dl <workspace> restart` looks again (it stops the \
+                 container)."
                     .to_owned()
             )
         );
@@ -6269,7 +6270,8 @@ mod tests {
                  saved. And this session reads /var/tmp/devlaunch-claude/work rather than that \
                  bind, so `claude` here does not run as that profile at all. This session did \
                  not read the directory's owner, so what blocks the write is not known here; \
-                 `dl <workspace> restart` looks again."
+                 `dl <workspace> restart` looks again (it stops the \
+                 container)."
                     .to_owned()
             )
         );
@@ -6316,7 +6318,8 @@ mod tests {
                  saved. And nothing here says which Claude configuration directory this session \
                  opens, so no login was forwarded into it: `claude` runs as whatever that \
                  directory already holds. This session did not read the directory's owner, so \
-                 what blocks the write is not known here; `dl <workspace> restart` looks again."
+                 what blocks the write is not known here; `dl <workspace> restart` looks \
+                 again (it stops the container)."
                     .to_owned()
             )
         );

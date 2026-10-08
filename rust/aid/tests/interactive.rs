@@ -718,6 +718,47 @@ fn the_boot_runs_while_the_prompt_is_still_being_typed() {
 }
 
 #[test]
+fn a_rebuild_line_boots_nothing_until_the_prompt_is_submitted() {
+    // The boot exists to have a container ready by the time the prompt is
+    // submitted, and a rebuild destroys exactly that container. So the editor
+    // opens with nothing booting, and the only `devpod up` of the run is the
+    // foreground one the submitted line asks for, carrying the rebuild flag.
+    for (argv, flag) in [
+        (vec![MAIN, "--recreate"], "--recreate"),
+        (vec!["--recreate", MAIN], "--recreate"),
+        (vec![MAIN, "--reset"], "--reset"),
+    ] {
+        let world = World::with(&["--stopped"]);
+        let mut session = PtyAid::spawn(&world, &argv, &[]);
+        session.reach_the_editor();
+        // The banner is downstream of the spawn site, so by here a boot would
+        // have been asked for.
+        assert_eq!(
+            ups(&world),
+            Vec::<String>::new(),
+            "{argv:?} booted while the editor was open"
+        );
+        session.send_line("go");
+        assert_eq!(session.wait(), 0);
+        let ups = ups(&world);
+        assert_eq!(ups.len(), 1, "{argv:?} wanted one up, got {ups:?}");
+        assert!(
+            ups[0].contains(flag),
+            "{argv:?} did not send {flag} to up: {ups:?}"
+        );
+    }
+}
+
+/// The `devpod up` calls the world has seen, in order.
+fn ups(world: &World) -> Vec<String> {
+    world
+        .devpod_calls()
+        .into_iter()
+        .filter(|call| call.starts_with("devpod up "))
+        .collect()
+}
+
+#[test]
 fn a_ctrl_c_at_the_editor_tears_the_whole_boot_down() {
     // `tests/interrupt.rs` on the pty. The editor holds the terminal in raw mode,
     // so the Ctrl-C is a byte and no SIGINT is sent: aid itself interrupts the

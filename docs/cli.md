@@ -761,7 +761,9 @@ Remote Control. A value that is missing, empty or starts with `-` is refused too
 
 `aid` with no workspace and no prompt on a terminal asks for up to three settings
 after the workspace picker and before it opens the prompt editor. The workspace
-boots in the background the whole time. A line of flags with no workspace, such as
+boots in the background the whole time, except on a line that rebuilds the
+container (`--recreate` or `--reset`), which boots nothing because the rebuild
+would destroy whatever the boot started. A line of flags with no workspace, such as
 `aid --codex`, is asked the same way.
 
 `aid <workspace>` asks for none of them. A line that names its workspace said what

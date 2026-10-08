@@ -182,9 +182,10 @@ pub(crate) enum Pickers {
 pub(crate) enum Collected {
     /// Launch this line, once the boot beside it, if any, has finished.
     Launch(Box<AidArgs>, Option<BootChild>),
-    /// A picker was cancelled, or Ctrl-C was typed at the prompt editor. The
-    /// boot was stopped and nothing launches.
-    Cancelled,
+    /// A picker was cancelled, or Ctrl-C was typed at the prompt editor. Nothing
+    /// launches, and `boot_stopped` says whether there was a boot to stop: a
+    /// rebuild line spawns none.
+    Cancelled { boot_stopped: bool },
 }
 
 /// The interactive default, as one decision: boot in the background and collect
@@ -230,7 +231,7 @@ pub(crate) fn collect_prompt(
     };
     // Name the pane and the tab now, because the launch that would name them is
     // behind the editor and the editor is where the waiting happens. Deliberately
-    // *after* the boot spawns and before the banner: the boot is what the name is
+    // *after* any boot spawns and before the banner: the boot is what the name is
     // about, and a name written in front of a spawn that failed would be a name for
     // a launch that then runs serially and names itself anyway.
     //
@@ -239,17 +240,18 @@ pub(crate) fn collect_prompt(
     // log is not a title. That gate is also why this is a foreground call rather
     // than something handed to `BootChild`.
     dl::name_before_launch(&parsed.spec);
-    // The pickers come after the boot has started, so the minute they take is
+    // The pickers come after any boot has started, so the minute they take is
     // also spent booting. Nothing they choose reaches the boot: `up` takes no
     // model, and `--claude-profile` is read when the session starts, not at `up`.
     let parsed = match pickers {
         Pickers::Skip => parsed,
         Pickers::Ask => {
             let Some(parsed) = settle(parsed, argv, environment) else {
+                let boot_stopped = boot.is_some();
                 if let Some(boot) = boot {
                     boot.cancel();
                 }
-                return Collected::Cancelled;
+                return Collected::Cancelled { boot_stopped };
             };
             parsed
         }
@@ -260,10 +262,11 @@ pub(crate) fn collect_prompt(
         // The editor holds the terminal in raw mode, so Ctrl-C is a key there as
         // it is in a picker, and ends the run the same way.
         dl::Submission::Cancelled => {
+            let boot_stopped = boot.is_some();
             if let Some(boot) = boot {
                 boot.cancel();
             }
-            Collected::Cancelled
+            Collected::Cancelled { boot_stopped }
         }
     }
 }
