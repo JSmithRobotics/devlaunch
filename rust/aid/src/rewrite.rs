@@ -364,8 +364,8 @@ const SUFFIX_MODIFIERS: &[&str] = &["--force"];
 ///
 /// `--recreate` and `--reset` are here for the same reason and not a weaker one:
 /// dl takes either beside a command, so `aid <ws> fix it --recreate` is "rebuild
-/// the container, then send the agent in", and left out of the peel the flag
-/// became another word of prompt and the container was never rebuilt.
+/// the container, then send the agent in". Unpeeled they are words of prompt like
+/// any other, since aid joins everything after the spec.
 const SUFFIX_OPTIONS: &[&str] = &["--rm", "--recreate", "--reset"];
 
 /// The retired spellings, peeled for one reason: so dl refuses them by name.
@@ -880,12 +880,38 @@ impl Unpicked {
 /// background while the prompt is being typed, so it deliberately carries **no
 /// suffix options**: `--rm` beside `up` is a pair dl refuses by name, `up` hands
 /// over no session for a removal to wait on anyway, and the flag still rides on the
-/// foreground attach line where it means what it means.
+/// foreground attach line where it means what it means. A rebuild flag is dropped
+/// from the leading options for the same reason, and does not reach here at all once
+/// [`rebuilds_the_container`] has stopped the boot from spawning.
 pub(crate) fn build_boot_args(parsed: &AidArgs) -> Vec<String> {
-    let mut args = parsed.dl_options.clone();
+    let mut args: Vec<String> = parsed
+        .dl_options
+        .iter()
+        .filter(|option| !REBUILD_OPTIONS.contains(&option.as_str()))
+        .cloned()
+        .collect();
     args.push(parsed.spec.clone());
     args.push("up".to_owned());
     args
+}
+
+/// The flags that rebuild the container, in either position aid accepts them.
+const REBUILD_OPTIONS: &[&str] = &["--recreate", "--reset"];
+
+/// Whether this line rebuilds the container, so no background boot should run.
+///
+/// A rebuild destroys the container a boot would have started, so the boot is work
+/// thrown away -- a whole create plus a provisioning pass, for a stopped or new
+/// workspace. The leading form is worse than wasteful: `dl --recreate <ws> up` is a
+/// pair dl refuses by name, so the boot can only relay a usage error. Either way the
+/// flag is kept out of [`build_boot_args`] as well, since `up` is not a verb a
+/// rebuild flag may accompany.
+pub(crate) fn rebuilds_the_container(parsed: &AidArgs) -> bool {
+    parsed
+        .dl_options
+        .iter()
+        .chain(parsed.spec_options.iter())
+        .any(|option| REBUILD_OPTIONS.contains(&option.as_str()))
 }
 
 /// Whether Remote Control is on by default, when no flag says.
@@ -2197,9 +2223,8 @@ mod tests {
     #[test]
     fn a_trailing_rebuild_flag_rides_to_dl_rather_than_becoming_prompt() {
         // The positions the flags are actually typed in: `aid <ws> --recreate` and
-        // `aid <ws> <prompt> --recreate`. Outside the peel both fell into the
-        // prompt, so the agent was asked to read `--recreate` and the container was
-        // never rebuilt. Only the leading form worked.
+        // `aid <ws> <prompt> --recreate`. Unpeeled both are prompt words, so the
+        // agent reads the flag as text and the container is never rebuilt.
         for flag in ["--recreate", "--reset"] {
             let bare = parsed(&["owner/repo", flag]);
             assert_eq!(prompt(&bare), "", "{flag}");
@@ -2841,6 +2866,23 @@ mod tests {
         );
         // The peeled pair still rides on the attach line, untouched.
         assert_eq!(chosen.spec_options, ["--autorm", "--force"]);
+    }
+
+    #[test]
+    fn a_rebuild_line_boots_nothing_and_never_sends_the_flag_to_up() {
+        // The boot exists to have a container ready by the time the prompt is
+        // submitted, and a rebuild destroys exactly that container. The leading form
+        // cannot even get that far: `dl --recreate <ws> up` is `ModifierNotAllowed`.
+        for flag in ["--recreate", "--reset"] {
+            let leading = parsed(&[flag, "owner/repo"]);
+            assert!(rebuilds_the_container(&leading), "{flag} leading");
+            assert_eq!(build_boot_args(&leading), ["owner/repo", "up"], "{flag}");
+
+            let trailing = parsed(&["owner/repo", flag]);
+            assert!(rebuilds_the_container(&trailing), "{flag} trailing");
+            assert_eq!(build_boot_args(&trailing), ["owner/repo", "up"], "{flag}");
+        }
+        assert!(!rebuilds_the_container(&parsed(&["owner/repo", "fix it"])));
     }
 
     #[test]

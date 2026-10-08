@@ -462,6 +462,10 @@ Options:
                                      nowhere else and says so, leaving the workspace
                                      standing. To delete one now instead, that is
                                      dl's rm verb: dl <workspace> rm.
+    --recreate, --reset              Passed through to dl: rebuild the container
+                                     (--reset its volumes too) before the agent
+                                     starts. Appendable like --rm, and the prompt
+                                     survives it. Not together, and not with --rm
     --no-remote-control, --no-remote
                                      Start a plain local session. Remote Control is
                                      on by default: claude is started under the

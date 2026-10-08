@@ -582,9 +582,9 @@ fn a_flag_offered_beside_a_workspace_is_one_a_spec_could_have_followed() {
 /// interface and there is no table to derive these two from. The agent flags, which
 /// are a table, are derived.
 ///
-/// aid's `--rm`, `--stop`, `--autorm` and `--force` are absent on purpose: they are
-/// *suffix* flags, peeled off the end of a line, and the script offers nothing after
-/// an aid workspace because everything there is prompt.
+/// aid's `--rm`, `--recreate`, `--reset`, `--stop`, `--autorm` and `--force` are
+/// absent on purpose: they are *suffix* flags, peeled off the end of a line, and the
+/// script offers nothing after an aid workspace because everything there is prompt.
 const AID_FLAGS_BESIDE_THE_AGENTS: [(&str, &str); 3] = [
     ("--help", "aid's own, checked before anything is rewritten"),
     ("-h", "the same"),

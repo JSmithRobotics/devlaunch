@@ -393,17 +393,24 @@ mod tests {
                 "--reset",
             ),
         ] {
-            let command = match family(&verb) {
-                Family::Launch {
-                    verb:
-                        LaunchVerb::Recreate {
-                            command: Some(command),
-                        }
-                        | LaunchVerb::Reset {
-                            command: Some(command),
-                        },
-                    ..
-                } => command,
+            let Family::Launch { verb: mapped, .. } = family(&verb) else {
+                panic!("`{spelling} -- <cmd>` is a rebuild that runs the command")
+            };
+            // Paired with the spelling, so a mapping that sent `reset` to
+            // `Recreate` fails here rather than passing on the other arm.
+            let command = match (&mapped, spelling) {
+                (
+                    LaunchVerb::Recreate {
+                        command: Some(command),
+                    },
+                    "--recreate",
+                )
+                | (
+                    LaunchVerb::Reset {
+                        command: Some(command),
+                    },
+                    "--reset",
+                ) => command,
                 _ => panic!("`{spelling} -- <cmd>` is a rebuild that runs the command"),
             };
             assert_eq!(command.line(), "make test", "{spelling}");

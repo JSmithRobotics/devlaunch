@@ -268,13 +268,14 @@ once: with the two uids when they are what explains it, without them and naming
 no cause when nothing read them, and with the usual "a read-only mount or a mode
 the owner cannot write" when they were read and agree. It is named only where the
 mount's own source is known, because the line names the profile as the thing bound
-there and an unidentified source may be another profile's. Otherwise it gets none
-of the treatment a working bind earns: `dl` adds no export of its own, and the session gets whatever login it
-would have had with nothing bound, which is the named profile's own token unless
-the container's own Claude configuration belongs to somebody else, where `dl`
-forwards nothing over it either way. A
-directory the container cannot write cannot refresh the credential in it, so the
-reason for withholding the token is gone.
+there and an unidentified source may be another profile's.
+
+An unwritable bind also gets none of the treatment a working one earns: `dl` adds
+no export of its own, and the session gets whatever login it would have had with
+nothing bound, which is the named profile's own token unless the container's own
+Claude configuration belongs to somebody else, where `dl` forwards nothing over it
+either way. A directory the container cannot write cannot refresh the credential in
+it, so the reason for withholding the token is gone.
 
 What `dl` does not undo there is the `CLAUDE_CONFIG_DIR` devpod was given at the
 create, which is part of the container's own environment from then on. So on a

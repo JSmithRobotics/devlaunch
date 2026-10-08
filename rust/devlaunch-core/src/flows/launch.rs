@@ -667,9 +667,9 @@ pub enum LaunchNotice {
     /// or a mode the directory's own owner cannot write is what is left. False
     /// means nothing read them -- a warm attach runs no probe, and the memo it
     /// reads carries no uids -- so no cause can be ruled out and none is named.
-    /// Collapsing the two said "once the uids match" on an attach that never
-    /// looked, which is a claim the cold launch of the same workspace can
-    /// contradict outright.
+    /// The two cannot share a wording: "once the uids match" on an attach that
+    /// never looked is a claim the cold launch of the same workspace contradicts
+    /// outright.
     ///
     /// Said rather than skipped because the consequence is the same either way --
     /// a refreshed credential has nowhere to land, and the bind gets none of the
@@ -5205,9 +5205,9 @@ fn claude_profile_mount_notice(
     // equally be a read-only mount or a mode the owner itself cannot write, and
     // "your uid (1000) does not own it (uid 1000)" is a sentence that sends the
     // reader after the wrong cause. So the pair chooses the wording, never whether
-    // there is a notice at all -- an unusable bind the evidence cannot explain is
-    // still an unusable bind, and saying nothing about it is the silence this whole
-    // table exists to end. Unseen uids are their own wording and not the equal one:
+    // there is a notice at all: an unusable bind the evidence cannot explain is
+    // still an unusable bind and still gets one. Unseen uids are their own wording
+    // and not the equal one:
     // a warm attach reads a memo that carries no uids, and "once the uids match"
     // there contradicts the cold launch that printed the mismatch.
     //
@@ -14519,7 +14519,7 @@ mod tests {
                 // names which. Unnamed is not this profile, so nothing travels.
                 "bound, unwritable, source nothing could identify",
                 ClaudeConfig::Bound,
-                (Some(1000), Some(1001)),
+                (None, None),
                 false,
                 vec![],
                 None,

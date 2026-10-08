@@ -192,10 +192,11 @@ pub(crate) enum Collected {
 ///
 /// The flow triggers only when every one of these holds — an agent line (a verb
 /// line starts no agent and has nothing to ask for), an empty prompt (an inline
-/// prompt was the answer already), a terminal on stdin and stdout (a pipe has
-/// nobody typing; `DEVLAUNCH_NO_TTY=1` is the explicit opt-out), and a boot
-/// child that actually spawned (anything less falls back to the serial launch
-/// aid has always been).
+/// prompt was the answer already), and a terminal on stdin and stdout (a pipe has
+/// nobody typing; `DEVLAUNCH_NO_TTY=1` is the explicit opt-out). A spawn that
+/// fails falls back to the serial launch aid has always been; a rebuild line skips
+/// the boot by [`crate::rewrite::rebuilds_the_container`] and keeps the editor,
+/// which is why the editor does not depend on a boot having spawned.
 ///
 /// An empty submission — a bare Enter, or Ctrl-D — leaves the prompt empty,
 /// which is the agent's plain session: the old bare-`aid` behaviour is one
@@ -217,8 +218,15 @@ pub(crate) fn collect_prompt(
     if !promptless_agent || !dl::interactive_terminal() {
         return Collected::Launch(Box::new(parsed), None);
     }
-    let Some(boot) = BootChild::spawn(&crate::rewrite::build_boot_args(&parsed)) else {
-        return Collected::Launch(Box::new(parsed), None);
+    // A rebuild line boots nothing: the foreground `dl <ws> --recreate` destroys
+    // whatever a boot would have started, so the editor runs on its own.
+    let boot = if crate::rewrite::rebuilds_the_container(&parsed) {
+        None
+    } else {
+        match BootChild::spawn(&crate::rewrite::build_boot_args(&parsed)) {
+            Some(boot) => Some(boot),
+            None => return Collected::Launch(Box::new(parsed), None),
+        }
     };
     // Name the pane and the tab now, because the launch that would name them is
     // behind the editor and the editor is where the waiting happens. Deliberately
@@ -238,7 +246,9 @@ pub(crate) fn collect_prompt(
         Pickers::Skip => parsed,
         Pickers::Ask => {
             let Some(parsed) = settle(parsed, argv, environment) else {
-                boot.cancel();
+                if let Some(boot) = boot {
+                    boot.cancel();
+                }
                 return Collected::Cancelled;
             };
             parsed
@@ -246,13 +256,13 @@ pub(crate) fn collect_prompt(
     };
     banner(&parsed);
     match dl::read_prompt() {
-        dl::Submission::Text(typed) => {
-            Collected::Launch(Box::new(parsed.with_prompt(typed)), Some(boot))
-        }
+        dl::Submission::Text(typed) => Collected::Launch(Box::new(parsed.with_prompt(typed)), boot),
         // The editor holds the terminal in raw mode, so Ctrl-C is a key there as
         // it is in a picker, and ends the run the same way.
         dl::Submission::Cancelled => {
-            boot.cancel();
+            if let Some(boot) = boot {
+                boot.cancel();
+            }
             Collected::Cancelled
         }
     }
